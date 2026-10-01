@@ -1,5 +1,5 @@
 #!/bin/bash
-# reelhwaccel/hevchw/module/build.sh [OUTDIR] - builds the HEVCHW relocatable module
+# hevchw/module/build.sh [OUTDIR] - builds the HEVCHW relocatable module
 # (HEVCHW,ffa). Freestanding C and the header in assembler, linked at 0
 # with the header first, turned into a flat binary. A module is loaded
 # anywhere in the RMA, so the build refuses anything that would need

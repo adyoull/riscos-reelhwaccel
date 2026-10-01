@@ -1,0 +1,8 @@
+dist/
+out/
+__pycache__/
+tools/elf2aif/elf2aif
+handoffs/
+*handoff*.md
+*START-HERE*.md
+.DS_Store

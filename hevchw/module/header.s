@@ -2,7 +2,7 @@
 @ The C (hevchw.c) is freestanding: no C library, all SWIs through
 @ hw_swi. Everything here is position independent (offsets from the
 @ module's base); the link checks there are no absolute relocations.
-@ Part of riscos-ffmpeg (reelhwaccel/hevchw/). GPL version 2 or later
+@ Part of riscos-reelhwaccel (hevchw/). GPL version 2 or later
 @ (see COPYING).
 
         .syntax unified
@@ -22,7 +22,7 @@ module_base:
         .word   flags - module_base
 
 title:  .asciz  "HEVCHW"
-help:   .asciz  "HEVCHW\t0.01 (30 Sep 2026) Pi 4 HEVC block tests (riscos-ffmpeg)"
+help:   .asciz  "HEVCHW\t0.01 (30 Sep 2026) Pi 4 HEVC block tests (riscos-reelhwaccel)"
         .balign 4
 flags:  .word   1                               @ 32-bit compatible
 

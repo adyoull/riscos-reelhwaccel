@@ -1,41 +1,68 @@
 # ReelHWAccel - hardware video decoding for RISC OS on the Raspberry Pi
 
-ReelHWAccel is the name for all of riscos-ffmpeg's work on decoding video
-with the Raspberry Pi's own hardware instead of the ARM, for Reel and for
-FFmpeg. It has three parts:
+ReelHWAccel decodes video with the Raspberry Pi's own hardware instead of
+the ARM, for Reel and for FFmpeg on RISC OS (github.com/adyoull/riscos-ffmpeg,
+where it started). It has three parts:
 
 | Part | What it drives | Codecs | Boards |
 |---|---|---|---|
-| `vcdec` | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264, Motion JPEG (and MPEG-2 / VC-1 with the licences on a Pi 1-3) | Pi 1, 2, 3, Zero, 4 |
+| `vcdec` | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264, Motion JPEG (and MPEG-2 / VC-1 with the licences on a Pi 1-3) | Pi 2, 3, 4 (and 1/Zero, though Reel and FFmpeg need ARMv7) |
 | `hevchw` | the Pi 4's HEVC block ("rpivid" on Linux) directly, with the `HEVCHW` module for its registers and interrupt | HEVC (H.265), 8 and 10-bit | Pi 4, 400, CM4 |
 | `hwdec` | one small interface over both: can this codec and size be decoded in hardware, and do it | - | - |
 
-Reel and FFmpeg will only use `hwdec` (`libhwdec`, `hwdec.h`); in FFmpeg
-the decoders will appear as `h264_vchiq` and `hevc_hwdec` (not
-`h264_mmal`, which is FFmpeg's existing decoder for Linux's MMAL
-library).
+Reel and FFmpeg will only use `hwdec` (`libhwdec`, `hwdec.h`), from this
+project's devkit; in FFmpeg the decoders will appear as `h264_vchiq` and
+`hevc_hwdec` (not `h264_mmal`, which is FFmpeg's existing decoder for
+Linux's MMAL library).
 
 ## Where it's got to
 
-- `vcdec`: `tools/vchiqprobe` (the VCHIQ module's SWIs and how BCMSound
-  and BCMVideo use them), `tools/mmalprobe` (the firmware's
-  `ril.video_decode` answers: H.264, MVC, MJPG on a Pi 4) and
-  `tools/mmaldecode` (a whole decode, every picture checked against
-  FFmpeg's). The library comes next, from `mmaldecode`.
-- `hevchw`: `tools/hevcprobe` (the block answers) and `hevchw/` (the
-  HEVCHW module: registers, memory and the interrupt all work from RISC
-  OS). The decoder itself comes after `vcdec`.
-- `hwdec`: not started.
+Nothing here is for everyday use yet: these are the test tools that
+found out how to drive the hardware from RISC OS, each with what it
+showed on a Raspberry Pi 4.
 
-Each test tool has a host test in `tests/host` (run by
-`tests/host/run.sh`) against fakes of the VCHIQ module, the MMAL firmware
-or the hardware.
+- **`tools/vchiqprobe`**: the VCHIQ module's SWIs (VCHIQ 0.14, in the
+  ROM) and how BCMSound and BCMVideo call them.
+- **`tools/mmalprobe`**: the firmware's `ril.video_decode` answers through
+  VCHIQ and MMAL (H.264, MVC and MJPEG on a Pi 4).
+- **`tools/mmaldecode`**: whole H.264 decodes on the VideoCore, every
+  picture checked against FFmpeg's (within rounding: the VideoCore's
+  chroma can be 1 lower). On a Pi 4: 640x360 at 193 pictures a second,
+  426x240 at 333, and 1080p High (with `gpu_mem=128`; at 64 MB the decoder
+  stalls without a word). What it took: physically contiguous buffers,
+  buffers numbered from 1, output buffers only after the decoder's format
+  change, every receive queued as its message arrives, and the 20 input
+  buffers the decoder recommends.
+- **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
+  HEVC block answers, and its registers (30-bit, addresses in 64-byte
+  units), contiguous memory and interrupt (GIC 130, device 34) all work
+  from RISC OS.
+
+Next: the `vcdec` library and Reel's use of it; then the HEVC decoder.
+
+## Building
+
+    ./build.sh                 # every Pi test zip, into dist/
+    tests/host/run.sh          # the host tests
+
+`build.sh` needs GCCSDK GCC 10 (`CROSS=.../arm-riscos-gnueabihf-`),
+`tools/elf2aif` built (`make -C tools/elf2aif GCCSDK_SRC=<gccsdk>`), and
+the host's ffmpeg with libx264 for MMALDecode's clips. The HEVCHW module
+is built with `arm-linux-gnueabihf-gcc` (position independent, no GOT).
+The host tests run each tool as an arm-linux program under a QEMU that
+traps unaligned accesses as RISC OS does (`tests/qemu/build-qemu.sh`),
+against fakes of the VCHIQ module, the MMAL firmware, the firmware
+mailbox and the HEVC block; the fakes behave as the Pi did in each of
+the runs above.
 
 ## Licence
 
-GPL version 2 or later (see `COPYING`), like the rest of riscos-ffmpeg:
-Reel and FFmpeg, which will use it, are GPL already (FFmpeg's build
-includes x264).
+GPL version 2 or later (see `COPYING`). Reel and FFmpeg (riscos-ffmpeg),
+which will use it, are GPL already (FFmpeg's build includes x264).
+
+The build and test helpers come from riscos-ffmpeg: `tools/elf2aif` is
+GCCSDK's elf2aif (GPL v2 or later); `tools/mkrozip.py`,
+`tests/host/fake/kernel.h` and `tests/qemu` are riscos-ffmpeg's.
 
 What it's built from, and how:
 

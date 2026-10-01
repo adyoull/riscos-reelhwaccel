@@ -5,7 +5,7 @@
  *
  * Register offsets and addresses (no code copied): Raspberry Pi Linux's
  * rpivid driver, rpivid_hw.h (GPL-2.0), and device tree, bcm2711*.dtsi.
- * Part of riscos-ffmpeg (reelhwaccel/hevchw/). GPL version 2 or later
+ * Part of riscos-reelhwaccel (hevchw/). GPL version 2 or later
  * (see COPYING).
  */
 #ifndef HWHEVC_HW_H

@@ -43,7 +43,7 @@
  * vchiq-mmal, mmal-msg*.h (GPL-2.0).
  * The VCHIQ SWI conventions from RISC OS's VCHIQ, BCMSound and BCMVideo
  * (see mmalprobe).
- * Part of riscos-ffmpeg. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
  */
 #include <stdarg.h>
 #include <stddef.h>
