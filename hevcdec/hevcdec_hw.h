@@ -2,7 +2,7 @@
  * hevcdec_hw.h - what hevcdec needs from the machine: the HEVC block's
  * registers, its clock, physically contiguous memory, the time. On RISC
  * OS: hevcdec_hw.c; in the host tests: a fake block.
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #ifndef HEVCDEC_HW_H
 #define HEVCDEC_HW_H

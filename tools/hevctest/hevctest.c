@@ -13,7 +13,7 @@
  *      -f frames output frames to use (default 17: the largest DPB, 16, + 1)
  *
  * The trace format: tools/hevctrace/README.md (hevc_trace.c).
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdarg.h>
 #include <stdint.h>
@@ -154,6 +154,7 @@ int probe_main(int argc, char **argv)
     const char *name = NULL;
     int verbose = 0, keep_going = 0, timing = 0, count = 0, nframes = 17, r, i, wrong = 0, done = 0, fatal = 0;
     int flat = 0;                          /* -s: flat scaling lists given where the stream has none */
+    int overran = 0;
     FILE *dump = NULL;                     /* -d: every picture decoded, 8-bit 4:2:0, in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
@@ -294,10 +295,17 @@ int probe_main(int argc, char **argv)
     say("hevcdec: phase 1 waited %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
         st.cs_phase2, st.phase1_retries);
     if (!timing) say("%d checked against FFmpeg: %d wrong\n", done, wrong);
+    if (st.overruns) {
+        say("hevcdec: the block wrote past the end of %u buffers, at most %u bytes past %s (into their guard areas)\n",
+            st.overruns, st.overrun_max, st.overrun_what ? st.overrun_what : "one");
+        overran = 1;
+    } else {
+        say("hevcdec: nothing written past any buffer's end\n");
+    }
 out:
     if (d) hevcdec_close(d);
     {
-        int ok = d && !fatal && !wrong && done == npics && npics > 0;
+        int ok = d && !fatal && !wrong && !overran && done == npics && npics > 0;
         say("\nResult: %s\n", ok ? (timing ? "OK - timed (the pictures weren't checked)" :
                                     "OK - every picture exactly as FFmpeg decodes it")
                                  : "FAILED");
@@ -312,5 +320,28 @@ out:
 }
 
 #ifndef PROBE_TEST
-int main(int argc, char **argv) { return probe_main(argc, argv); }
+#include <signal.h>
+#include <unistd.h>
+#include <kernel.h>
+/* a hardware exception (an abort, an undefined instruction): what RISC OS
+   said, before UnixLib's backtrace */
+static void on_fatal(int sig)
+{
+    const _kernel_oserror *e = _kernel_last_oserror();
+    printf("\nhevctest: signal %d", sig);
+    if (e) printf(": error &%X, %s", (unsigned)e->errnum, e->errmess);
+    printf("\n");
+    fflush(stdout);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+int main(int argc, char **argv)
+{
+    signal(SIGEMT, on_fatal);
+    signal(SIGSEGV, on_fatal);
+    signal(SIGBUS, on_fatal);
+    signal(SIGILL, on_fatal);
+    return probe_main(argc, argv);
+}
 #endif

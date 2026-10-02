@@ -58,7 +58,7 @@ showed on a Raspberry Pi 4.
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
   units), contiguous memory and interrupt (GIC 130, device 34) all work
   from RISC OS.
-- **`hevcdec/`** (0.1.2): the HEVC decoder. A stateless
+- **`hevcdec/`** (0.1.3): the HEVC decoder. A stateless
   decoder, as Linux's: the caller parses the stream (FFmpeg's HEVC
   decoder) and gives each picture as the V4L2 stateless HEVC controls
   (`hevc_ctrls.h`) with its slices; hevcdec builds the block's commands
@@ -77,9 +77,10 @@ showed on a Raspberry Pi 4.
   fakes. **`devkit/`** packs libvcdec, vcdec.h and the patch for
   riscos-ffmpeg (FFmpeg, Reel).
 
-On a Pi 4 (HEVCTest 0.1.1) every picture of every clip comes out
-exactly as FFmpeg decodes it, 1080p at 240 pictures a second, once the
-block's scaling factors are always loaded (hevcdec 0.1.2). Next: output
+On a Pi 4 (HEVCTest 0.1.2) every picture of every clip comes out
+exactly as FFmpeg decodes it, 1080p at 230 pictures a second, now that
+the block's scaling factors are always loaded (hevcdec 0.1.2); 0.1.3
+looks into a crash when hevctest is run again straight away. Next: output
 frames that are quick to read (converting an uncached 1080p frame takes
 29 ms), 10-bit and 4K, and `hevc_hwdec` in FFmpeg and Reel.
 
@@ -106,8 +107,24 @@ the runs above.
 
 ## Licence
 
-GPL version 2 or later (see `COPYING`). Reel and FFmpeg (riscos-ffmpeg),
-which will use it, are GPL already (FFmpeg's build includes x264).
+The GNU GPL version 2 (see `COPYING`), without "or later": the same
+licence as Linux's drivers that ReelHWAccel was made against.
+
+- vcdec is a new implementation over RISC OS's VCHIQ module, with its own
+  MMAL client. That client is based on the MMAL message formats as
+  Linux's vchiq-mmal driver defines them in its headers, because there's
+  no published specification of the protocol. It contains none of the
+  driver's code, but because it used the driver as its reference, it is
+  treated as derived from it, and so has the driver's licence: GPL
+  version 2.
+- hevcdec is the same for the HEVC block: its own code over RISC OS,
+  with Linux's rpivid driver (GPL version 2) as its reference for the
+  block's registers and for what `rpivid_h265.c` expects of the rest of
+  the driver. `rpivid_h265.c` itself is included unchanged, under its
+  own GPL version 2 or later, which allows its use under version 2.
+
+Reel and FFmpeg (riscos-ffmpeg), which use it, are GPL already (FFmpeg's
+build includes x264), and say version 2 for it too.
 
 The build and test helpers come from riscos-ffmpeg: `tools/elf2aif` is
 GCCSDK's elf2aif (GPL v2 or later); `tools/mkrozip.py`,
@@ -117,9 +134,9 @@ What it's built from, and how:
 
 | Source | Licence | Used for |
 |---|---|---|
-| Raspberry Pi userland, MMAL client (`interface/mmal/vc/mmal_vc_msgs.h`, `mmal_vc_client.c`) | BSD-3-Clause (Broadcom) | MMAL message layouts and how the client handles them: facts only, no code copied |
-| Linux `vchiq-mmal` (`mmal-msg*.h`, `mmal-vchiq.c`) | GPL-2.0 only | the same layouts, checked against these: facts only, no code copied |
-| Linux `rpivid` (`rpivid_hw.h`, `rpivid.h`, `rpivid_hw.c`, `rpivid_video.c`) and device tree (`bcm2711*.dtsi`) | GPL-2.0 only | the HEVC block's registers, addresses, clock and interrupt, and what `rpivid_h265.c` expects of the rest of the driver: facts only; hevcdec's `rpivid.h`, `rpivid_hw.h` and `rpivid_video.h` are our own |
+| Raspberry Pi userland, MMAL client (`interface/mmal/vc/mmal_vc_msgs.h`, `mmal_vc_client.c`) | BSD-3-Clause (Broadcom) | MMAL message layouts and how the client handles them, checked against these: no code copied |
+| Linux `vchiq-mmal` (`mmal-msg*.h`, `mmal-vchiq.c`) | GPL-2.0 only | the reference for the MMAL message formats and how the client handles them: none of its code, but treated as derived from it (hence GPL version 2) |
+| Linux `rpivid` (`rpivid_hw.h`, `rpivid.h`, `rpivid_hw.c`, `rpivid_video.c`) and device tree (`bcm2711*.dtsi`) | GPL-2.0 only | the reference for the HEVC block's registers, addresses, clock and interrupt, and what `rpivid_h265.c` expects of the rest of the driver: none of their code (hevcdec's `rpivid.h`, `rpivid_hw.h` and `rpivid_video.h` are our own), but treated as derived from them |
 | Linux `rpivid_h265.c` (rpi-6.6.y) | GPL-2.0-or-later | `hevcdec/rpivid_h265.c`, unchanged: the block's commands for each picture |
 | Linux `hevc-ctrls.h` (V4L2 stateless HEVC controls) | BSD-3-Clause or GPL-2.0 (uAPI) | `hevcdec/hevc_ctrls.h`, with plain types |
 | Raspberry Pi's FFmpeg (`v4l2_req_hevc_vx.c`) | LGPL-2.1-or-later | `tools/hevctrace/hevc_trace.c`: filling the controls from FFmpeg's HEVC decoder |

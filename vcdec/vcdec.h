@@ -24,7 +24,7 @@
  * 1920x1088; 1080p needs gpu_mem=128 or more in CONFIG/TXT (at 64 the
  * decoder stalls without a word), which vcdec_open checks.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #ifndef VCDEC_H
 #define VCDEC_H

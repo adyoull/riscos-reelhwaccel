@@ -36,4 +36,9 @@ buffers are (pools or PCI memory) and where the time inside vcdec went.
 Nothing waits for the decoder but open, flush and close, so it suits a
 Wimp player polled on null events.
 
-GPL version 2 or later. From riscos-reelhwaccel.
+The GNU GPL version 2 (without "or later"), the same licence as Linux's
+vchiq-mmal driver: vcdec is a new implementation over RISC OS's VCHIQ
+module with its own MMAL client, based on the MMAL message formats as that
+driver's headers define them (there's no published specification). It
+contains none of the driver's code, but having used it as its reference
+it is treated as derived from it. From riscos-reelhwaccel.

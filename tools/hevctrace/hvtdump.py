@@ -8,7 +8,7 @@
         (8-bit 4:2:0 from FFmpeg, display order): each picture traced must
         be one of them, and all of them must be traced
 
-Part of riscos-reelhwaccel. GPL version 2 or later.
+Part of riscos-reelhwaccel. GPL version 2.
 """
 import struct, sys, zlib
 

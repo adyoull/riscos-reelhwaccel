@@ -2,7 +2,7 @@
 @ The C (hevchw.c) is freestanding: no C library, all SWIs through
 @ hw_swi. Everything here is position independent (offsets from the
 @ module's base); the link checks there are no absolute relocations.
-@ Part of riscos-reelhwaccel (hevchw/). GPL version 2 or later
+@ Part of riscos-reelhwaccel (hevchw/). GPL version 2
 @ (see COPYING).
 
         .syntax unified

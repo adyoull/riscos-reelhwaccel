@@ -7,7 +7,7 @@
  * calls, which hevcdec.c answers for the one picture being decoded.
  *
  * Written for riscos-reelhwaccel from the interfaces' documented meaning;
- * no kernel code. GPL version 2 or later (see COPYING).
+ * no kernel code. GPL version 2 (see COPYING).
  */
 #ifndef HEVCDEC_KSHIM_H
 #define HEVCDEC_KSHIM_H

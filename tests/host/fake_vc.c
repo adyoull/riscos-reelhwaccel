@@ -4,7 +4,7 @@
  * outside this file: FFmpeg's h264_vchiq decoder (tests/host/ffmpeg),
  * linked with vcdec (VCDEC_HOST) and this, under qemu.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #define FAKE_ONLY
 #include "mmaldecode_test.c"

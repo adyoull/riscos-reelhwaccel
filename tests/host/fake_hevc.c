@@ -15,7 +15,7 @@
  *
  * Switches: p1_exhaust (phase 1 says the PU buffer ran out, once),
  * p1_hang / p2_hang (the phase never finishes).
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -204,6 +204,10 @@ static void phase2(void)
     } else {
         fake_hevc.unknown_pictures++;
         memset(out, 0x10, (size_t)col * (size_t)((w + 127) / 128));
+    }
+    if (fake_hevc.overrun) {                             /* (a block writing past the frame's end) */
+        uint8_t *past = mem(y, (size_t)col * (size_t)((w + 127) / 128) + (size_t)fake_hevc.overrun, "past the frame");
+        if (past) memset(past + (size_t)col * (size_t)((w + 127) / 128), 0x55, (size_t)fake_hevc.overrun);
     }
     {
         int found;

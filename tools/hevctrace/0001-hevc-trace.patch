@@ -1,6 +1,6 @@
-From cf2066e48771042e7c2b8e89cef12212e13e4306 Mon Sep 17 00:00:00 2001
+From 3e876751743b5c42ef2d11cba1277edcc94dfcb8 Mon Sep 17 00:00:00 2001
 From: Andrew Youll <andrewyoull86@gmail.com>
-Date: Fri, 2 Oct 2026 19:10:01 +0100
+Date: Fri, 2 Oct 2026 20:50:16 +0100
 Subject: [PATCH] avcodec/hevc: trace for hardware decoder tests
  (riscos-reelhwaccel's hevctrace)
 
@@ -10,10 +10,10 @@ file. Decode with one thread.
 ---
  libavcodec/Makefile     |   2 +-
  libavcodec/hevc_ctrls.h | 513 ++++++++++++++++++++++++++++++++++++++++
- libavcodec/hevc_trace.c | 498 ++++++++++++++++++++++++++++++++++++++
+ libavcodec/hevc_trace.c | 501 +++++++++++++++++++++++++++++++++++++++
  libavcodec/hevc_trace.h |   9 +
  libavcodec/hevcdec.c    |   3 +
- 5 files changed, 1024 insertions(+), 1 deletion(-)
+ 5 files changed, 1027 insertions(+), 1 deletion(-)
  create mode 100644 libavcodec/hevc_ctrls.h
  create mode 100644 libavcodec/hevc_trace.c
  create mode 100644 libavcodec/hevc_trace.h
@@ -552,10 +552,10 @@ index 0000000..ef5f709
 +#endif
 diff --git a/libavcodec/hevc_trace.c b/libavcodec/hevc_trace.c
 new file mode 100644
-index 0000000..7c62c89
+index 0000000..599e632
 --- /dev/null
 +++ b/libavcodec/hevc_trace.c
-@@ -0,0 +1,498 @@
+@@ -0,0 +1,501 @@
 +/*
 + * hevc_trace.c - FFmpeg's HEVC decoder writing, for each picture it
 + * decodes, what a stateless hardware decoder (Raspberry Pi's rpivid, by
@@ -582,8 +582,8 @@ index 0000000..7c62c89
 + *   by the Free Software Foundation; either version 2.1 of the License,
 + *   or (at your option) any later version.
 + *
-+ * The rest: part of riscos-reelhwaccel. GPL version 2 or later (see
-+ * COPYING); the whole is GPL 2 or later.
++ * The rest: part of riscos-reelhwaccel. GPL version 2 (see
++ * COPYING); the whole is GPL version 2.
 + *
 + * The trace (all little endian; see tools/hevctrace/README.md):
 + *   header: "HVTR", u32 version (1), u32 sizeof sps, pps, slice_params,
@@ -972,6 +972,9 @@ index 0000000..7c62c89
 +    uint32_t boff;
 +    if (!open_trace()) return;
 +    if (h->sh.first_slice_in_pic_flag) {
++        for (unsigned i = 0; i < FF_ARRAY_ELEMS(h->DPB); i++)   /* (slots let go of forget their pictures: a */
++            if (!h->DPB[i].flags)                               /* missing reference made up there isn't */
++                slot_number[i] = 0;                             /* taken for an old picture) */
 +        number++;
 +        slot_number[h->ref - h->DPB] = number;
 +        fill_decode_params(h, &dec);
@@ -1056,12 +1059,12 @@ index 0000000..7c62c89
 +}
 diff --git a/libavcodec/hevc_trace.h b/libavcodec/hevc_trace.h
 new file mode 100644
-index 0000000..bbcf2a4
+index 0000000..8c94934
 --- /dev/null
 +++ b/libavcodec/hevc_trace.h
 @@ -0,0 +1,9 @@
 +/* hevc_trace.h - tools/hevctrace's hooks in FFmpeg's HEVC decoder (see
-+   hevc_trace.c). Part of riscos-reelhwaccel. GPL version 2 or later. */
++   hevc_trace.c). Part of riscos-reelhwaccel. GPL version 2. */
 +#ifndef AVCODEC_HEVC_TRACE_H
 +#define AVCODEC_HEVC_TRACE_H
 +#include <stdint.h>

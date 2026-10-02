@@ -10,7 +10,7 @@
  * the slices' bytes, the frames, the references, the 128-byte column
  * format and its conversion - is right.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -138,6 +138,7 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     o = run_app(&ret, trace, NULL);
     printf("%s", o);
     CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors && !fake_hevc.factors_wrong &&
+          strstr(o, "hevcdec: nothing written past any buffer's end") &&
           !fake_hevc.unknown_pictures && fake_hevc.phase2s == nmap,
           "hevctest %s (%d): %d references wrong, %d pictures unknown, %d phase 2s", trace, ret, fake_hevc.ref_errors,
           fake_hevc.unknown_pictures, fake_hevc.phase2s);
@@ -216,6 +217,14 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
               fake_hevc.scaling_not_flat > 0, "hevctest -s, nowpp (%d):\n%s", ret, o);
         cleaned("-s nowpp");
     }
+
+    fake_hevc_reset();                          /* the block writing past a frame: caught by its guard, reported */
+    fake_hevc.overrun = 2048;
+    o = run_app(&ret, trace, "-c 3");
+    CHECK(ret == 1 && strstr(o, "hevcdec: the block wrote past the end of 3 buffers, at most 2048 bytes past an output frame") &&
+          strstr(o, "Result: FAILED") && strstr(o, "3 checked against FFmpeg: 0 wrong"),
+          "a block writing past the frames (%d):\n%s", ret, o);
+    cleaned("overrun");
 
     fake_hevc_reset();                          /* -d: the pictures as decoded, in decoding order */
     remove("/tmp/hevcdec_test.dump");

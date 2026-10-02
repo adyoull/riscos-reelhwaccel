@@ -1,5 +1,5 @@
 /* hevc_trace.h - tools/hevctrace's hooks in FFmpeg's HEVC decoder (see
-   hevc_trace.c). Part of riscos-reelhwaccel. GPL version 2 or later. */
+   hevc_trace.c). Part of riscos-reelhwaccel. GPL version 2. */
 #ifndef AVCODEC_HEVC_TRACE_H
 #define AVCODEC_HEVC_TRACE_H
 #include <stdint.h>

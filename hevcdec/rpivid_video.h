@@ -8,7 +8,7 @@
  *     at level 3.1, for 4:2:0), 983040 x 3/4 up to twice that, 3/8 a pixel
  *     above; plus an eighth per bit of depth above 8.
  * And is_sps_set: an SPS has been given once it has a picture width.
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #ifndef HEVCDEC_RPIVID_VIDEO_H
 #define HEVCDEC_RPIVID_VIDEO_H

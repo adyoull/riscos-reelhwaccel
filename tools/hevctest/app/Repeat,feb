@@ -1,0 +1,24 @@
+| Repeat: hevctest straight after itself, as when it's run again quickly:
+| the small clip's first three pictures ten times, then the 1080p clip
+| three times (timed). Reports to ResultR; if something goes wrong part
+| way, the screen says what RISC OS reported.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 32768K -max 32768K
+Remove <Obey$Dir>.ResultR
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -c 3 -o <Obey$Dir>.ResultR <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -t -o <Obey$Dir>.ResultR <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -t -o <Obey$Dir>.ResultR <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -t -o <Obey$Dir>.ResultR <Obey$Dir>.clips.hd.trace

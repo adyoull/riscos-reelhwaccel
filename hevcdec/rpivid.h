@@ -4,7 +4,7 @@
  * riscos-reelhwaccel with the members that file uses; the names and the
  * sizes (6 decode environments, 3 phase-1 and 3 phase-2 buffer sets) are
  * those of Raspberry Pi Linux's rpivid driver (facts; no code copied).
- * GPL version 2 or later (see COPYING).
+ * GPL version 2 (see COPYING).
  */
 #ifndef HEVCDEC_RPIVID_H
 #define HEVCDEC_RPIVID_H

@@ -16,7 +16,7 @@
  *   - a decoder error: reported, then the packets taken until the end;
  *   - each run: everything closed and freed.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdio.h>
 #include <string.h>

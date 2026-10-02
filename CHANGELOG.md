@@ -1,5 +1,50 @@
 # Changes
 
+## hevcdec 0.1.3 and HEVCTest 0.1.3: guard areas (test zip, 2026-10-02)
+
+HEVCTest 0.1.2 on a Pi 4: every picture of every clip exactly right
+(Test), 1080p at 230 pictures a second. But hevctest run again straight
+after itself sometimes stopped at once: "Fatal signal received: EMT
+trap" (a RISC OS exception; ARMEABISupport's code 6 is "not one of
+mine"), inside UnixLib's filename translation for fopen at start-up,
+before hevcdec runs. Code that runs fine every other time faulting
+there points at the new program's memory being changed: the previous
+run's buffer pages go back to RISC OS and may be given straight to the
+next program, so the block writing anything after it's finished, or
+past a buffer's end, would show this way.
+
+- hevcdec: every buffer the block uses (frames, the slice buffer, the
+  command list, rpivid's PU/coefficient and collocated buffers) has 16K
+  of pattern after it, checked as it goes and by hevcdec_get_stats
+  (overruns, overrun_max, overrun_what); written into, it's logged.
+  hevcdec_close gives the block 2 cs before its memory goes, and logs
+  its interrupt control register.
+- HEVCTest: says whether the block wrote past any buffer (a FAILED
+  result if so); on an exception, prints RISC OS's error before
+  UnixLib's backtrace; new Obey file Repeat (ResultR): hevctest 13
+  times back to back.
+- Host tests: the fake block can write past its frames; caught and
+  reported, the pictures still right.
+
+## Licence: GPL version 2, as Linux's drivers (2026-10-02)
+
+At the owner's request (as riscos-ffmpeg already says it): ReelHWAccel is
+under the GNU GPL version 2, without "or later", the licence of Linux's
+vchiq-mmal driver. vcdec is a new implementation over RISC OS's VCHIQ
+module with its own MMAL client, based on the MMAL message formats as
+that driver's headers define them (there's no published specification);
+it contains none of the driver's code, but having used the driver as its
+reference it is treated as derived from it. hevcdec the same with
+Linux's rpivid driver; rpivid_h265.c, included unchanged, keeps its own
+"version 2 or later".
+
+- Every file's notice, the ReadMes, the README (with the reasoning) and
+  the devkit's README now say GPL version 2; h264_vchiq's vchiqdec.c and
+  its patch too.
+- tools/hevctrace's patch remade: it was missing hevc_trace.c's clearing
+  of DPB slots let go of (in the source since hevcdec 0.1). The traces
+  it makes for HEVCTest's clips are unchanged.
+
 ## hevcdec 0.1.2 and HEVCTest 0.1.2: pictures without scaling lists right (test zip, 2026-10-02)
 
 HEVCTest 0.1.1 on a Pi 4: with flat scaling lists given (Flat, -s) every

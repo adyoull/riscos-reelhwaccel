@@ -24,8 +24,8 @@
  *   by the Free Software Foundation; either version 2.1 of the License,
  *   or (at your option) any later version.
  *
- * The rest: part of riscos-reelhwaccel. GPL version 2 or later (see
- * COPYING); the whole is GPL 2 or later.
+ * The rest: part of riscos-reelhwaccel. GPL version 2 (see
+ * COPYING); the whole is GPL version 2.
  *
  * The trace (all little endian; see tools/hevctrace/README.md):
  *   header: "HVTR", u32 version (1), u32 sizeof sps, pps, slice_params,

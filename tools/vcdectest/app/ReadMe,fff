@@ -61,5 +61,5 @@ off and on again.
 
 Needs: RISC OS 5 on a Raspberry Pi, with the VCHIQ module (in the ROM);
 the pools need RISC OS 5.23 or later (on older ones, PCI memory as before).
-Part of riscos-reelhwaccel; GPL version 2 or later. The clips are made
+Part of riscos-reelhwaccel; GPL version 2. The clips are made
 from FFmpeg's testsrc2 pattern.

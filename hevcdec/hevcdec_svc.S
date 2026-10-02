@@ -5,7 +5,7 @@
  * to the block's (uncached, buffered) memory has reached it before a
  * register write can start the block.
  *
- * Part of riscos-reelhwaccel (hevcdec/). GPL version 2 or later.
+ * Part of riscos-reelhwaccel (hevcdec/). GPL version 2.
  */
         .syntax unified
         .arm

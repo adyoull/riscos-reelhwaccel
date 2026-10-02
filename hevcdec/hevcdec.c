@@ -10,7 +10,7 @@
  * the interrupt control register (polled), and the callbacks rpivid_h265.c
  * left run then: phase 1's starts phase 2, phase 2's marks the frame done.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -22,6 +22,9 @@
 
 #define MAX_FRAMES  VB2_MAX_FRAME
 #define WAIT_CS     100                    /* a phase not done in this: an error */
+#define GUARD       16384                  /* bytes of pattern after each buffer the block uses */
+#define GUARD_BYTE  0xA5
+#define MAX_GUARDED 120
 
 struct hevcdec_frame {
     struct vb2_v4l2_buffer vb;           /* (first: rpivid_h265.c sees this) */
@@ -45,6 +48,9 @@ struct hevcdec {
        came out with whatever factors were left (HEVCTest 0.1 on a Pi 4);
        given flat lists (all 16, what "no scaling lists" means) with the
        SPS copied to enable them, every picture was right (0.1.1). */
+    struct { void *p; size_t size; const char *what; int reported; } guarded[MAX_GUARDED];
+    unsigned overruns, overrun_max;     /* buffers the block wrote past, and by how much at most */
+    const char *overrun_what;
     struct v4l2_ctrl_hevc_sps sps_flat;
     struct v4l2_ctrl_hevc_scaling_matrix flat;
     char err[256];
@@ -101,17 +107,55 @@ static int fail(hevcdec *d, const char *fmt, ...)
 
 /* ---- kshim's DMA memory ---- */
 
+/* Every buffer the block uses has GUARD bytes of a pattern after it: the
+   block writing past a buffer's end (into whatever memory follows) shows,
+   and does no harm. Checked as each buffer goes and by hevcdec_get_stats. */
+static void guard_check(hevcdec *d, int k)
+{
+    const uint8_t *g = (const uint8_t *)d->guarded[k].p + d->guarded[k].size;
+    size_t n = GUARD;
+    while (n && g[n - 1] == GUARD_BYTE) n--;
+    if (n && !d->guarded[k].reported) {
+        d->guarded[k].reported = 1;
+        d->overruns++;
+        if (n > d->overrun_max) { d->overrun_max = (unsigned)n; d->overrun_what = d->guarded[k].what; }
+        logf_(d, "The block wrote past the end of %s (%u bytes; up to %u bytes after it)", d->guarded[k].what,
+              (unsigned)d->guarded[k].size, (unsigned)n);
+    }
+}
+
+static void *dma_get(hevcdec *d, size_t size, uint64_t *bus, const char *what)
+{
+    int k;
+    void *p;
+    for (k = 0; k < MAX_GUARDED && d->guarded[k].p; k++) {}
+    if (k == MAX_GUARDED) return NULL;
+    size = (size + 63) & ~(size_t)63;
+    if (!(p = hevcdec_hw_alloc(d->hw, size + GUARD, bus))) return NULL;
+    memset((uint8_t *)p + size, GUARD_BYTE, GUARD);
+    d->guarded[k].p = p; d->guarded[k].size = size; d->guarded[k].what = what; d->guarded[k].reported = 0;
+    return p;
+}
+
+static void dma_put(hevcdec *d, void *p)
+{
+    if (!p) return;
+    for (int k = 0; k < MAX_GUARDED; k++)
+        if (d->guarded[k].p == p) { guard_check(d, k); d->guarded[k].p = NULL; break; }
+    hevcdec_hw_free(d->hw, p);
+}
+
 void *hevcdec_dma_alloc(size_t size, dma_addr_t *addr)
 {
     uint64_t bus = 0;
-    void *p = cur ? hevcdec_hw_alloc(cur->hw, size, &bus) : NULL;
+    void *p = cur ? dma_get(cur, size, &bus, "a buffer of rpivid's (PU, coefficients, bitstream or collocated)") : NULL;
     *addr = p ? bus : 0;
     return p;
 }
 
 void hevcdec_dma_free(void *ptr)
 {
-    if (ptr && cur) hevcdec_hw_free(cur->hw, ptr);
+    if (ptr && cur) dma_put(cur, ptr);
 }
 
 /* phase 1's command list (malloc'd by rpivid_h265.c) copied where the
@@ -122,9 +166,9 @@ dma_addr_t hevcdec_dma_map(const void *ptr, size_t size)
     if (!d) return 0;
     if (size > d->cmd_cap) {
         size_t cap = size < 65536 ? 65536 : size * 2;
-        if (d->cmd) hevcdec_hw_free(d->hw, d->cmd);
+        if (d->cmd) dma_put(d, d->cmd);
         d->cmd_cap = 0;
-        if (!(d->cmd = hevcdec_hw_alloc(d->hw, cap, &d->cmd_bus))) return 0;
+        if (!(d->cmd = dma_get(d, cap, &d->cmd_bus, "phase 1's command list"))) return 0;
         d->cmd_cap = cap;
     }
     memcpy(d->cmd, ptr, size);
@@ -161,7 +205,15 @@ void hevcdec_config_init(hevcdec_config *c)
 
 const char *hevcdec_open_error(void) { return open_err; }
 const char *hevcdec_error(const hevcdec *d) { return d ? d->err : open_err; }
-void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s) { *s = d->stats; }
+void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s)
+{
+    hevcdec *w = (hevcdec *)d;                   /* (the guards checked now) */
+    for (int k = 0; k < MAX_GUARDED; k++) if (w->guarded[k].p) guard_check(w, k);
+    *s = d->stats;
+    s->overruns = d->overruns;
+    s->overrun_max = d->overrun_max;
+    s->overrun_what = d->overrun_what;
+}
 
 int hevcdec_open(hevcdec **out, const hevcdec_config *c)
 {
@@ -222,7 +274,7 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
     fr->vb.vb2_buf.index = (unsigned)i;
     fr->vb.vb2_buf.num_planes = 1;
     fr->vb.planes[0].length = d->ctx.dst_fmt.plane_fmt[0].sizeimage;
-    if (!(fr->vb.vaddr = hevcdec_hw_alloc(d->hw, fr->vb.planes[0].length, &fr->vb.addr))) {
+    if (!(fr->vb.vaddr = dma_get(d, fr->vb.planes[0].length, &fr->vb.addr, "an output frame"))) {
         free(fr);
         fail(d, "No contiguous memory for a %u byte frame", (unsigned)d->ctx.dst_fmt.plane_fmt[0].sizeimage);
         return NULL;
@@ -304,9 +356,9 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         struct rpivid_run run;
         if (sl->size > d->src_cap) {
             size_t cap = sl->size < 65536 ? 65536 : sl->size * 2;
-            if (d->src.vaddr) hevcdec_hw_free(d->hw, d->src.vaddr);
+            if (d->src.vaddr) dma_put(d, d->src.vaddr);
             d->src_cap = 0;
-            if (!(d->src.vaddr = hevcdec_hw_alloc(d->hw, cap, &d->src.addr)))
+            if (!(d->src.vaddr = dma_get(d, cap, &d->src.addr, "the slice buffer")))
                 return fail(d, "No contiguous memory for a %u byte slice", (unsigned)sl->size);
             d->src_cap = cap;
         }
@@ -388,14 +440,19 @@ void hevcdec_close(hevcdec *d)
         free(d);
         return;
     }
+    {                                        /* (2 cs for anything the block still has in flight) */
+        uint32_t t0 = hevcdec_hw_now_cs();
+        while (hevcdec_hw_now_cs() - t0 < 2) {}
+        logf_(d, "Closing: interrupt control &%08X", (unsigned)hevcdec_hw_ictrl(d->hw));
+    }
     if (d->started) rpivid_dec_ops_h265.stop(&d->ctx);
     for (int i = 0; i < MAX_FRAMES; i++)
         if (d->frames[i]) {
-            hevcdec_hw_free(d->hw, d->frames[i]->vb.vaddr);
+            dma_put(d, d->frames[i]->vb.vaddr);
             free(d->frames[i]);
         }
-    if (d->src.vaddr) hevcdec_hw_free(d->hw, d->src.vaddr);
-    if (d->cmd) hevcdec_hw_free(d->hw, d->cmd);
+    if (d->src.vaddr) dma_put(d, d->src.vaddr);
+    if (d->cmd) dma_put(d, d->cmd);
     hevcdec_hw_close(d->hw, 0);
     if (cur == d) cur = NULL;
     free(d);

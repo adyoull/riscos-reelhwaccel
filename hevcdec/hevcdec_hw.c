@@ -13,7 +13,7 @@
  *  - the time: OS_ReadMonotonicTime.
  * PRM: OS_Memory 0/12/13, OS_DynamicArea 0/1/21/22.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdio.h>
 #include <stdlib.h>

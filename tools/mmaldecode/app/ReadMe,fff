@@ -65,5 +65,5 @@ decoder can stay stuck until the machine is restarted: restart before
 running anything else.
 
 Needs: RISC OS 5 on a Raspberry Pi, with the VCHIQ module (in the ROM).
-Part of riscos-reelhwaccel; GPL version 2 or later. The clips are made
+Part of riscos-reelhwaccel; GPL version 2. The clips are made
 from FFmpeg's testsrc2 pattern.

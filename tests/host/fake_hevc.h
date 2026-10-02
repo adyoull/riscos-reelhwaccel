@@ -1,5 +1,5 @@
 /* fake_hevc.h - the fake Pi 4 HEVC block (fake_hevc.c) for the host tests.
-   Part of riscos-reelhwaccel. GPL version 2 or later. */
+   Part of riscos-reelhwaccel. GPL version 2. */
 #ifndef FAKE_HEVC_H
 #define FAKE_HEVC_H
 #include <stddef.h>
@@ -16,6 +16,7 @@ typedef struct {
     int p1_exhaust, p1_hang, p2_hang, no_block, no_memory;
     size_t memory_left;               /* (0: no limit) */
     int quiet;                        /* failures expected: counted, not printed */
+    int overrun;                      /* bytes phase 2 writes past the end of each frame */
 } fake_hevc_state;
 extern fake_hevc_state fake_hevc;
 

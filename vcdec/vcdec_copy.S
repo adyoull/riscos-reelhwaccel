@@ -21,7 +21,7 @@
  * calls to vcdec_host_enter_os and vcdec_host_leave_os, which open and close
  * the fake's privileged memory.
  *
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
         .syntax unified
         .arm

@@ -6,7 +6,7 @@
  * gathered until the one that starts a phase), and there are no
  * interrupts: a claim runs at once, and a phase's completion callback is
  * kept until hevcdec.c sees the phase's bit in the interrupt control
- * register (polled). Part of riscos-reelhwaccel. GPL version 2 or later.
+ * register (polled). Part of riscos-reelhwaccel. GPL version 2.
  */
 #ifndef HEVCDEC_RPIVID_HW_H
 #define HEVCDEC_RPIVID_HW_H

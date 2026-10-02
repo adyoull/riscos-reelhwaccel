@@ -76,7 +76,7 @@
  * from ISO/IEC 14496-12 and -15.
  * The VCHIQ SWI conventions from RISC OS's VCHIQ, BCMSound and BCMVideo
  * (see mmalprobe).
- * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdarg.h>
 #include <stddef.h>
