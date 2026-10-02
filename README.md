@@ -33,6 +33,9 @@ showed on a Raspberry Pi 4.
   buffers numbered from 1, output buffers only after the decoder's format
   change, every receive queued as its message arrives, and the 20 input
   buffers the decoder recommends.
+  0.13 adds MP4 input (one access unit a buffer, with its pts), checks
+  display order by pts, flush and seek, and timing without checksums
+  (not yet run on the Pi).
 - **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
   units), contiguous memory and interrupt (GIC 130, device 34) all work

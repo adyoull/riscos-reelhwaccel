@@ -1,5 +1,8 @@
-| Test: decodes three H.264 clips on the VideoCore (through VCHIQ and MMAL)
-| and checks every picture against FFmpeg's own decode. Reports to Result.
+| Test: decodes the three H.264 clips on the VideoCore (through VCHIQ and
+| MMAL) from their MP4s, one access unit a buffer with its pts, and checks
+| every picture against FFmpeg's own decode, matched by pts (so in display
+| order). The small clip goes first as raw H.264 too, as 0.12 sent it.
+| Reports to Result.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
@@ -8,5 +11,6 @@ RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it
 WimpSlot -min 16384K -max 16384K
 Remove <Obey$Dir>.Result
 Run <Obey$Dir>.mmaldecode -o <Obey$Dir>.Result <Obey$Dir>.clips.small.stream <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
-Run <Obey$Dir>.mmaldecode -o <Obey$Dir>.Result <Obey$Dir>.clips.odd.stream <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
-Run <Obey$Dir>.mmaldecode -o <Obey$Dir>.Result <Obey$Dir>.clips.hd.stream <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.mmaldecode -o <Obey$Dir>.Result <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.mmaldecode -o <Obey$Dir>.Result <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
+Run <Obey$Dir>.mmaldecode -o <Obey$Dir>.Result <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig

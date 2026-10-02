@@ -1,36 +1,53 @@
 MMALDecode - H.264 decoded by the VideoCore, from RISC OS
 =========================================================
 
-Step 3 towards hardware H.264 decoding in Reel on every Raspberry Pi
-from the Pi 1 to the Pi 4. MMALProbe showed the firmware's video decoder
-answers through RISC OS's VCHIQ module; this makes it decode.
+Hardware H.264 decoding for Reel on the Raspberry Pi: the firmware's
+video decoder, driven through RISC OS's VCHIQ module. 0.12 decoded
+whole clips correctly (1080p with gpu_mem=128). 0.13 tries what a player
+needs on top of that:
 
-For each of three clips (in clips):
-  small  640x360, 60 pictures, H.264 Main with B frames
+  - MP4 input: each picture's data goes to the decoder on its own, with
+    its time (pts), as FFmpeg and Reel will send it;
+  - display order: clips with B frames are decoded in one order and shown
+    in another; each picture must come back with its own time, in the
+    order it's shown;
+  - flush and seek: stopping part way through and going on from a
+    keyframe, as a seek in a player does;
+  - timing without the checks: how fast pictures come back, and how
+    long copying each one out of the decoder's memory takes.
+
+The clips (in clips; each as mp4 and as raw H.264, stream):
+  small  640x360, 60 pictures, H.264 Main with B frames, a keyframe
+         every 20
   odd    426x240, 30 pictures, H.264 Baseline (a width that isn't a
          multiple of 32, to check the cropping)
-  hd     1920x1080, 150 pictures, H.264 High, level 4.1
+  hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
 
-it sets the decoder up, sends the stream to the VideoCore, takes every
-decoded picture back, and checks each one against a checksum FFmpeg made
-of the same picture with its own decoder. H.264 decoders must agree to
-the last bit, so any difference is a fault. It also times the decode.
+Each picture is checked against a checksum FFmpeg made of the same
+picture with its own decoder. The VideoCore's pictures can differ from
+FFmpeg's by 1 in a few values (rounding), so each is also compared by
+block averages: "within rounding" is fine, anything more is a fault.
 
-Running it:
-  Double-click Test. It runs the three clips one after another (the hd
-  one takes a few seconds) and writes Result in this directory. Please
-  send Result back, and one from an older Pi (1, 2, 3 or Zero) too if
-  you can.
+Running it (please send back every Result file):
+  Test       The small clip as raw H.264 (as 0.12 sent it), then all
+             three clips from their MP4s, checked by time. Writes
+             Result. If 1080p stalls, set gpu_mem=128 in CONFIG/TXT
+             (see below).
+  Seek       The small clip; after 10 pictures it flushes the decoder
+             and carries on from the keyframe at picture 40. Writes
+             every message to ResultS.
+  SeekD      As Seek, but it switches the decoder's ports off and on
+             again instead of flushing. Writes ResultSD. Run it even if
+             Seek works: they're two ways Reel could seek.
+  Speed      The three MP4s without checks: pictures a second, and the
+             copying time. Writes ResultT.
+  Verbose    The small MP4 with every message (ResultV, and the first
+             pictures in Dump), if Test doesn't get pictures back.
+  VerboseHD  The same for the hd clip (ResultHD and DumpHD).
 
-  If Test doesn't get pictures back, double-click Verbose too: it runs
-  the small clip only, writing every message to and from the decoder to
-  ResultV. Please send that as well.
-
-  VerboseHD does the same for the hd clip only (1920x1080), writing
-  ResultHD and DumpHD.
-
-  The report starts by saying how much memory the VideoCore has (gpu_mem
-  in CONFIG/TXT). 1080p may need more than the smaller clips.
+  Each report starts by saying how much memory the VideoCore has
+  (gpu_mem in CONFIG/TXT). 1080p needs gpu_mem=128 or more: at 64 the
+  decoder stalls without a word.
 
 The decoded pictures come back to RISC OS by the VCHIQ module's bulk
 transfer, and a nine-instruction callback in the RMA counts them in; it's
@@ -39,7 +56,7 @@ and on again.
 
 If a run stops part way (the report says "no reply"), the VideoCore's
 decoder can stay stuck until the machine is restarted: restart before
-running Test or Verbose again.
+running anything else.
 
 Needs: RISC OS 5 on a Raspberry Pi, with the VCHIQ module (in the ROM).
 Part of riscos-reelhwaccel; GPL version 2 or later. The clips are made

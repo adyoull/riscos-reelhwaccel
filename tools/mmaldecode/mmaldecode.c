@@ -7,11 +7,17 @@
  * decode:
  *
  *   1. the input port is set to H.264 at the stream's size, the output to
- *      I420 at that size (32 x 16 aligned), 3 buffers each;
+ *      I420 at that size (32 x 16 aligned); 20 input buffers (as the
+ *      decoder recommends), 3 output;
  *   2. the component and both ports are enabled;
- *   3. the stream goes in, in 64 KB pieces: each a BUFFER_FROM_HOST
- *      message, the data after it by VCHIQ bulk transfer (or in the
- *      message itself if 128 bytes or less); the last piece carries EOS;
+ *   3. the stream goes in: a raw H.264 (Annex B) file in 64 KB pieces, or
+ *      an MP4 file one access unit (sample) a buffer, converted to Annex B
+ *      as FFmpeg's h264_mp4toannexb does (the avcC's SPS and PPS before
+ *      each IDR), with its pts and dts (microseconds) and FRAME_END (a
+ *      sample over 64 KB goes in several buffers, the pts on the first).
+ *      Each buffer is a BUFFER_FROM_HOST message, its data after it by
+ *      VCHIQ bulk transfer, a whole number of words (an access unit is
+ *      padded with zero bytes, as Annex B allows). The last carries EOS;
  *   4. empty output buffers (numbered from 1: see CTX_BASE) are handed
  *      over once the decoder has said what it will make (its first
  *      FORMAT_CHANGED event; after 200 cs without one, anyway);
@@ -28,19 +34,37 @@
  *      buffers handed over again (the same format: nothing to do);
  *   6. each picture's visible part is checksummed (Adler-32 of the packed
  *      I420, as FFmpeg's -f framecrc) and compared with the list made by
- *      FFmpeg's own decoder; the time from first input to EOS is timed.
+ *      FFmpeg's own decoder. From an MP4, each picture is matched to
+ *      FFmpeg's picture with the same pts, so the pts must come back with
+ *      its own picture, in display order (B frames reordered); the time
+ *      from first input to EOS is timed;
+ *   7. -s N: after N pictures both ports are flushed (MMAL's port action
+ *      FLUSH; -F: disabled and enabled again instead) and the stream goes
+ *      on from its last keyframe: every picture from there must come back;
+ *   8. -t: no checksums, only the pts; the time spent receiving and in
+ *      the one copy of each picture (out of the PCI memory) is reported.
  *
- *   mmaldecode [-o file] [-n] stream.h264 expected.crc
+ *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] stream expected.crc [expected.sig]
+ *      stream    raw H.264 (Annex B), or MP4 (H.264 in avc1/avc3)
  *      -o file   also add the report to file
  *      -n        don't stop at the first wrong picture
+ *      -v        every message to and from the decoder
+ *      -d dir    the first three pictures (and event data) saved
+ *      -s N      flush after N pictures, then seek to the last keyframe (MP4)
+ *      -F        with -s: disable and enable the ports instead of FLUSH
+ *      -t        time, don't check the pictures
+ *   mmaldecode -x out stream.mp4   (host check) the Annex B stream as it
+ *      would be sent, to out, and each sample's pts, dts and key flag to
+ *      out.pts
  *
  * The callback is 9 instructions in the RMA: it counts BULK_RECEIVED (4)
  * and BULK_RECEIVE_ABORTED (18) callbacks in two words after it (its
  * param). Nothing else runs outside this program.
  *
  * Message layouts (no code copied): Raspberry Pi userland's MMAL client,
- * interface/mmal/vc/mmal_vc_msgs.h (Broadcom, BSD-3-Clause), and Linux's
- * vchiq-mmal, mmal-msg*.h (GPL-2.0).
+ * interface/mmal/vc/mmal_vc_msgs.h and mmal_buffer.h (Broadcom,
+ * BSD-3-Clause), and Linux's vchiq-mmal, mmal-msg*.h (GPL-2.0). MP4 boxes
+ * from ISO/IEC 14496-12 and -15.
  * The VCHIQ SWI conventions from RISC OS's VCHIQ, BCMSound and BCMVideo
  * (see mmalprobe).
  * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
@@ -88,9 +112,12 @@
 enum { T_COMPONENT_CREATE = 4, T_COMPONENT_DESTROY, T_COMPONENT_ENABLE, T_COMPONENT_DISABLE, T_PORT_INFO_GET,
        T_PORT_INFO_SET, T_PORT_ACTION, T_BUFFER_FROM_HOST, T_BUFFER_TO_HOST, T_EVENT_TO_HOST = 16 };
 enum { PORT_CONTROL = 1, PORT_INPUT = 2, PORT_OUTPUT = 3 };
-enum { ACTION_ENABLE = 1, ACTION_DISABLE = 2 };
+enum { ACTION_ENABLE = 1, ACTION_DISABLE = 2, ACTION_FLUSH = 3 };
 enum { ES_VIDEO = 3 };
 #define FLAG_EOS       1u
+#define FLAG_FRAME_START 2u
+#define FLAG_FRAME_END 4u
+#define FLAG_KEYFRAME  8u
 #define TIME_UNKNOWN   0x8000000000000000ull
 #define SHORT_DATA     128
 /* The decoder recommends 20 input buffers (ril.video_decode's input port
@@ -294,6 +321,14 @@ static int send_msg(uint32_t type, const void *payload, uint32_t len, uint32_t *
     return e ? -1 : 0;
 }
 
+/* a time in microseconds as text, or "none" (MMAL's TIME_UNKNOWN) */
+static const char *us_text(uint64_t v, char b[24])
+{
+    if (v == TIME_UNKNOWN) return "none";
+    snprintf(b, 24, "%lld", (long long)v);
+    return b;
+}
+
 static int take_data(void);
 static int data_failed;                    /* a receive failed: the session can't go on */
 static const char *waiting = "";           /* -v: " (waiting for <reply>)" while transact waits */
@@ -317,10 +352,13 @@ static uint32_t poll_msg(void)
     }
     if (verbose) {                          /* every message as it arrives (0.9 hid those during a wait) */
         const uint32_t *w = (const uint32_t *)((hdr_t *)msg + 1);
-        if (((hdr_t *)msg)->type == T_BUFFER_TO_HOST)
-            say("  rx%s: buffer back, status %u, port %u, buffer %u, length %u, flags &%X, in message %u\n", waiting,
+        if (((hdr_t *)msg)->type == T_BUFFER_TO_HOST) {
+            char t[24];
+            say("  rx%s: buffer back, status %u, port %u, buffer %u, length %u, flags &%X, pts %s, in message %u\n", waiting,
                 (unsigned)((hdr_t *)msg)->status, (unsigned)w[2], (unsigned)w[3], (unsigned)w[8 + 5],
-                (unsigned)w[8 + 7], (unsigned)((const buffer_msg_t *)w)->payload_in_message);
+                (unsigned)w[8 + 7], us_text(((const buffer_msg_t *)w)->pts, t),
+                (unsigned)((const buffer_msg_t *)w)->payload_in_message);
+        }
         else
             say("  rx%s: type %u, status %u, %u bytes: %08X %08X %08X %08X %08X %08X %08X %08X\n", waiting,
                 (unsigned)((hdr_t *)msg)->type, (unsigned)((hdr_t *)msg)->status, (unsigned)got,
@@ -480,7 +518,8 @@ static void *aligned(size_t n)
     return p;
 }
 
-static int buffer_to_vc(port_info_t *pi, int idx, uint8_t *data, uint32_t alloc, uint32_t len, uint32_t flags)
+static int buffer_to_vc(port_info_t *pi, int idx, uint8_t *data, uint32_t alloc, uint32_t len, uint32_t flags,
+                        uint64_t pts, uint64_t dts)
 {
     buffer_msg_t b;
     memset(&b, 0, sizeof b);
@@ -492,12 +531,20 @@ static int buffer_to_vc(port_info_t *pi, int idx, uint8_t *data, uint32_t alloc,
     b.alloc_size = alloc;
     b.length = len;
     b.flags = flags;
-    b.pts = b.dts = TIME_UNKNOWN;
+    b.pts = pts;
+    b.dts = dts;
     /* the data always follows by bulk transfer: MMAL only takes it in the
        message for opaque or clock ports (userland mmal_vc_port_send) */
     if (send_msg(T_BUFFER_FROM_HOST, &b, sizeof b, NULL)) return -1;
-    if (verbose) say("  tx: %s buffer %d, %u bytes%s\n", pi == &in_info ? "input" : "output", idx, (unsigned)len,
-                     flags & FLAG_EOS ? ", EOS" : "");
+    if (verbose) {
+        char t1[24], t2[24];
+        if (pts != TIME_UNKNOWN || dts != TIME_UNKNOWN)
+            say("  tx: %s buffer %d, %u bytes, flags &%X, pts %s, dts %s\n", pi == &in_info ? "input" : "output", idx,
+                (unsigned)len, (unsigned)flags, us_text(pts, t1), us_text(dts, t2));
+        else
+            say("  tx: %s buffer %d, %u bytes%s\n", pi == &in_info ? "input" : "output", idx, (unsigned)len,
+                flags & FLAG_EOS ? ", EOS" : "");
+    }
     if (len) {
         _kernel_oserror *e;
         swi(VCHIQ_ServiceUse, handle, 0, 0, 0, NULL, NULL);
@@ -513,13 +560,14 @@ static int give_outputs(void)
 {
     for (int i = 0; i < OUT_BUFS; i++)
         if (!out_busy[i]) {
-            if (buffer_to_vc(&out_info, i, out_buf[i], out_size, 0, 0)) return -1;
+            if (buffer_to_vc(&out_info, i, out_buf[i], out_size, 0, 0, TIME_UNKNOWN, TIME_UNKNOWN)) return -1;
             out_busy[i] = 1;
         }
     return 0;
 }
 
 /* receives n bytes by bulk transfer into dst and waits for the callback */
+static uint32_t rx_cs, rx_bytes;          /* time waiting for receives, and their bytes */
 static int bulk_in(uint8_t *dst, uint32_t n, uint32_t tag)
 {
     uint32_t before = bulk_done(0), aborted = bulk_done(1), t0;
@@ -534,6 +582,8 @@ static int bulk_in(uint8_t *dst, uint32_t n, uint32_t tag)
         if (bulk_done(1) != aborted) { say("A bulk receive was aborted\n"); return -1; }
         if (now_cs() - t0 > REPLY_CS) { say("A bulk receive didn't finish in %d cs\n", REPLY_CS); return -1; }
     }
+    rx_cs += now_cs() - t0;
+    rx_bytes += n;
     return 0;
 }
 
@@ -572,34 +622,288 @@ static int take_data(void)
     return 0;
 }
 
+/* ---- MP4 input ---- */
+
+/* An MP4's H.264 track, as samples (access units) in decode order, with
+   their times in microseconds from the start of the presentation (the
+   edit list's media time taken off, as FFmpeg's framecrc of the file). */
+typedef struct { uint32_t off, size; int64_t pts, dts; int key; } sample_t;
+static sample_t *samples;
+static int nsamples, nal_size;
+static uint8_t ps[1024];                   /* the avcC's SPS and PPS, as Annex B */
+static uint32_t ps_len, mp4_w, mp4_h;
+
+static uint32_t be16(const uint8_t *p) { return (uint32_t)p[0] << 8 | p[1]; }
+static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static uint64_t be64(const uint8_t *p) { return (uint64_t)be32(p) << 32 | be32(p + 4); }
+
+/* the first box of type t in [p, end): its contents, and their end in
+   *cend; NULL if there's none (or the boxes don't add up) */
+static const uint8_t *box(const uint8_t *p, const uint8_t *end, const char *t, const uint8_t **cend)
+{
+    while (p && end - p >= 8) {
+        uint64_t sz = be32(p);
+        uint32_t hdr = 8;
+        if (sz == 1) {
+            if (end - p < 16) return NULL;
+            sz = be64(p + 8);
+            hdr = 16;
+        } else if (sz == 0) {
+            sz = (uint64_t)(end - p);
+        }
+        if (sz < hdr || sz > (uint64_t)(end - p)) return NULL;
+        if (!memcmp(p + 4, t, 4)) { *cend = p + sz; return p + hdr; }
+        p += sz;
+    }
+    return NULL;
+}
+
+/* a full box's table: its entry count, the entries in *e, each w bytes
+   (after skip bytes); -1 if they don't fit */
+static long table(const uint8_t *c, const uint8_t *ce, uint32_t skip, uint32_t w, const uint8_t **e)
+{
+    uint32_t n;
+    if (!c || ce - c < (long)(8 + skip)) return -1;
+    n = be32(c + 4 + skip);
+    *e = c + 8 + skip;
+    if (w && n > (uint32_t)(ce - *e) / w) return -1;
+    return (long)n;
+}
+
+static int64_t to_us(int64_t t, uint32_t timescale)
+{
+    return t * 1000000 / (int64_t)timescale;
+}
+
+static int parse_mp4(const uint8_t *f, uint32_t n)
+{
+    const uint8_t *me, *moov = box(f, f + n, "moov", &me), *p, *te, *trak;
+    if (!moov) { say("No moov box: not an MP4 this can read\n"); return -1; }
+    for (p = moov; (trak = box(p, me, "trak", &te)) != NULL; p = te) {
+        const uint8_t *de, *ne, *se, *xe, *ee, *ae, *mdia, *mdhd, *minf, *stbl, *stsd, *entry, *avcc, *edts, *elst;
+        const uint8_t *e_stts, *e_ctts = NULL, *e_stss = NULL, *e_stsc, *e_co, *e_sz, *c;
+        const uint8_t *ce;
+        long n_stts, n_ctts = 0, n_stss = -1, n_stsc, n_co, n_sz;
+        uint32_t timescale, fixed_size, i, k;
+        int co64 = 0, ctts_signed = 0;
+        int64_t media_time = 0, t;
+        if (!(mdia = box(trak, te, "mdia", &de)) || !(mdhd = box(mdia, de, "mdhd", &xe)) ||
+            !(minf = box(mdia, de, "minf", &ne)) || !(stbl = box(minf, ne, "stbl", &se)) ||
+            !(stsd = box(stbl, se, "stsd", &xe)) || xe - stsd < 16)
+            continue;
+        entry = stsd + 8;
+        if (memcmp(entry + 4, "avc1", 4) && memcmp(entry + 4, "avc3", 4)) continue;
+        if (be32(entry) > (uint32_t)(xe - entry) || be32(entry) < 8 + 78) { say("A broken avc1 box\n"); return -1; }
+        mp4_w = be16(entry + 8 + 24);
+        mp4_h = be16(entry + 8 + 26);
+        if (!(avcc = box(entry + 8 + 78, entry + be32(entry), "avcC", &ae)) || ae - avcc < 7) {
+            say("No avcC box (the H.264 decoder configuration)\n");
+            return -1;
+        }
+        nal_size = (avcc[4] & 3) + 1;
+        ps_len = 0;
+        c = avcc + 5;
+        for (int set = 0; set < 2; set++) {     /* the SPSs, then the PPSs */
+            uint32_t cnt;
+            if (c >= ae) { say("A broken avcC box\n"); return -1; }
+            cnt = set ? *c++ : *c++ & 31u;
+            for (i = 0; i < cnt; i++) {
+                uint32_t l;
+                if (ae - c < 2 || (l = be16(c)) > (uint32_t)(ae - c - 2) || ps_len + 4 + l > sizeof ps) {
+                    say("A broken avcC box\n");
+                    return -1;
+                }
+                ps[ps_len] = ps[ps_len + 1] = ps[ps_len + 2] = 0;
+                ps[ps_len + 3] = 1;
+                memcpy(ps + ps_len + 4, c + 2, l);
+                ps_len += 4 + l;
+                c += 2 + l;
+            }
+        }
+        if (mdhd + 24 > xe) { say("A broken mdhd box\n"); return -1; }
+        timescale = mdhd[0] == 1 ? be32(mdhd + 20) : be32(mdhd + 12);
+        if (!timescale) { say("No timescale\n"); return -1; }
+        if ((edts = box(trak, te, "edts", &ee)) != NULL && (elst = box(edts, ee, "elst", &ee)) != NULL) {
+            long ne2 = table(elst, ee, 0, elst[0] == 1 ? 20 : 12, &c);
+            for (long j = 0; j < ne2; j++, c += elst[0] == 1 ? 20 : 12) {
+                int64_t mt = elst[0] == 1 ? (int64_t)be64(c + 8) : (int32_t)be32(c + 4);
+                if (mt >= 0) { media_time = mt; break; }   /* (-1: an empty edit) */
+            }
+        }
+        if ((n_stts = table(box(stbl, se, "stts", &ce), ce, 0, 8, &e_stts)) < 0) { say("No stts box\n"); return -1; }
+        if ((c = box(stbl, se, "ctts", &ce)) != NULL) {
+            ctts_signed = c[0] == 1;
+            if ((n_ctts = table(c, ce, 0, 8, &e_ctts)) < 0) { say("A broken ctts box\n"); return -1; }
+        }
+        if ((c = box(stbl, se, "stss", &ce)) != NULL && (n_stss = table(c, ce, 0, 4, &e_stss)) < 0) {
+            say("A broken stss box\n");
+            return -1;
+        }
+        if ((n_stsc = table(box(stbl, se, "stsc", &ce), ce, 0, 12, &e_stsc)) < 1) { say("No stsc box\n"); return -1; }
+        if ((c = box(stbl, se, "stco", &ce)) == NULL) { c = box(stbl, se, "co64", &ce); co64 = 1; }
+        if ((n_co = table(c, ce, 0, co64 ? 8 : 4, &e_co)) < 0) { say("No stco box\n"); return -1; }
+        if (!(c = box(stbl, se, "stsz", &ce)) || ce - c < 12) { say("No stsz box\n"); return -1; }
+        fixed_size = be32(c + 4);
+        if ((n_sz = table(c, ce, 4, fixed_size ? 0 : 4, &e_sz)) < 1) { say("No samples\n"); return -1; }
+        free(samples);
+        if (!(samples = calloc((size_t)n_sz, sizeof *samples))) { say("Out of memory\n"); return -1; }
+        nsamples = (int)n_sz;
+        for (k = 0; k < (uint32_t)nsamples; k++) {
+            samples[k].size = fixed_size ? fixed_size : be32(e_sz + 4 * k);
+            samples[k].key = n_stss < 0;    /* (no stss: every sample is a keyframe) */
+        }
+        for (long j = 0; j < n_stss; j++) {
+            uint32_t s1 = be32(e_stss + 4 * j);
+            if (s1 >= 1 && s1 <= (uint32_t)nsamples) samples[s1 - 1].key = 1;
+        }
+        /* decode times, then the composition offsets */
+        for (t = 0, k = 0, i = 0; i < (uint32_t)n_stts; i++)
+            for (uint32_t r = be32(e_stts + 8 * i); r && k < (uint32_t)nsamples; r--, k++) {
+                samples[k].dts = t;
+                t += be32(e_stts + 8 * i + 4);
+            }
+        for (; k < (uint32_t)nsamples; k++) samples[k].dts = t;
+        for (k = 0; k < (uint32_t)nsamples; k++) samples[k].pts = samples[k].dts;
+        for (k = 0, i = 0; i < (uint32_t)n_ctts; i++)
+            for (uint32_t r = be32(e_ctts + 8 * i); r && k < (uint32_t)nsamples; r--, k++) {
+                uint32_t o = be32(e_ctts + 8 * i + 4);
+                samples[k].pts += ctts_signed ? (int64_t)(int32_t)o : (int64_t)o;
+            }
+        for (k = 0; k < (uint32_t)nsamples; k++) {
+            samples[k].pts = to_us(samples[k].pts - media_time, timescale);
+            samples[k].dts = to_us(samples[k].dts - media_time, timescale);
+        }
+        /* where each sample is: chunks, so many samples each (stsc runs) */
+        for (k = 0, i = 0; i < (uint32_t)n_co && k < (uint32_t)nsamples; i++) {
+            uint64_t off = co64 ? be64(e_co + 8 * i) : be32(e_co + 4 * i);
+            uint32_t per = 0;
+            for (long j = 0; j < n_stsc && be32(e_stsc + 12 * j) <= i + 1; j++) per = be32(e_stsc + 12 * j + 4);
+            for (; per && k < (uint32_t)nsamples; per--, k++) {
+                if (off + samples[k].size > n) { say("Sample %u is outside the file\n", (unsigned)k); return -1; }
+                samples[k].off = (uint32_t)off;
+                off += samples[k].size;
+            }
+        }
+        if (k < (uint32_t)nsamples) { say("Only %u of %d samples are in chunks\n", (unsigned)k, nsamples); return -1; }
+        return 0;
+    }
+    say("No H.264 (avc1) track\n");
+    return -1;
+}
+
+/* One sample as Annex B, into au: each NAL after a start code instead of
+   its length, the avcC's SPS and PPS before an IDR whose sample hasn't
+   its own (as FFmpeg's h264_mp4toannexb), then zero bytes to a whole
+   number of words (trailing_zero_8bits). au_len 0: an empty sample. */
+static uint8_t *au;
+static uint32_t au_cap, au_len;
+
+static int to_annexb(const uint8_t *f, const sample_t *sm)
+{
+    const uint8_t *p = f + sm->off, *end = p + sm->size;
+    uint32_t need = sm->size * 4 + ps_len + 8, o = 0;
+    int have_ps = 0;
+    if (need > au_cap) {
+        free(au);
+        if (!(au = malloc(need))) { au_cap = 0; say("Out of memory for a %u byte sample\n", (unsigned)sm->size); return -1; }
+        au_cap = need;
+    }
+    while (end - p >= nal_size) {
+        uint32_t l = 0, t;
+        for (int b = 0; b < nal_size; b++) l = l << 8 | *p++;
+        if (!l) continue;
+        if (l > (uint32_t)(end - p)) { say("A NAL unit runs past its sample\n"); return -1; }
+        t = p[0] & 31u;
+        if (t == 7 || t == 8) have_ps = 1;
+        if (t == 5 && !have_ps) {
+            memcpy(au + o, ps, ps_len);
+            o += ps_len;
+            have_ps = 1;
+        }
+        au[o] = au[o + 1] = au[o + 2] = 0;
+        au[o + 3] = 1;
+        memcpy(au + o + 4, p, l);
+        o += 4 + l;
+        p += l;
+    }
+    while (o & 3) au[o++] = 0;
+    au_len = o;
+    return 0;
+}
+
+/* -x: the stream as it would be sent, and each sample's times */
+static int export_annexb(const char *in, const char *out)
+{
+    FILE *f = fopen(in, "rb"), *o, *t;
+    uint8_t *data;
+    long n;
+    char name[300];
+    int k;
+    if (!f) { say("Can't open %s\n", in); return 1; }
+    fseek(f, 0, SEEK_END);
+    n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (!(data = malloc((size_t)n + 1)) || fread(data, 1, (size_t)n, f) != (size_t)n) { fclose(f); say("Can't read %s\n", in); return 1; }
+    fclose(f);
+    if (parse_mp4(data, (uint32_t)n)) return 1;
+    snprintf(name, sizeof name, "%s.pts", out);
+    if (!(o = fopen(out, "wb")) || !(t = fopen(name, "w"))) { say("Can't write %s\n", out); return 1; }
+    for (k = 0; k < nsamples; k++) {
+        if (to_annexb(data, &samples[k])) return 1;
+        fwrite(au, 1, au_len, o);
+        fprintf(t, "%lld %lld %d\n", (long long)samples[k].pts, (long long)samples[k].dts, samples[k].key);
+    }
+    fclose(o);
+    fclose(t);
+    say("%d samples, %ux%u, NAL lengths %d bytes, SPS+PPS %u bytes\n", nsamples, (unsigned)mp4_w, (unsigned)mp4_h,
+        nal_size, (unsigned)ps_len);
+    free(data);
+    return 0;
+}
+
 /* ---- the expected checksums ---- */
 
 static uint32_t *want;
+static int64_t *want_pts;                  /* each picture's pts, microseconds */
 static int nwant, want_w, want_h;
 
 static int read_crcs(const char *name)
 {
     FILE *f = fopen(name, "r");
     char line[256];
-    int cap = 0;
+    int cap = 0, tb_num = 1, tb_den = 25;
     if (!f) { say("Can't open %s\n", name); return -1; }
     while (fgets(line, sizeof line, f)) {
         char *x;
+        long long dts, pts;
         if (line[0] == '#') {
             sscanf(line, "#dimensions 0: %dx%d", &want_w, &want_h);
+            sscanf(line, "#tb 0: %d/%d", &tb_num, &tb_den);
             continue;
         }
         if (!(x = strstr(line, "0x"))) continue;
         if (nwant == cap) {
             cap = cap ? cap * 2 : 256;
             want = realloc(want, (size_t)cap * sizeof *want);
-            if (!want) { fclose(f); return -1; }
+            want_pts = realloc(want_pts, (size_t)cap * sizeof *want_pts);
+            if (!want || !want_pts) { fclose(f); return -1; }
         }
-        want[nwant++] = (uint32_t)strtoul(x, NULL, 16);
+        want[nwant] = (uint32_t)strtoul(x, NULL, 16);
+        want_pts[nwant] = sscanf(line, "%*d, %lld, %lld,", &dts, &pts) == 2 && tb_den > 0 ?
+                          pts * 1000000 * tb_num / tb_den : nwant;
+        nwant++;
     }
     fclose(f);
     if (!want_w || !want_h || !nwant) { say("%s has no #dimensions or no frames\n", name); return -1; }
     return 0;
+}
+
+/* FFmpeg's picture with this pts (within a millisecond), or -1 */
+static int want_by_pts(int64_t pts)
+{
+    for (int j = 0; j < nwant; j++)
+        if (want_pts[j] - pts <= 1000 && pts - want_pts[j] <= 1000) return j;
+    return -1;
 }
 
 /* Signatures: FFmpeg's pictures as block means (an 8x8 grid of Y, 4x4 of U
@@ -742,41 +1046,125 @@ static uint32_t vc_memory(void)
     return buf[6];
 }
 
+/* ---- checking a picture ---- */
+
+static int mp4;                            /* the stream is an MP4 (else raw Annex B) */
+static int close_n, far_n, wrong, disorder, no_pts, dups, timing, keep_going;
+static int next_j, have_last;              /* (FFmpeg's picture expected next, if there's no pts) */
+static int64_t last_pts, seek_pts;
+static int seeking, from_key;              /* -s: pictures from the keyframe on */
+static uint8_t *seen;                      /* FFmpeg's pictures that have come back */
+
+/* Checks the picture in frame[] (picture k, from buffer b) against
+   FFmpeg's: from an MP4 the one with the same pts, else the next in
+   order. 0, or -1 to stop. */
+static int check_picture(int k, const buffer_msg_t *b)
+{
+    int j;
+    char t[24];
+    uint32_t crc = 0;
+    if (mp4 && b->pts != TIME_UNKNOWN) {
+        int64_t pts = (int64_t)b->pts;
+        if (have_last && pts <= last_pts) {
+            disorder++;
+            if (disorder <= 5) say("Picture %d: pts %s after %lld: not in display order\n", k, us_text(b->pts, t), (long long)last_pts);
+        }
+        last_pts = pts;
+        have_last = 1;
+        if (seeking && pts >= seek_pts) from_key++;
+        if ((j = want_by_pts(pts)) < 0) {
+            wrong++;
+            if (wrong <= 5) say("Picture %d: pts %s isn't one of FFmpeg's pictures\n", k, us_text(b->pts, t));
+            return keep_going ? 0 : -1;
+        }
+    } else {
+        if (mp4) no_pts++;
+        j = next_j;
+    }
+    next_j = j + 1;
+    if (j >= nwant) return 0;               /* (one too many: counted at the end) */
+    if (seen[j]) {
+        dups++;
+        if (dups <= 5) say("Picture %d: FFmpeg's picture %d again\n", k, j);
+    }
+    seen[j] = 1;
+    if (timing) return 0;
+    crc = frame_crc(frame, b);
+    if (verbose)
+        say("  picture %d (FFmpeg's %d): pts %s, planes %u, offsets %u %u %u, pitch %u %u %u; bytes %02X %02X %02X %02X; checksum &%08X\n",
+            k, j, us_text(b->pts, t), (unsigned)b->planes, (unsigned)b->offsets[0], (unsigned)b->offsets[1],
+            (unsigned)b->offsets[2], (unsigned)b->pitch[0], (unsigned)b->pitch[1], (unsigned)b->pitch[2],
+            frame[0], frame[1], frame[2], frame[3], (unsigned)crc);
+    if (crc != want[j]) {
+        int is_close = 0;
+        if (j < nsig) {
+            float s[SIGN], d, best = 1e9f;
+            int bj = -1;
+            frame_sig(frame, b, s);
+            d = sig_diff(s, sig[j]);
+            for (int q = 0; q < nsig; q++) {
+                float dq = sig_diff(s, sig[q]);
+                if (dq < best) { best = dq; bj = q; }
+            }
+            if (d <= 1.0f) { is_close = 1; close_n++; }
+            else {
+                far_n++;
+                if (far_n <= 5) say("Picture %d: not close to FFmpeg's picture %d (%.1f); closest is FFmpeg's %d (%.1f)\n",
+                                    k, j, (double)d, bj, (double)best);
+            }
+        }
+        if (!is_close) {
+            if (wrong < 5 && j >= nsig) say("Picture %d: checksum &%08X, FFmpeg's &%08X\n", k, (unsigned)crc, (unsigned)want[j]);
+            wrong++;
+            if (!keep_going) return -1;
+        }
+    }
+    return 0;
+}
+
 /* ---- main ---- */
 
 int probe_main(int argc, char **argv)
 {
-    const char *stream_name = NULL, *crc_name = NULL, *sig_name = NULL;
-    int close_n = 0, far_n = 0;
+    const char *stream_name = NULL, *crc_name = NULL, *sig_name = NULL, *x_out = NULL;
     uint8_t *stream = NULL;
-    uint32_t stream_len = 0, sent = 0, instance = 0, setup[11], t_start = 0, t_end = 0, last_progress;
-    int connected = 0, opened = 0, created = 0, enabled = 0, in_on = 0, out_on = 0, keep_going = 0;
-    uint32_t vcmem = 0;
-    int frames = 0, wrong = 0, eos_sent = 0, eos_seen = 0, fatal = 0, i, format_changes = 0, events = 0, outputs_given = 0;
+    uint32_t stream_len = 0, file_len = 0, sent = 0, instance = 0, setup[11], t_start = 0, t_end = 0, last_progress;
+    int connected = 0, opened = 0, created = 0, enabled = 0, in_on = 0, out_on = 0;
+    uint32_t vcmem = 0, copy_cs = 0, au_pos = 0;
+    int frames = 0, eos_sent = 0, eos_seen = 0, fatal = 0, i, format_changes = 0, events = 0, outputs_given = 0;
+    int cur_s = 0, seek_s = -1, seek_after = 0, seek_disable = 0, seeked = 0, before_flush = 0, missing = 0, checked = 0;
     _kernel_oserror *e;
     static const uint32_t code[9] = { 0xe3510004u, 0x05903000u, 0x02833001u, 0x05803000u, 0xe3510012u,
                                       0x05903004u, 0x02833001u, 0x05803004u, 0xe1a0f00eu };
 
     /* (a fresh start each time: the host tests call this more than once) */
-    free(want); want = NULL; nwant = want_w = want_h = 0; npci = 0; pci_alloc_swi = 0; evbuf = NULL; evsize = 0; dump_dir = NULL; big_events = 0; nsig = 0; npend = 0; data_failed = 0; waiting = ""; out_size = 0; stub = 0; comp = 0;
+    free(want); want = NULL; free(want_pts); want_pts = NULL; nwant = want_w = want_h = 0; npci = 0; pci_alloc_swi = 0; evbuf = NULL; evsize = 0; dump_dir = NULL; big_events = 0; nsig = 0; npend = 0; data_failed = 0; waiting = ""; out_size = 0; stub = 0; comp = 0;
     memset(in_busy, 0, sizeof in_busy); memset(out_busy, 0, sizeof out_busy); out2 = NULL; verbose = 0;
+    mp4 = 0; nsamples = 0; au_len = 0; close_n = far_n = wrong = disorder = no_pts = dups = timing = keep_going = 0;
+    next_j = have_last = 0; seek_pts = 0; seeking = from_key = 0; free(seen); seen = NULL; rx_cs = rx_bytes = 0;
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-o") && i + 1 < argc) out2 = fopen(argv[++i], "a");   /* (added to: Test runs three) */
+        if (!strcmp(argv[i], "-o") && i + 1 < argc) out2 = fopen(argv[++i], "a");   /* (added to: Test runs several) */
         else if (!strcmp(argv[i], "-n")) keep_going = 1;
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) dump_dir = argv[++i];
+        else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-F")) seek_disable = 1;
+        else if (!strcmp(argv[i], "-t")) timing = 1;
+        else if (!strcmp(argv[i], "-x") && i + 1 < argc) x_out = argv[++i];
         else if (!stream_name) stream_name = argv[i];
         else if (!crc_name) crc_name = argv[i];
         else if (!sig_name) sig_name = argv[i];
         else stream_name = NULL;
     }
-    if (!stream_name || !crc_name) {
-        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] stream.h264 expected.crc\n");
+    if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
+    if (!stream_name || !crc_name || seek_after < 0) {
+        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] stream expected.crc [expected.sig]\n");
         return 1;
     }
     say("mmaldecode: %s on the VideoCore, through VCHIQ and MMAL\n", stream_name);
     if (read_crcs(crc_name)) goto done;
     if (sig_name && read_sigs(sig_name)) goto done;
+    if (!(seen = calloc((size_t)nwant, 1))) goto done;
     {
         FILE *f = fopen(stream_name, "rb");
         long n;
@@ -787,9 +1175,23 @@ int probe_main(int argc, char **argv)
         stream = aligned((size_t)n + 4);       /* padded to 4 bytes with zeros (trailing_zero_8bits) */
         if (!stream || fread(stream, 1, (size_t)n, f) != (size_t)n) { fclose(f); say("Can't read %s\n", stream_name); goto done; }
         fclose(f);
+        file_len = (uint32_t)n;
         stream_len = ((uint32_t)n + 3) & ~3u;
     }
-    say("%u bytes, %dx%d, %d pictures expected\n", (unsigned)stream_len, want_w, want_h, nwant);
+    mp4 = file_len >= 8 && (!memcmp(stream + 4, "ftyp", 4) || !memcmp(stream + 4, "moov", 4));
+    if (mp4 && parse_mp4(stream, file_len)) goto done;
+    if (seek_after) {
+        if (!mp4) { say("-s needs an MP4 (for its keyframes and times)\n"); goto done; }
+        for (i = nsamples - 1; i > 0 && seek_s < 0; i--) if (samples[i].key) seek_s = i;
+        if (seek_s < 0) { say("No keyframe after the first to seek to\n"); goto done; }
+        seek_pts = samples[seek_s].pts;
+        seeking = 1;
+    }
+    if (mp4)
+        say("MP4: %d samples, %ux%u; one access unit a buffer, with its pts; %d of FFmpeg's pictures expected\n",
+            nsamples, (unsigned)mp4_w, (unsigned)mp4_h, nwant);
+    else
+        say("%u bytes, %dx%d, %d pictures expected\n", (unsigned)stream_len, want_w, want_h, nwant);
     vcmem = vc_memory();
     if (vcmem) say("The VideoCore has %u MB of memory (gpu_mem)\n\n", (unsigned)(vcmem >> 20));
     else say("(the firmware didn't say how much memory the VideoCore has)\n\n");
@@ -879,21 +1281,52 @@ int probe_main(int argc, char **argv)
     out_on = 1;
     /* (the output's buffers: after the decoder's first format change) */
 
-    /* 3-6. feed, collect, check */
+    /* 3-8. feed, collect, check */
     t_start = last_progress = now_cs();
     while (!eos_seen && !fatal) {
         uint32_t got;
         /* input: fill every free buffer */
-        for (i = 0; i < IN_BUFS && !eos_sent; i++) {
+        for (i = 0; i < IN_BUFS && !eos_sent && !fatal; i++) {
             uint32_t n, flags = 0;
+            uint64_t pts = TIME_UNKNOWN, dts = TIME_UNKNOWN;
             if (in_busy[i]) continue;
-            n = stream_len - sent < IN_SIZE ? stream_len - sent : IN_SIZE;
-            probe_svc_copy(in_buf[i], stream + sent, (n + 3) & ~3u);   /* (the stream is padded) */
+            if (mp4) {                      /* one access unit (or a 64 KB part of one) */
+                while (au_pos == au_len && cur_s < nsamples) {
+                    au_pos = 0;
+                    if (to_annexb(stream, &samples[cur_s])) { fatal = 1; break; }
+                    if (!au_len) cur_s++;   /* (an empty sample) */
+                }
+                if (fatal) break;
+                if (cur_s == nsamples) {    /* (only empty samples were left) */
+                    n = 0;
+                    flags = FLAG_EOS;
+                    eos_sent = 1;
+                } else {
+                    const sample_t *sm = &samples[cur_s];
+                    n = au_len - au_pos < IN_SIZE ? au_len - au_pos : IN_SIZE;
+                    if (!au_pos) {
+                        flags = FLAG_FRAME_START | (sm->key ? FLAG_KEYFRAME : 0);
+                        pts = (uint64_t)sm->pts;
+                        dts = (uint64_t)sm->dts;
+                    }
+                    probe_svc_copy(in_buf[i], au + au_pos, n);   /* (whole words) */
+                    au_pos += n;
+                    if (au_pos == au_len) {
+                        flags |= FLAG_FRAME_END;
+                        au_pos = au_len = 0;
+                        if (++cur_s == nsamples) { flags |= FLAG_EOS; eos_sent = 1; }
+                    }
+                }
+            } else {
+                n = stream_len - sent < IN_SIZE ? stream_len - sent : IN_SIZE;
+                probe_svc_copy(in_buf[i], stream + sent, (n + 3) & ~3u);   /* (the stream is padded) */
+                if (sent + n == stream_len) { flags = FLAG_EOS; eos_sent = 1; }
+            }
             sent += n;
-            if (sent == stream_len) { flags = FLAG_EOS; eos_sent = 1; }
-            if (buffer_to_vc(&in_info, i, in_buf[i], IN_SIZE, n, flags)) { fatal = 1; break; }
+            if (buffer_to_vc(&in_info, i, in_buf[i], IN_SIZE, n, flags, pts, dts)) { fatal = 1; break; }
             in_busy[i] = 1;
         }
+        if (fatal) break;
         /* a message: kept ones first */
         if (npend) {
             got = pend_len[0];
@@ -917,6 +1350,7 @@ int probe_main(int argc, char **argv)
                         "bulk receives done %u, aborted %u\n", (unsigned)sent, (unsigned)stream_len,
                         nin, IN_BUFS, out_busy[0], out_busy[1], out_busy[2],
                         (unsigned)bulk_done(0), (unsigned)bulk_done(1));
+                    if (mp4) say("  %d of %d samples sent\n", cur_s, nsamples);
                     if (!frames && !format_changes)
                         say("  The decoder never said what it would make. If the VideoCore is short of memory\n"
                             "  for this size (%u MB here; Linux's players wanted gpu_mem=128 or more for 1080p),\n"
@@ -951,46 +1385,50 @@ int probe_main(int argc, char **argv)
                     say("Output buffer back with status %s\n", st(((hdr_t *)msg)->status));
                     continue;
                 }
-                if (b.length && !b.payload_in_message)   /* (received as it arrived: take_data) */
-                    probe_svc_copy(frame, out_buf[k], (b.length + 3) & ~3u);
-                else if (b.length)
-                    memcpy(frame, b.short_data, b.payload_in_message);
                 if (b.length) {
-                    uint32_t crc = frame_crc(frame, &b);
-                    dump("p", frames, frame, b.length);
-                    if (verbose)
-                        say("  picture %d: planes %u, offsets %u %u %u, pitch %u %u %u; bytes %02X %02X %02X %02X; checksum &%08X\n",
-                            frames, (unsigned)b.planes, (unsigned)b.offsets[0], (unsigned)b.offsets[1], (unsigned)b.offsets[2],
-                            (unsigned)b.pitch[0], (unsigned)b.pitch[1], (unsigned)b.pitch[2],
-                            frame[0], frame[1], frame[2], frame[3], (unsigned)crc);
-                    if (frames < nwant && crc != want[frames]) {
-                        int is_close = 0;
-                        if (frames < nsig) {
-                            float s[SIGN], d = 1e9f, best = 1e9f;
-                            int bj = -1;
-                            frame_sig(frame, &b, s);
-                            d = sig_diff(s, sig[frames]);
-                            for (int j = 0; j < nsig; j++) {
-                                float dj = sig_diff(s, sig[j]);
-                                if (dj < best) { best = dj; bj = j; }
-                            }
-                            if (d <= 1.0f) { is_close = 1; close_n++; }
-                            else {
-                                far_n++;
-                                if (far_n <= 5) say("Picture %d: not close to FFmpeg's picture %d (%.1f); closest is FFmpeg's %d (%.1f)\n",
-                                                    frames, frames, (double)d, bj, (double)best);
-                            }
-                        }
-                        if (!is_close) {
-                            if (wrong < 5 && frames >= nsig) say("Picture %d: checksum &%08X, FFmpeg's &%08X\n", frames, (unsigned)crc, (unsigned)want[frames]);
-                            wrong++;
-                            if (!keep_going) fatal = 1;
-                        }
-                    }
+                    uint32_t t0 = now_cs();
+                    if (!b.payload_in_message)     /* (received as it arrived: take_data) */
+                        probe_svc_copy(frame, out_buf[k], (b.length + 3) & ~3u);
+                    else
+                        memcpy(frame, b.short_data, b.payload_in_message);
+                    copy_cs += now_cs() - t0;
+                    if (!timing) dump("p", frames, frame, b.length);
+                    if (check_picture(frames, &b)) fatal = 1;
                     frames++;
                 }
                 if (b.flags & FLAG_EOS) { eos_seen = 1; t_end = now_cs(); }
                 else if (outputs_given && give_outputs()) fatal = 1;
+            }
+            /* -s: a flush part way, then on from the last keyframe. The
+               buffers each port held come back (empty) before its reply;
+               the output's are handed over again as they arrive. */
+            if (seek_after && !seeked && frames == seek_after && !eos_seen && !fatal) {
+                char t[24];
+                uint32_t t0 = now_cs();
+                say("\nAfter %d pictures: %s, then on from the last keyframe (sample %d, pts %s)\n", frames,
+                    seek_disable ? "both ports disabled and enabled again" : "both ports flushed", seek_s,
+                    us_text((uint64_t)seek_pts, t));
+                before_flush = frames;
+                if (seek_disable) {
+                    if (port_action(&out_info, ACTION_DISABLE, "Output disable (seek)")) { fatal = 1; break; }
+                    out_on = 0;
+                    if (port_action(&in_info, ACTION_DISABLE, "Input disable (seek)")) { fatal = 1; break; }
+                    in_on = 0;
+                    if (port_action(&in_info, ACTION_ENABLE, "Input enable (seek)")) { fatal = 1; break; }
+                    in_on = 1;
+                    if (port_action(&out_info, ACTION_ENABLE, "Output enable (seek)")) { fatal = 1; break; }
+                    out_on = 1;
+                } else if (port_action(&in_info, ACTION_FLUSH, "Input flush") ||
+                           port_action(&out_info, ACTION_FLUSH, "Output flush")) {
+                    fatal = 1;
+                    break;
+                }
+                say("  done in %u cs\n\n", (unsigned)(now_cs() - t0));
+                seeked = 1;
+                cur_s = seek_s;
+                au_pos = au_len = 0;
+                eos_sent = 0;
+                if ((next_j = want_by_pts(seek_pts)) < 0) next_j = nwant;
             }
         } else if (((hdr_t *)msg)->type == T_EVENT_TO_HOST) {
             event_msg_t ev;
@@ -1096,7 +1534,42 @@ int probe_main(int argc, char **argv)
         say("\n%d pictures decoded in %u.%02u s: %u.%u pictures a second\n", frames, (unsigned)(cs / 100),
             (unsigned)(cs % 100), (unsigned)(frames * 100 / cs), (unsigned)(frames * 1000 / cs % 10));
     }
-    say("%d of %d checked against FFmpeg: %d wrong\n", frames < nwant ? frames : nwant, nwant, wrong);
+    for (i = 0; i < nwant; i++) {
+        checked += seen[i];
+        if (mp4 && !seen[i] && (!seeked || want_pts[i] >= seek_pts)) {
+            if (++missing <= 5) say("FFmpeg's picture %d (pts %lld) never came back\n", i, (long long)want_pts[i]);
+        }
+    }
+    if (mp4) {
+        if (missing > 5) say("(%d of FFmpeg's pictures never came back)\n", missing);
+        if (no_pts) say("%d pictures came back without a pts (matched in order instead)\n", no_pts);
+        if (disorder) say("%d pictures came back out of display order\n", disorder);
+        if (seeked)
+            say("Before the flush: %d pictures, and %d more already on their way; from the keyframe on, %d\n"
+                "  (FFmpeg's pictures from pts %lld on: %s)\n", before_flush, frames - before_flush - from_key, from_key,
+                (long long)seek_pts, missing ? "some missing" : "all of them");
+        if (eos_seen && !no_pts && !disorder && !missing && !dups && !wrong)
+            say("pts: every picture came back with its own pts, in display order\n");
+    }
+    if (timing) {
+        say("(-t: the pictures were timed, not checked)\n");
+        say("Receiving: %u cs waiting for %u KB by bulk transfer; copying out: %u cs for %d pictures\n",
+            (unsigned)rx_cs, (unsigned)(rx_bytes >> 10), (unsigned)copy_cs, frames);
+        if (frames && out_size) {           /* the copy on its own, timed precisely */
+            uint32_t reps = (64u << 20) / out_size, t0, dt;
+            if (reps < 10) reps = 10;
+            if (reps > 2000) reps = 2000;
+            t0 = now_cs();
+            for (uint32_t r = 0; r < reps; r++) probe_svc_copy(frame, out_buf[0], out_size);
+            dt = now_cs() - t0;
+            if (!dt) dt = 1;
+            say("One copy of a %u byte picture out of PCI memory: %u.%02u ms (%u MB/s; %u copies in %u cs)\n",
+                (unsigned)out_size, (unsigned)(dt * 1000 / reps / 100), (unsigned)(dt * 1000 / reps % 100),
+                (unsigned)((uint64_t)out_size * reps * 100 / dt / 1000000), (unsigned)reps, (unsigned)dt);
+        }
+    } else {
+        say("%d of %d checked against FFmpeg: %d wrong\n", mp4 ? checked : frames < nwant ? frames : nwant, nwant, wrong);
+    }
     if (format_changes) say("(%d format change%s)\n", format_changes, format_changes == 1 ? "" : "s");
 
 done:
@@ -1112,12 +1585,16 @@ done:
     if (stub) swi(OS_Module, 7, 0, stub, 0, NULL, NULL);
     pci_free_all();
     {
-        int ok = eos_seen && !fatal && !wrong && frames == nwant;
-        if (nsig) say("Not bit-exact but close to FFmpeg's (block means within 1): %d; not close: %d\n", close_n, far_n);
-        say("\nResult: %s\n", ok && !close_n ? "OK - the VideoCore decoded every picture exactly as FFmpeg does" :
+        int complete = mp4 ? !missing : frames == nwant;
+        int ok = eos_seen && !fatal && !wrong && complete && !disorder && !dups;
+        if (nsig && !timing) say("Not bit-exact but close to FFmpeg's (block means within 1): %d; not close: %d\n", close_n, far_n);
+        say("\nResult: %s\n", ok && timing ? "OK - timed (the pictures weren't checked)" :
+                              ok && !close_n ? "OK - the VideoCore decoded every picture exactly as FFmpeg does" :
                               ok ? "OK - every picture matches FFmpeg's, some within rounding (see above)" :
-                              eos_seen && frames != nwant ? "the decoder finished, but with a different number of pictures" :
-                              wrong ? "pictures differ from FFmpeg's" : "the decode didn't finish (see above)");
+                              wrong ? "pictures differ from FFmpeg's" :
+                              eos_seen && disorder ? "pictures came back out of display order" :
+                              eos_seen && !complete ? "the decoder finished, but with a different number of pictures" :
+                              eos_seen && dups ? "a picture came back twice" : "the decode didn't finish (see above)");
         if (out2) fclose(out2);
         (void)events;
         return ok ? 0 : 1;

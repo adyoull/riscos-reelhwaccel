@@ -4,7 +4,8 @@
 # (tests/qemu/aligntrap.sh), against fakes of the VCHIQ module, the MMAL
 # firmware, the firmware mailbox and the HEVC block.
 #
-# Needs: arm-linux-gnueabihf-gcc and libc6-dev-armhf-cross, and qemu-arm
+# Needs: arm-linux-gnueabihf-gcc and libc6-dev-armhf-cross, ffmpeg with libx264
+# (for mp4_check.sh; skipped without), and qemu-arm
 # with tests/qemu/qemu-8.2.2-align-trap.patch (tests/qemu/build-qemu.sh;
 # QEMU=path if it isn't the qemu-arm on PATH). The HEVCHW module's build
 # check uses arm-linux-gnueabihf-gcc too (MODULE_CROSS=... to change it).
@@ -33,8 +34,12 @@ echo "== mmalprobe_test (VCHIQ service open, ril.video_decode created, ports, en
 # tools/mmaldecode: H.264 decoded through a fake VCHIQ + MMAL decoder that behaves as the Pi's did,
 # the real callback stub, checksums as framecrc
 arm-linux-gnueabihf-gcc -O1 -marm -DPROBE_TEST -I$HERE/fake -Wall -no-pie -o "$O/mmaldecode_test" "$TOP/tools/mmaldecode/mmaldecode.c" "$HERE/mmaldecode_test.c" || bad=1
-echo "== mmaldecode_test (stream in by bulk, pictures back by bulk, format changes, buffer numbering, checksums, clean-up)"
-"$TOP/tests/qemu/aligntrap.sh" "$O/mmaldecode_test" | grep "FAIL\|mmaldecode_test:" || bad=1
+echo "== mmaldecode_test (stream in by bulk, pictures back by bulk, format changes, buffer numbering, checksums, clean-up;"
+echo "   MP4 input: access units with pts, display order, flush and seek, -t)"
+"$TOP/tests/qemu/aligntrap.sh" "$O/mmaldecode_test" > "$O/mmaldecode_test.out" || bad=1
+grep "FAIL\|mmaldecode_test:" "$O/mmaldecode_test.out"
+# ... and its MP4 input against real MP4s from x264, decoded by FFmpeg (skipped without them)
+"$HERE/mp4_check.sh" "$O/mmaldecode_test" "$O" || bad=1
 
 # hevchw/module: the HEVCHW module (its C, and header.s's veneers and IRQ handler) on a fake RISC OS
 arm-linux-gnueabihf-gcc -c -o "$O/hevchw_header.o" "$TOP/hevchw/module/header.s" &&

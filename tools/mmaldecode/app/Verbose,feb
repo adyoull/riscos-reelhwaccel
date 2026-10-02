@@ -1,6 +1,6 @@
-| Verbose: the small clip only, with every message to and from the decoder
-| written out (-v). The report goes to ResultV; the first three pictures
-| and any event data are saved in Dump.
+| Verbose: the small clip's MP4 only, with every message to and from the
+| decoder written out (-v), each picture's pts with it. The report goes to
+| ResultV; the first three pictures and any event data are saved in Dump.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
@@ -9,4 +9,4 @@ RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it
 WimpSlot -min 16384K -max 16384K
 Remove <Obey$Dir>.ResultV
 CDir <Obey$Dir>.Dump
-Run <Obey$Dir>.mmaldecode -v -n -d <Obey$Dir>.Dump -o <Obey$Dir>.ResultV <Obey$Dir>.clips.small.stream <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.mmaldecode -v -n -d <Obey$Dir>.Dump -o <Obey$Dir>.ResultV <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
