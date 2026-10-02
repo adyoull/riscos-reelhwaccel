@@ -43,6 +43,17 @@
 #define OS_Module                 0x1E
 #define OS_SWINumberFromString    0x39
 #define OS_ReadMonotonicTime      0x42
+#define OS_DynamicArea            0x66
+#define OS_Memory                 0x68
+#define OS_MMUControl             0x6B
+#define DA_NOT_DRAGGABLE          (1u << 7)
+#define DA_SPECIFIC_PAGES         (1u << 8)
+#define DA_PMP                    (1u << 20)   /* (RISC OS 5: a Physical Memory Pool) */
+#define PAGE_NOT_BUFFERABLE       (1u << 4)
+#define PAGE_NOT_CACHEABLE        (1u << 5)
+#define PAGE_LOCK                 (1u << 15)
+#define VC_RAM_TOP                0x40000000u  /* the VideoCore reaches the first 1 GB */
+#define ARMOP_CACHE_CLEAN_INVALIDATE_RANGE 21
 #define OS_SynchroniseCodeAreas   0x6E
 #define BCMSupport_SendTempPropertyBuffer 0x591C5
 #define TAG_GET_VC_MEMORY         0x00010006
@@ -84,7 +95,8 @@ enum { ES_VIDEO = 3 };
 
 #define IN_BUFS        20
 #define IN_SIZE        (64 * 1024)
-#define OUT_BUFS       3
+#define OUT_BUFS_DEFAULT 3                 /* (MMALDecode's; the decoder asks for 1) */
+#define MAX_OUT        8
 #define CTX_BASE       1
 #define REPLY_CS       300
 #define EFCH_WAIT_CS   200
@@ -153,7 +165,9 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r);   /* the host tests' fak
 static _kernel_oserror *vc_swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
 #endif
 void vcdec_svc_copy(void *dst, const void *src, size_t n);                       /* vcdec_copy.S */
-void vcdec_svc_copy_rows(uint8_t *dst, int dst_stride, const uint8_t *src, int src_stride, int width, int rows);
+void vcdec_copy_rows(uint8_t *dst, int dst_stride, const uint8_t *src, int src_stride, int width, int rows, int mode);
+void vcdec_svc_call(uint32_t fn, uint32_t r0, uint32_t r1);
+#define COPY_SVC 4                         /* (vcdec_copy_rows's mode: in SVC mode) */
 
 /* the output buffers: with us and empty, with the decoder, or holding a
    picture (or the EOS) that is still arriving or not yet taken */
@@ -180,10 +194,17 @@ struct vcdec {
     uint32_t pci_alloc_swi, pci_free_swi;
     uint8_t *in_buf[IN_BUFS];
     int in_busy[IN_BUFS];
-    uint8_t *out_buf[OUT_BUFS];
-    uint32_t out_cap[OUT_BUFS], out_need;
-    int out_state[OUT_BUFS];
-    held_t held[OUT_BUFS + 1];
+    int nout;                              /* output buffers (cfg.out_buffers, or 3) */
+    uint8_t *out_buf[MAX_OUT];
+    uint32_t out_cap[MAX_OUT], out_need;
+    int out_state[MAX_OUT];
+    uint32_t out_area[MAX_OUT];            /* VCDEC_OUT_PMP: each buffer's pool (dynamic area number) */
+    uint32_t armop_cci;                    /* VCDEC_OUT_PMP, cached: the kernel's Cache_CleanInvalidateRange */
+    int copy_way;                          /* vcdec_copy_rows's way: 0 LDM 4, 1 LDM 8, 2 NEON */
+    int pmp_svc;                           /* a pool not readable in USR mode (OS_Memory 24): copied in SVC */
+    int pool_stuck;                        /* a pool couldn't be removed: the RMA block (its handler) is kept */
+    held_t held[MAX_OUT + 1];
+    held_t last_ok;                        /* the last picture copied out (its buffer, layout) */
     int nheld;
     uint32_t rx_queued;                    /* receives queued (the callback counts them done) */
     uint8_t *evbuf;
@@ -274,11 +295,9 @@ unsigned vcdec_gpu_mem(void)
 }
 
 /* the callback's counters, in the RMA after its code: receives done, aborted */
-static uint32_t bulk_count(vcdec *d, int which)
+static void bulk_counts(vcdec *d, uint32_t v[2])
 {
-    uint32_t v[2];
     vcdec_svc_copy(v, (const void *)(uintptr_t)(d->stub + 64), 8);
-    return v[which];
 }
 
 /* ---- PCI memory ---- */
@@ -303,6 +322,131 @@ static void *pci_alloc(vcdec *d, size_t n)
 static void pci_free(vcdec *d, void *p)
 {
     if (p) swi((int)d->pci_free_swi, (uint32_t)(uintptr_t)p, 0, 0, 0, NULL, NULL);
+}
+
+/* ---- a Physical Memory Pool (VCDEC_OUT_PMP) ----
+   One dynamic area per picture buffer: pages that OS_Memory 12 recommends
+   (physically contiguous, below 1 GB, as VCHIQ's bulk transfers need),
+   claimed (OS_DynamicArea 21, locked) and mapped in (22) user readable,
+   cacheable or not. PRM: OS_DynamicArea 0/21/22, OS_Memory 12. */
+
+static _kernel_oserror *pmp_op(vcdec *d, uint32_t reason, uint32_t area, uint32_t *list, uint32_t n)
+{
+    (void)d;
+    return swi(OS_DynamicArea, reason, area, (uint32_t)(uintptr_t)list, n, NULL, NULL);
+}
+
+static int pmp_free(vcdec *d, uint32_t area, uint32_t pages)
+{
+    _kernel_oserror *e;
+    uint32_t *l = malloc(pages * 12);
+    if (l) {
+        for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = 0xFFFFFFFFu; l[3 * j + 2] = 0; }
+        pmp_op(d, 22, area, l, pages);     /* unmapped, */
+        pmp_op(d, 21, area, l, pages);     /* released, */
+        free(l);
+    }
+    if ((e = swi(OS_DynamicArea, 1, area, 0, 0, NULL, NULL)) != NULL) {   /* removed */
+        logf_(d, "A picture pool (area %u) can't be removed: %s", (unsigned)area, e->errmess);
+        d->pool_stuck = 1;                 /* (its handler, in the RMA block, must stay) */
+        return -1;
+    }
+    return 0;
+}
+
+static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
+{
+    uint32_t pages = (size + 4095) >> 12, first, *l, phys[2];
+    int uncached = (d->cfg.flags & VCDEC_OUT_UNCACHED) != 0;
+    _kernel_swi_regs r;
+    _kernel_oserror *e;
+    char name[32];
+    void *base;
+    /* the pool and the page list first: OS_Memory 12's pages are only sure
+       to be free if claiming them is the next thing that takes pages */
+    if (!(l = malloc(pages * 12))) { fail(d, VCDEC_ERROR, "Out of memory"); return NULL; }
+    snprintf(name, sizeof name, "vcdec picture");
+    memset(&r, 0, sizeof r);
+    r.r[0] = 0; r.r[1] = -1; r.r[2] = 0; r.r[3] = -1;
+    r.r[4] = (int)(DA_SPECIFIC_PAGES | DA_PMP | DA_NOT_DRAGGABLE);   /* (access 0: user read/write) */
+    r.r[5] = (int)(pages << 12); r.r[6] = (int)(d->stub + 72); r.r[7] = 0;
+    r.r[8] = (int)(uintptr_t)name; r.r[9] = (int)pages;
+    if ((e = vc_swi(OS_DynamicArea, &r)) != NULL) { free(l); fail(d, VCDEC_ERROR, "A Physical Memory Pool: %s", e->errmess); return NULL; }
+    *area_out = (uint32_t)r.r[1];
+    base = (void *)(uintptr_t)(uint32_t)r.r[3];
+    memset(&r, 0, sizeof r);               /* contiguous pages for DMA below 1 GB (R4-R7: RISC OS 5.29+) */
+    r.r[0] = 12 | 1 << 8 | 1 << 9; r.r[1] = (int)(pages << 12); r.r[2] = 12;
+    r.r[4] = 0; r.r[5] = 0; r.r[6] = (int)(VC_RAM_TOP - 1); r.r[7] = 0;
+    if ((e = vc_swi(OS_Memory, &r)) != NULL) {
+        free(l); pmp_free(d, *area_out, 0);
+        fail(d, VCDEC_ERROR, "OS_Memory 12 (%u pages): %s", (unsigned)pages, e->errmess);
+        return NULL;
+    }
+    first = (uint32_t)r.r[3];
+    for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = first + j; l[3 * j + 2] = PAGE_LOCK; }
+    if ((e = pmp_op(d, 21, *area_out, l, pages)) != NULL) {
+        free(l); pmp_free(d, *area_out, pages);
+        fail(d, VCDEC_ERROR, "Claiming %u pages from %u: %s", (unsigned)pages, (unsigned)first, e->errmess);
+        return NULL;
+    }
+    for (uint32_t j = 0; j < pages; j++) {
+        l[3 * j] = j; l[3 * j + 1] = j;
+        l[3 * j + 2] = PAGE_LOCK | (uncached ? PAGE_NOT_CACHEABLE : 0);   /* (access 0; uncached: still bufferable, */
+                                                                           /* as PCI_RAMAlloc memory) */
+    }
+    if ((e = pmp_op(d, 22, *area_out, l, pages)) != NULL) {
+        free(l); pmp_free(d, *area_out, pages);
+        fail(d, VCDEC_ERROR, "Mapping %u pages: %s", (unsigned)pages, e->errmess);
+        return NULL;
+    }
+    free(l);
+    /* (checked: the first and last pages' physical addresses, as VCHIQ will see them) */
+    for (int k = 0; k < 2; k++) {
+        uint32_t blk[3] = { 0, (uint32_t)(uintptr_t)base + (k ? (pages - 1) << 12 : 0), 0 };
+        if ((e = swi(OS_Memory, 0x2200, (uint32_t)(uintptr_t)blk, 1, 0, NULL, NULL)) != NULL) {
+            pmp_free(d, *area_out, pages);
+            fail(d, VCDEC_ERROR, "OS_Memory 0: %s", e->errmess);
+            return NULL;
+        }
+        phys[k] = blk[2];
+    }
+    if (phys[1] != phys[0] + ((pages - 1) << 12) || phys[1] > VC_RAM_TOP - 4096) {
+        pmp_free(d, *area_out, pages);
+        fail(d, VCDEC_ERROR, "The pool's pages aren't contiguous below 1 GB (&%08X..&%08X)", (unsigned)phys[0],
+             (unsigned)phys[1]);
+        return NULL;
+    }
+    {   /* readable in USR mode? (if not, it's copied in SVC mode: no abort part way) */
+        uint32_t acc = 0;
+        memset(&r, 0, sizeof r);
+        r.r[0] = 24; r.r[1] = (int)(uintptr_t)base; r.r[2] = (int)((uintptr_t)base + (pages << 12));
+        if (!vc_swi(OS_Memory, &r)) acc = (uint32_t)r.r[1];   /* (the flags come back in R1) */
+        if (!(acc & 1)) {
+            if (!d->pmp_svc) logf_(d, "The pool isn't readable in USR mode (OS_Memory 24: &%X): copied in SVC mode", (unsigned)acc);
+            d->pmp_svc = 1;
+        }
+    }
+    logf_(d, "A picture buffer in a Physical Memory Pool: area %u, %u pages at &%08X, physical &%08X, %s",
+          (unsigned)*area_out, (unsigned)pages, (unsigned)(uintptr_t)base, (unsigned)phys[0],
+          uncached ? "not cacheable" : "cacheable");
+    return base;
+}
+
+/* output buffer i made `size` bytes (any old one freed): 0, or -1 failed */
+static int out_alloc(vcdec *d, int i, uint32_t size)
+{
+    if (d->out_buf[i]) {
+        if (d->cfg.flags & VCDEC_OUT_PMP) pmp_free(d, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
+        else pci_free(d, d->out_buf[i]);
+        d->out_buf[i] = NULL;
+        d->out_cap[i] = 0;
+    }
+    if (d->cfg.flags & VCDEC_OUT_PMP) d->out_buf[i] = pmp_alloc(d, size, &d->out_area[i]);
+    else if (!(d->out_buf[i] = pci_alloc(d, size)))
+        fail(d, VCDEC_ERROR, "No PCI memory (PCI_RAMAlloc) for %u byte pictures", (unsigned)size);
+    if (!d->out_buf[i]) return -1;
+    d->out_cap[i] = size;
+    return 0;
 }
 
 /* ---- messages ---- */
@@ -341,8 +485,10 @@ static int queue_receive(vcdec *d, uint8_t *dst, uint32_t n, uint32_t *seq)
 /* receive seq done? (-1: one was aborted) */
 static int received(vcdec *d, uint32_t seq)
 {
-    if (bulk_count(d, 1)) return -1;
-    return (int32_t)(bulk_count(d, 0) - seq) >= 0;
+    uint32_t v[2];
+    bulk_counts(d, v);                     /* (both in one copy: one SVC entry) */
+    if (v[1]) return -1;
+    return (int32_t)(v[0] - seq) >= 0;
 }
 
 /* waits for receive seq (and so every one before it) */
@@ -409,7 +555,7 @@ static void handle_msg(vcdec *d, uint32_t got)
             d->in_busy[k] = 0;
             return;
         }
-        if (b->drvbuf.port_handle != d->out_info.port_handle || k >= OUT_BUFS) {
+        if (b->drvbuf.port_handle != d->out_info.port_handle || k >= (uint32_t)d->nout) {
             logf_(d, "A buffer back from port %u", (unsigned)b->drvbuf.port_handle);
             return;
         }
@@ -421,7 +567,7 @@ static void handle_msg(vcdec *d, uint32_t got)
         {
             held_t *p = &d->held[d->nheld];
             uint32_t w = d->out_info.video.width, rows = d->out_info.video.height;
-            if (d->nheld >= OUT_BUFS + 1) { fail(d, VCDEC_ERROR, "More pictures back than buffers"); return; }
+            if (d->nheld >= d->nout + 1) { fail(d, VCDEC_ERROR, "More pictures back than buffers"); return; }
             memset(p, 0, sizeof *p);
             p->buf = (int)k;
             p->length = b->length;
@@ -587,16 +733,10 @@ static int simple(vcdec *d, uint32_t type, const char *what)
 
 static int give_outputs(vcdec *d)
 {
-    for (int i = 0; i < OUT_BUFS; i++)
+    for (int i = 0; i < d->nout; i++)
         if (d->out_state[i] == OB_FREE) {
-            if (d->out_cap[i] < d->out_need) {   /* (a picture was in it when the size grew) */
-                pci_free(d, d->out_buf[i]);
-                if (!(d->out_buf[i] = pci_alloc(d, d->out_need))) {
-                    d->out_cap[i] = 0;
-                    return fail(d, VCDEC_ERROR, "No PCI memory for %u byte pictures", (unsigned)d->out_need);
-                }
-                d->out_cap[i] = d->out_need;
-            }
+            if (d->out_cap[i] < d->out_need && out_alloc(d, i, d->out_need))   /* (a picture was in it */
+                return d->failed;                                              /* when the size grew) */
             if (buffer_to_vc(d, &d->out_info, i, d->out_buf[i], d->out_cap[i], 0, 0, TIME_UNKNOWN, TIME_UNKNOWN))
                 return -1;
             d->out_state[i] = OB_VC;
@@ -614,18 +754,12 @@ static int configure_output(vcdec *d)
     if (d->out_info.port.buffer_size_recommended > need) need = d->out_info.port.buffer_size_recommended;
     if (d->out_info.port.buffer_size_min > need) need = d->out_info.port.buffer_size_min;
     d->out_need = need;
-    for (int i = 0; i < OUT_BUFS; i++)
-        if (d->out_state[i] == OB_FREE && d->out_cap[i] < need) {
-            pci_free(d, d->out_buf[i]);
-            if (!(d->out_buf[i] = pci_alloc(d, need))) {
-                d->out_cap[i] = 0;
-                return fail(d, VCDEC_ERROR, "No PCI memory (PCI_RAMAlloc) for %u byte pictures", (unsigned)need);
-            }
-            d->out_cap[i] = need;
-        }
+    for (int i = 0; i < d->nout; i++)
+        if (d->out_state[i] == OB_FREE && d->out_cap[i] < need && out_alloc(d, i, need))
+            return d->failed;
     if (d->out_info.port.buffer_size != need) {
         d->out_info.port.buffer_size = need;
-        d->out_info.port.buffer_num = OUT_BUFS;
+        d->out_info.port.buffer_num = d->nout;
         if (port_set(d, PORT_OUTPUT, &d->out_info, "Output buffers")) return -1;
     }
     return 0;
@@ -639,10 +773,10 @@ static int do_reformat(vcdec *d)
     d->reformat = 0;
     if (port_action(d, &d->out_info, ACTION_DISABLE, "Output disable")) return -1;
     d->out_on = 0;
-    for (int i = 0; i < OUT_BUFS; i++) if (d->out_state[i] == OB_VC) d->out_state[i] = OB_FREE;
+    for (int i = 0; i < d->nout; i++) if (d->out_state[i] == OB_VC) d->out_state[i] = OB_FREE;
     d->out_info.format = fc->format;
     d->out_info.video = fc->video;
-    d->out_info.port.buffer_num = OUT_BUFS;
+    d->out_info.port.buffer_num = d->nout;
     d->out_info.port.buffer_size = fc->buffer_size_recommended > fc->buffer_size_min ?
                                    fc->buffer_size_recommended : fc->buffer_size_min;
     if (configure_output(d) || port_action(d, &d->out_info, ACTION_ENABLE, "Output enable")) return -1;
@@ -699,7 +833,7 @@ static int create_component(vcdec *d)
     d->out_info.video.crop[0] = d->out_info.video.crop[1] = 0;
     d->out_info.video.crop[2] = d->cfg.width;
     d->out_info.video.crop[3] = d->cfg.height;
-    d->out_info.port.buffer_num = OUT_BUFS;
+    d->out_info.port.buffer_num = d->nout;
     d->out_info.port.buffer_size = d->out_info.video.width * d->out_info.video.height * 3 / 2;
     if (configure_output(d)) return -1;
     if (simple(d, T_COMPONENT_ENABLE, "Enable")) return -1;
@@ -774,6 +908,10 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
         return VCDEC_ERROR;
     }
     d->cfg = *c;
+    d->nout = c->out_buffers > 0 ? (c->out_buffers < MAX_OUT ? c->out_buffers : MAX_OUT) : OUT_BUFS_DEFAULT;
+    d->copy_way = c->flags & VCDEC_COPY_NEON ? 2 : c->flags & VCDEC_COPY_LDM8 ? 1 : 0;
+    if (d->copy_way == 2 && !(c->flags & VCDEC_OUT_PMP))
+        logf_(d, "NEON is only used in USR mode: pictures from PCI memory are copied by LDM 8 instead");
     d->waiting = "";
     logf_(d, "vcdec %s: %dx%d; the VideoCore has %u MB (gpu_mem)", VCDEC_VERSION, c->width, c->height, mb);
     for (int i = 0; i < IN_BUFS; i++)
@@ -781,16 +919,22 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
             fail(d, VCDEC_ERROR, "No physically contiguous memory (PCI_RAMAlloc; is the PCI module loaded?)");
             goto bad;
         }
-    if ((e = swi(OS_Module, 6, 0, 0, 72, NULL, &d->stub)) != NULL) { fail(d, VCDEC_ERROR, "No RMA: %s", e->errmess); goto bad; }
+    if ((e = swi(OS_Module, 6, 0, 0, 80, NULL, &d->stub)) != NULL) { fail(d, VCDEC_ERROR, "No RMA: %s", e->errmess); goto bad; }
     {
-        uint32_t img[18];
+        uint32_t img[20];
         _kernel_swi_regs rr;
         memset(img, 0, sizeof img);
         memcpy(img, code, sizeof code);
+        img[18] = 0xe1a0f00eu;             /* +72: the pools' dynamic area handler: MOV PC, R14 */
         vcdec_svc_copy((void *)(uintptr_t)d->stub, img, sizeof img);
         memset(&rr, 0, sizeof rr);
-        rr.r[0] = 1; rr.r[1] = (int)d->stub; rr.r[2] = (int)(d->stub + sizeof code);
+        rr.r[0] = 1; rr.r[1] = (int)d->stub; rr.r[2] = (int)(d->stub + 76);
         vc_swi(OS_SynchroniseCodeAreas, &rr);
+    }
+    if ((c->flags & (VCDEC_OUT_PMP | VCDEC_OUT_UNCACHED)) == VCDEC_OUT_PMP &&
+        (e = swi(OS_MMUControl, 2 | ARMOP_CACHE_CLEAN_INVALIDATE_RANGE << 8, 0, 0, 0, &d->armop_cci, NULL)) != NULL) {
+        fail(d, VCDEC_ERROR, "OS_MMUControl 2 (Cache_CleanInvalidateRange; RISC OS 5.23 or later): %s", e->errmess);
+        goto bad;
     }
     if ((e = swi(VCHIQ_Initialise, 0, 0, 0, 0, &d->instance, NULL)) != NULL) { fail(d, VCDEC_ERROR, "VCHIQ_Initialise: %s", e->errmess); goto bad; }
     if ((e = swi(VCHIQ_Connect, 0, 0, d->instance, 0, NULL, NULL)) != NULL) { fail(d, VCDEC_ERROR, "VCHIQ_Connect: %s", e->errmess); goto bad; }
@@ -824,10 +968,14 @@ void vcdec_close(vcdec *d)
         d->stub = 0;                       /* (it may still be called) */
     }
     if (d->connected) swi(VCHIQ_Disconnect, d->instance, 0, 0, 0, NULL, NULL);
-    if (d->stub) swi(OS_Module, 7, 0, d->stub, 0, NULL, NULL);
     for (int i = 0; i < IN_BUFS; i++) pci_free(d, d->in_buf[i]);
-    for (int i = 0; i < OUT_BUFS; i++) pci_free(d, d->out_buf[i]);
+    for (int i = 0; i < d->nout; i++)      /* (the pools before the RMA block: it holds their handler) */
+        if (d->out_buf[i]) {
+            if (d->cfg.flags & VCDEC_OUT_PMP) pmp_free(d, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
+            else pci_free(d, d->out_buf[i]);
+        }
     pci_free(d, d->evbuf);
+    if (d->stub && !d->pool_stuck) swi(OS_Module, 7, 0, d->stub, 0, NULL, NULL);
     free(d);
 }
 
@@ -861,7 +1009,7 @@ int vcdec_poll(vcdec *d)
                     "gpu_mem=128)", STALL_CS, vcdec_gpu_mem());
     if (d->eos_vc && !d->eos_seen && now - d->last_heard > STALL_CS) {
         int outs = 0;
-        for (int i = 0; i < OUT_BUFS; i++) outs += d->out_state[i] == OB_VC;
+        for (int i = 0; i < d->nout; i++) outs += d->out_state[i] == OB_VC;
         if (outs) return fail(d, VCDEC_ERROR, "Nothing from the decoder for %d cs after the EOS", STALL_CS);
     }
     return VCDEC_OK;
@@ -983,6 +1131,37 @@ int vcdec_peek(vcdec *d, vcdec_picture *pic)
     return VCDEC_OK;
 }
 
+/* A picture out of its buffer into the caller's planes. A cacheable pool
+   is cleaned and invalidated over the picture first: the VideoCore wrote
+   it to memory behind the cache, which may hold lines of the last one
+   (read from here, or fetched ahead). */
+static void copy_picture(vcdec *d, const held_t *p, uint8_t *const planes[3], const int strides[3], int way)
+{
+    const uint8_t *b = d->out_buf[p->buf];
+    int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
+    int svc = !(d->cfg.flags & VCDEC_OUT_PMP) || d->pmp_svc;
+    /* (NEON only in USR mode: in SVC mode an IRQ could leave the VFP context
+       lazily switched off, and a trap there isn't VFPSupport's to mend) */
+    int mode = (svc && way == 2 ? 1 : way) | (svc ? COPY_SVC : 0);
+    if (d->armop_cci)
+        vcdec_svc_call(d->armop_cci, (uint32_t)(uintptr_t)b, ((uint32_t)(uintptr_t)b + p->length + 63) & ~63u);
+    vcdec_copy_rows(planes[0], strides[0], b + p->offsets[0], (int)p->pitch[0], p->width, p->height, mode);
+    vcdec_copy_rows(planes[1], strides[1], b + p->offsets[1], (int)p->pitch[1], cw, ch, mode);
+    vcdec_copy_rows(planes[2], strides[2], b + p->offsets[2], (int)p->pitch[2], cw, ch, mode);
+}
+
+int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes[3], const int strides[3],
+                         unsigned *cs)
+{
+    uint32_t t0;
+    if (!d->last_ok.length || !d->out_buf[d->last_ok.buf]) return einval(d, "No picture received yet to time");
+    t0 = now_cs();
+    for (int i = 0; i < reps; i++)
+        copy_picture(d, &d->last_ok, planes, strides, way & VCDEC_COPY_NEON ? 2 : way & VCDEC_COPY_LDM8 ? 1 : 0);
+    *cs = now_cs() - t0;
+    return VCDEC_OK;
+}
+
 int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const int strides[3])
 {
     const held_t *p;
@@ -992,7 +1171,6 @@ int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const 
     p = &d->held[0];
     if (pic) fill_info(p, pic);
     if (planes) {
-        const uint8_t *b = d->out_buf[p->buf];
         int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
         if ((uint32_t)p->width > p->pitch[0] || (uint32_t)cw > p->pitch[1] || (uint32_t)cw > p->pitch[2] ||
             p->offsets[0] + p->pitch[0] * (uint32_t)p->height > p->length ||
@@ -1000,9 +1178,8 @@ int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const 
             release_head(d);
             return fail(d, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
         }
-        vcdec_svc_copy_rows(planes[0], strides[0], b + p->offsets[0], (int)p->pitch[0], p->width, p->height);
-        vcdec_svc_copy_rows(planes[1], strides[1], b + p->offsets[1], (int)p->pitch[1], cw, ch);
-        vcdec_svc_copy_rows(planes[2], strides[2], b + p->offsets[2], (int)p->pitch[2], cw, ch);
+        copy_picture(d, p, planes, strides, d->copy_way);
+        d->last_ok = *p;                   /* (for vcdec_copy_benchmark) */
         d->stats.pictures++;
     } else {
         d->stats.discarded++;
@@ -1036,7 +1213,7 @@ int vcdec_flush(vcdec *d)
     if (d->nheld && wait_received(d, d->held[d->nheld - 1].seq)) return d->failed;
     d->stats.discarded += (unsigned)d->nheld;
     d->nheld = 0;
-    for (int i = 0; i < OUT_BUFS; i++)     /* (the flush or the disables sent back the decoder's) */
+    for (int i = 0; i < d->nout; i++)     /* (the flush or the disables sent back the decoder's) */
         if (d->out_state[i] == OB_HELD || d->eos_sent) d->out_state[i] = OB_FREE;
     d->eos_back = d->eos_seen = 0;
     if (d->eos_sent) {

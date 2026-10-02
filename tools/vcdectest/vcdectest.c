@@ -10,7 +10,8 @@
  * by pts. The VideoCore's chroma can be 1 lower than FFmpeg's here and
  * there: block means within 1 count as "close" (with the .sig file).
  *
- *   vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] stream.mp4 expected.crc [expected.sig]
+ *   vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K]
+ *             stream.mp4 expected.crc [expected.sig]
  *      -o file   also add the report to file
  *      -v        every MMAL message, and what vcdec does
  *      -n        don't stop at the first wrong picture
@@ -23,6 +24,11 @@
  *                created again) and on from the last keyframe to the end
  *                again (a seek after the end)
  *      -t        time, don't check the pictures
+ *      -B n      n output buffers (vcdec's default 3; up to 8)
+ *      -c way    copying the pictures out: ldm4 (default), ldm8 or neon
+ *      -m memory where the pictures arrive: pci (PCI_RAMAlloc, the default),
+ *                pmp (a Physical Memory Pool, cacheable) or pmpu (not cacheable)
+ *      -K        after the decode, one picture's copy timed each way
  *   vcdectest -x out stream.mp4   (host check) the Annex B stream as it
  *      would be sent, to out, and each sample's pts, dts and key flag to
  *      out.pts
@@ -538,6 +544,9 @@ int probe_main(int argc, char **argv)
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, last_picture, ticks = 0, again_in = 0;
     int verbose = 0, sync = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
+    int out_buffers = 0, bench = 0;
+    unsigned way = 0, memory = 0;
+    const char *way_name = "ldm4", *memory_name = "pci";
     int frames = 0, pass_frames = 0, before_flush = 0, fatal = 0, eof = 0, i, r, cur = 0, eos_sent = 0, au_ready = 0;
     int missing = 0, missing2 = 0, pass1_frames = 0, pass1_ok = 0;
     vcdec *d = NULL;
@@ -559,6 +568,18 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-E")) seek_end = 1;
         else if (!strcmp(argv[i], "-t")) timing = 1;
+        else if (!strcmp(argv[i], "-B") && i + 1 < argc) out_buffers = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-K")) bench = 1;
+        else if (!strcmp(argv[i], "-c") && i + 1 < argc) {
+            way_name = argv[++i];
+            way = !strcmp(way_name, "ldm8") ? VCDEC_COPY_LDM8 : !strcmp(way_name, "neon") ? VCDEC_COPY_NEON : 0;
+            if (!way && strcmp(way_name, "ldm4")) stream_name = crc_name = NULL, i = argc;
+        } else if (!strcmp(argv[i], "-m") && i + 1 < argc) {
+            memory_name = argv[++i];
+            memory = !strcmp(memory_name, "pmp") ? VCDEC_OUT_PMP :
+                     !strcmp(memory_name, "pmpu") ? VCDEC_OUT_PMP | VCDEC_OUT_UNCACHED : 0;
+            if (!memory && strcmp(memory_name, "pci")) stream_name = crc_name = NULL, i = argc;
+        }
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) x_out = argv[++i];
         else if (!stream_name) stream_name = argv[i];
         else if (!crc_name) crc_name = argv[i];
@@ -567,7 +588,8 @@ int probe_main(int argc, char **argv)
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end)) {
-        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] stream.mp4 expected.crc [expected.sig]\n");
+        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c ldm4|ldm8|neon] "
+               "[-m pci|pmp|pmpu] [-K] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
     say("vcdectest: %s through vcdec %s\n", stream_name, VCDEC_VERSION);
@@ -610,7 +632,21 @@ int probe_main(int argc, char **argv)
     vcdec_config_init(&cfg);
     cfg.width = (int)mp4_w;
     cfg.height = (int)mp4_h;
-    cfg.flags = (sync ? VCDEC_SYNC_RECEIVE : 0) | (gpu_any ? VCDEC_NO_GPU_MEM_CHECK : 0) | (verbose ? VCDEC_LOG_MESSAGES : 0);
+    cfg.flags = (sync ? VCDEC_SYNC_RECEIVE : 0) | (gpu_any ? VCDEC_NO_GPU_MEM_CHECK : 0) | (verbose ? VCDEC_LOG_MESSAGES : 0) |
+                way | memory;
+    cfg.out_buffers = out_buffers;
+    say("Output buffers: %d; pictures copied out by %s; they arrive in %s\n", out_buffers ? out_buffers : 3, way_name,
+        memory == 0 ? "PCI_RAMAlloc memory" : memory & VCDEC_OUT_UNCACHED ? "a Physical Memory Pool, not cacheable" :
+        "a Physical Memory Pool, cacheable");
+    if (memory) {                          /* (the RAM disc is a PMP on RISC OS 5: its flags show the PMP bit) */
+        _kernel_swi_regs r;
+        memset(&r, 0, sizeof r);
+        r.r[0] = 2; r.r[1] = 5;
+        if (!probe_swi(0x66, &r))
+            say("The RAM disc's dynamic area flags: &%X (bit 20 %s)\n", (unsigned)r.r[4], r.r[4] & 1 << 20 ? "set" : "clear");
+        else
+            say("(the RAM disc's dynamic area can't be read)\n");
+    }
     cfg.log = log_line;
     {
         uint32_t t0 = now_cs();
@@ -723,6 +759,27 @@ int probe_main(int argc, char **argv)
             (unsigned)ticks, (unsigned)again_in);
         say("Copying the pictures out (vcdec_receive): %u cs in all, %u.%02u ms a picture\n", (unsigned)recv_cs,
             frames ? (unsigned)(recv_cs * 10 / (unsigned)frames) : 0, frames ? (unsigned)(recv_cs * 1000 / (unsigned)frames % 100) : 0);
+    }
+    if (bench && eof) {                    /* -K: one picture's copy, each way */
+        static const struct { unsigned way; const char *name; } ways[3] = {
+            { 0, "LDM 4 words" }, { VCDEC_COPY_LDM8, "LDM 8 words" }, { VCDEC_COPY_NEON, "NEON 64 bytes" } };
+        uint32_t bytes = frame_len;
+        int reps = (int)((64u << 20) / (bytes ? bytes : 1));
+        if (reps < 10) reps = 10;
+        if (reps > 2000) reps = 2000;
+        for (int k = 0; k < 3; k++) {
+            unsigned cs = 0;
+            if (k == 2 && !memory) { say("(NEON isn't used for PCI memory: it's copied in SVC mode)\n"); break; }
+            if (vcdec_copy_benchmark(d, ways[k].way, reps, planes, strides, &cs) != VCDEC_OK) {
+                say("Copy timing: %s\n", vcdec_error(d));
+                break;
+            }
+            if (!cs) cs = 1;
+            say("One %ux%u picture copied out (%s, %s): %u.%02u ms (%u MB/s; %d copies in %u cs)\n", (unsigned)want_w,
+                (unsigned)want_h, memory_name, ways[k].name, (unsigned)(cs * 1000u / (unsigned)reps / 100),
+                (unsigned)(cs * 1000u / (unsigned)reps % 100), (unsigned)((uint64_t)bytes * (unsigned)reps * 100 / cs / 1000000),
+                reps, cs);
+        }
     }
     say("vcdec: %u access units sent, %u pictures taken, %u dropped, %u flushes, %u created again, %u format changes\n",
         stats.sent, stats.pictures, stats.discarded, stats.flushes, stats.recreated, stats.format_changes);

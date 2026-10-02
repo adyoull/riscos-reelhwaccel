@@ -82,7 +82,7 @@ static uint8_t txq[32][65536];
 static uint32_t txq_len[32];
 static int ntxq, pending_tx_now;
 static uint32_t out_w, out_h, out_size_set;
-static int out_bufs[8], nout, frames_made, eos_in, eos_out_sent, need_rx;
+static int out_bufs[8], nout, nout_max, frames_made, eos_in, eos_out_sent, need_rx;
 static uint32_t rx_len_expected;
 static uint8_t cur_frame[1 << 16];
 #define UNKNOWN 0x8000000000000000ull
@@ -497,6 +497,7 @@ static void firmware(const uint32_t *m, uint32_t len)
             /* rule 2: only after the decoder's format change (or 200 cs) */
             CHECK(efch_ever || (first_in_cs && time_cs - first_in_cs >= 200), "an output buffer before the format change");
             out_bufs[nout++] = (int)d->ctx;
+            if (nout > nout_max) nout_max = nout;
         }
         produce();
         break;
@@ -535,10 +536,56 @@ static void take_tx(void)
    physically contiguous); every bulk range must lie inside one block */
 static uint32_t pci_lo[32], pci_hi[32];
 static int npci_blocks, pci_live, no_pci_mem;
+/* vcdec's Physical Memory Pools (VCDEC_OUT_PMP): blocks in the same table,
+   user readable (never closed). A cached one has a shadow: the "RAM" the
+   VideoCore writes; the program sees it only after a cache clean and
+   invalidate over the range (as with a real cache that may hold old lines) */
+static int pmp_block[32], pmp_area[32], pmp_pages[32], pmp_claimed[32], pmp_mapped[32], pmp_cached[32];
+static uint8_t *pmp_shadow[32];
+static int pmp_live, pmp_invalidates, no_pmp, pmp_scattered, pmp_privileged;
+static int recommended;                      /* OS_Memory 12 answered; the claim must come next (PRM) */
+static int pmp_top;                          /* a pool's last page at &3FFFF000 (the top page the VideoCore reaches) */
+static int rx_abort;                         /* this receive (counting from 1) is aborted */
+static uint32_t pmp_next_page = 0x8000;
 static void pci_open(int rw)
 {
     for (int i = 0; i < npci_blocks; i++)
-        if (pci_lo[i]) mprotect((void *)(uintptr_t)pci_lo[i], (pci_hi[i] - pci_lo[i] + 4095) & ~4095u, rw ? PROT_READ | PROT_WRITE : PROT_NONE);
+        if (pci_lo[i] && (!pmp_block[i] || pmp_privileged))
+            mprotect((void *)(uintptr_t)pci_lo[i], (pci_hi[i] - pci_lo[i] + 4095) & ~4095u, rw ? PROT_READ | PROT_WRITE : PROT_NONE);
+}
+static int block_of(uint32_t a)
+{
+    for (int i = 0; i < npci_blocks; i++)
+        if (pci_lo[i] && a >= pci_lo[i] && a < pci_hi[i]) return i;
+    return -1;
+}
+/* the VideoCore writing n bytes at a (a bulk receive) */
+static void dma_write(uint32_t a, const void *src, uint32_t n)
+{
+    int b = block_of(a);
+    if (b >= 0 && pmp_block[b]) {
+        CHECK(pmp_mapped[b] == pmp_pages[b], "a receive into a pool not all mapped in");
+        if (pmp_cached[b]) { memcpy(pmp_shadow[b] + (a - pci_lo[b]), src, n); return; }
+        pci_open(1);
+        memcpy((void *)(uintptr_t)a, src, n);
+        pci_open(0);
+        return;
+    }
+    pci_open(1);
+    memcpy((void *)(uintptr_t)a, src, n);
+    pci_open(0);
+}
+/* the kernel's Cache_CleanInvalidateRange (ARMop 21), called in SVC mode */
+static void fake_cci(uint32_t start, uint32_t end)
+{
+    int b = block_of(start);
+    pmp_invalidates++;
+    CHECK(b >= 0 && pmp_block[b] && pmp_cached[b] && end <= pci_hi[b] + 63 && end > start, "cache maintenance on &%X..&%X", start, end);
+    if (b < 0 || !pmp_block[b]) return;
+    if (end > pci_hi[b]) end = pci_hi[b];
+    pci_open(1);
+    memcpy((void *)(uintptr_t)start, pmp_shadow[b] + (start - pci_lo[b]), end - start);
+    pci_open(0);
 }
 static int in_pci(uint32_t a, uint32_t n)
 {
@@ -587,9 +634,7 @@ static void late_rx_finish(void)
 {
     if (!nlate || ++late_ticks < 3) return;
     late_ticks = 0;
-    pci_open(1);
-    if (lateq[0].kind == 1) memcpy((void *)(uintptr_t)lateq[0].addr, lateq[0].data, lateq[0].len);
-    pci_open(0);
+    if (lateq[0].kind == 1) dma_write(lateq[0].addr, lateq[0].data, lateq[0].len);
     memmove(&lateq[0], &lateq[1], sizeof lateq[0] * (size_t)(nlate - 1));
     nlate--;
     ((void (*)(uint32_t, uint32_t, uint32_t))(uintptr_t)stub)(stub + 64, 4, 0);
@@ -617,6 +662,95 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         }
         if (R[0] == 7) { freed++; CHECK(R[2] == stub, "freed another block"); return NULL; }
         break;
+    case 0x66: {                             /* OS_DynamicArea: vcdec's pools */
+        int b = -1;
+        if (R[0] == 2 && R[1] == 5) { R[4] = 0x100180; return NULL; }   /* the RAM disc (a PMP) */
+        if (R[0] != 0)
+            for (int i = 0; i < npci_blocks; i++) if (pci_lo[i] && pmp_block[i] && pmp_area[i] == (int)R[1]) b = i;
+        if (R[0] == 0) {
+            void *p;
+            CHECK(!recommended, "a dynamic area made between OS_Memory 12 and the claim of its pages");
+            CHECK((R[4] & 0x100) && (R[4] & (1u << 20)) && !(R[4] & 0x40F) && R[2] == 0 && R[9] && R[5] == R[9] << 12,
+                  "pool flags &%X, sizes %u %u %u", R[4], R[2], R[5], R[9]);
+            CHECK(R[6] == stub + 72 && ((uint32_t *)(uintptr_t)stub)[18] == 0xe1a0f00eu, "pool handler");
+            if (no_pmp) return &err;
+            p = mmap(NULL, R[5], pmp_privileged ? PROT_NONE : PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            b = npci_blocks++;
+            pci_lo[b] = (uint32_t)(uintptr_t)p; pci_hi[b] = pci_lo[b] + R[5];
+            pmp_block[b] = 1; pmp_area[b] = 300 + b; pmp_pages[b] = (int)R[9]; pmp_claimed[b] = pmp_mapped[b] = 0;
+            pmp_cached[b] = -1; pmp_shadow[b] = calloc(1, R[5]);
+            pci_open(1);
+            memset(p, 0xEE, R[5]);           /* ("cache" contents: old) */
+            pci_open(0);
+            pmp_live++;
+            R[1] = (uint32_t)pmp_area[b]; R[3] = pci_lo[b];
+            return NULL;
+        }
+        CHECK(b >= 0, "OS_DynamicArea %u on area %u, not a pool", R[0], R[1]);
+        if (b < 0) return &err;
+        if (R[0] == 21 || R[0] == 22) {      /* claim/release; map/unmap */
+            const uint32_t *l = (const uint32_t *)(uintptr_t)R[2];
+            for (uint32_t j = 0; j < R[3]; j++, l += 3) {
+                CHECK(l[0] < (uint32_t)pmp_pages[b], "pool page %u", l[0]);
+                if (R[0] == 21) {
+                    if (l[1] == 0xFFFFFFFFu) { if (pmp_claimed[b]) pmp_claimed[b]--; continue; }
+                    CHECK(recommended, "pages claimed that OS_Memory 12 didn't just recommend");
+                    if (j + 1 == R[3]) recommended = 0;
+                    CHECK(l[1] == pmp_next_page - (uint32_t)pmp_pages[b] + l[0] && (l[2] & 0x8000), "claimed page %u, flags &%X",
+                          l[1], l[2]);
+                    pmp_claimed[b]++;
+                } else {
+                    if (l[1] == 0xFFFFFFFFu) { if (pmp_mapped[b]) pmp_mapped[b]--; continue; }
+                    CHECK(l[1] == l[0] && pmp_claimed[b] == pmp_pages[b] && !(l[2] & 0xF), "mapped %u to %u, flags &%X",
+                          l[1], l[0], l[2]);
+                    pmp_cached[b] = !(l[2] & 0x20);   /* (bit 5: not cacheable) */
+                    pmp_mapped[b]++;
+                }
+            }
+            R[3] = 0;
+            return NULL;
+        }
+        if (R[0] == 1) {
+            CHECK(!pmp_mapped[b] && !pmp_claimed[b], "a pool removed with pages in it (%d mapped, %d claimed)",
+                  pmp_mapped[b], pmp_claimed[b]);
+            CHECK(!freed, "a pool removed after its handler's RMA block was freed");
+            munmap((void *)(uintptr_t)pci_lo[b], pci_hi[b] - pci_lo[b]);
+            free(pmp_shadow[b]);
+            pci_lo[b] = 0; pmp_block[b] = 0; pmp_live--;
+            return NULL;
+        }
+        CHECK(0, "OS_DynamicArea %u", R[0]);
+        return &err;
+    }
+    case 0x68:                               /* OS_Memory */
+        if ((R[0] & 0xFF) == 12) {
+            CHECK((R[0] & 0x300) == 0x300 && R[6] < 0x40000000u && R[7] == 0 && R[2] == 12, "OS_Memory 12 &%X, top &%X", R[0], R[6]);
+            recommended = 1;
+            pmp_next_page += (R[1] + 4095) >> 12;
+            R[3] = pmp_next_page - ((R[1] + 4095) >> 12);
+            return NULL;
+        }
+        if (R[0] == 24) {                    /* access: a pool is user read/write (unless pmp_privileged) */
+            int b = block_of(R[1]);
+            R[1] = b >= 0 && pmp_block[b] ? (pmp_privileged ? 0x10C : 0x10F) : 0x10C;
+            return NULL;
+        }
+        if (R[0] == 0x2200) {                /* logical to physical, as VCHIQ (and vcdec's check) */
+            uint32_t *e = (uint32_t *)(uintptr_t)R[1];
+            for (uint32_t j = 0; j < R[2]; j++, e += 3) {
+                int b = block_of(e[1]);
+                e[2] = b >= 0 ? 0x20000000u + (uint32_t)b * 0x01000000u + (e[1] - pci_lo[b]) : 0xFFFFFFFFu;
+                if (b >= 0 && pmp_block[b] && pmp_scattered && e[1] - pci_lo[b] >= 4096) e[2] += 0x100000;   /* (not contiguous) */
+                if (b >= 0 && pmp_block[b] && pmp_top) e[2] = 0x40000000u - (pci_hi[b] - pci_lo[b]) + (e[1] - pci_lo[b]);
+            }
+            return NULL;
+        }
+        CHECK(0, "OS_Memory &%X", R[0]);
+        return &err;
+    case 0x6B:                               /* OS_MMUControl 2: ARMop 21 */
+        CHECK(R[0] == (2 | 21 << 8), "OS_MMUControl &%X", R[0]);
+        R[0] = (uint32_t)(uintptr_t)fake_cci;
+        return NULL;
     case 0x6E: CHECK(R[0] == 1 && R[1] == stub, "sync"); __builtin___clear_cache((char *)(uintptr_t)stub, (char *)(uintptr_t)stub + 64); return NULL;
     case 0x59200: R[0] = 0x1A57; return NULL;
     case 0x59201: connects++; return NULL;
@@ -687,10 +821,12 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
             if (need_rx == 1) memcpy(lateq[nlate].data, cur_frame, R[2]);
             nlate++;
         } else {
-            pci_open(1);
-            if (need_rx == 1) memcpy((void *)(uintptr_t)R[1], cur_frame, R[2]);
-            pci_open(0);
-            ((stub_fn *)(uintptr_t)stub)(stub + 64, 4, R[4]);  /* the real callback */
+            if (rx_abort && bulks_rx + 1 == rx_abort) {
+                ((stub_fn *)(uintptr_t)stub)(stub + 64, 18, R[4]);   /* BULK_RECEIVE_ABORTED */
+            } else {
+                if (need_rx == 1) dma_write(R[1], cur_frame, R[2]);
+                ((stub_fn *)(uintptr_t)stub)(stub + 64, 4, R[4]);  /* the real callback */
+            }
         }
         need_rx = 0;
         bulks_rx++;
@@ -764,6 +900,7 @@ static void reset_fake(void)
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
     recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
+    pmp_invalidates = 0; nout_max = 0; rx_abort = 0; pmp_privileged = 0; recommended = 0; pmp_top = 0;
     in_slow = nslow = slow_ticks = slow_max = 0;
 }
 
@@ -924,7 +1061,9 @@ static void cleaned(const char *what)
     CHECK(opens == closes && connects == disconnects && freed == 1, "%s: open/close %d/%d, connect %d/%d, freed %d",
           what, opens, closes, connects, disconnects, freed);
     CHECK(pci_live == 0, "%s: %d PCI blocks not freed", what, pci_live);
+    CHECK(pmp_live == 0, "%s: %d memory pools not removed", what, pmp_live);
     npci_blocks = 0;
+    memset(pmp_block, 0, sizeof pmp_block);
     CHECK(!comp_enabled && !port_on[1] && !port_on[2] && created == destroyed, "%s: left enabled (%d %d %d), %d/%d",
           what, comp_enabled, port_on[1], port_on[2], created, destroyed);
 }

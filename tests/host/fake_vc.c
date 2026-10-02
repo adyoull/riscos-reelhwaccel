@@ -40,6 +40,7 @@ int *fake_vc_var(const char *name)
         { "aus", &aus }, { "flushes", &flushes }, { "recreated", &recreated }, { "eos_lost", &eos_lost },
         { "created", &created }, { "destroyed", &destroyed }, { "opens", &opens }, { "idr_dropped", &idr_dropped },
         { "bulks_tx", &bulks_tx }, { "disc_seen", &disc_seen }, { "in_slow", &in_slow }, { "slow_max", &slow_max },
+        { "no_pmp", &no_pmp }, { "pmp_invalidates", &pmp_invalidates }, { "pmp_scattered", &pmp_scattered },
     };
     for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++)
         if (!strcmp(v[i].n, name)) return v[i].p;

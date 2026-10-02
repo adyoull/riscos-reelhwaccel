@@ -87,13 +87,16 @@ static int picture_right(uint8_t val)
     return 1;
 }
 
+static int out_buffers;                    /* (vcdec_config.out_buffers for open70) */
+static int pmp_svc_logged;
+static void svc_log(void *h, const char *t) { (void)h; if (strstr(t, "isn't readable in USR mode")) pmp_svc_logged = 1; }
 static vcdec *open70(unsigned flags)
 {
     vcdec_config c;
     vcdec *d = NULL;
     int r;
     vcdec_config_init(&c);
-    c.width = W; c.height = H; c.flags = flags;
+    c.width = W; c.height = H; c.flags = flags; c.out_buffers = out_buffers;
     reset_fake();
     mp4_mode = 1;
     r = vcdec_open(&d, &c);
@@ -199,6 +202,31 @@ static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
     return buf;
 }
 
+/* VCDecTest with options in one string (split at spaces) */
+static char *run_apps(int *ret, const char *opts)
+{
+    static char buf[16384], o[256];
+    char *argv[24];
+    int n = 0;
+    FILE *f;
+    size_t got_n;
+    argv[n++] = "vcdectest"; argv[n++] = "-o"; argv[n++] = "/tmp/vcdec_test.out";
+    snprintf(o, sizeof o, "%s", opts);
+    for (char *t = strtok(o, " "); t && n < 18; t = strtok(NULL, " ")) argv[n++] = t;
+    argv[n++] = "/tmp/mmaldecode_test.mp4"; argv[n++] = "/tmp/mmaldecode_test4.crc"; argv[n++] = "/tmp/mmaldecode_test4.sig";
+    argv[n] = NULL;
+    reset_fake();
+    mp4_mode = 1;
+    remove("/tmp/vcdec_test.out");
+    *ret = probe_main(n, argv);
+    mp4_mode = 0;
+    f = fopen("/tmp/vcdec_test.out", "r");
+    got_n = f ? fread(buf, 1, sizeof buf - 1, f) : 0;
+    buf[got_n] = 0;
+    if (f) fclose(f);
+    return buf;
+}
+
 static void app_tests(void)
 {
     int ret;
@@ -247,6 +275,56 @@ static void app_tests(void)
     o = run_app(&ret, "-s", "50", NULL);
     CHECK(ret == 1 && strstr(o, "never happened"), "VCDecTest -s 50 (%d):\n%s", ret, o);
     cleaned("app no seek");
+
+    /* 0.2: buffers, ways, memory, the copy timed */
+    o = run_apps(&ret, "-m pmp -K");
+    printf("%s", o);
+    CHECK(ret == 0 && strstr(o, "a Physical Memory Pool, cacheable") && strstr(o, "RAM disc's dynamic area flags: &100180 (bit 20 set)") &&
+          strstr(o, "(pmp, LDM 4 words)") && strstr(o, "(pmp, LDM 8 words)") && strstr(o, "(pmp, NEON 64 bytes)") &&
+          strstr(o, "Result: OK") && pmp_invalidates >= 12 + 3 * 10 && !strstr(o, "isn't readable in USR mode"),
+          "VCDecTest -m pmp -K (%d, %d cleans):\n%s", ret, pmp_invalidates, o);
+    cleaned("app pmp");
+    o = run_apps(&ret, "-m pmpu -c neon -B 6 -t -K");
+    CHECK(ret == 0 && strstr(o, "Output buffers: 6; pictures copied out by neon") && strstr(o, "not cacheable") &&
+          nout_max == 6 && !pmp_invalidates && strstr(o, "OK - timed"), "VCDecTest -m pmpu -c neon -B 6 (%d):\n%s", ret, o);
+    cleaned("app pmpu");
+    o = run_apps(&ret, "-c ldm8 -E");
+    CHECK(ret == 0 && strstr(o, "by ldm8; they arrive in PCI_RAMAlloc memory") && !strstr(o, "RAM disc") && strstr(o, "Result: OK"),
+          "VCDecTest -c ldm8 -E (%d):\n%s", ret, o);
+    cleaned("app ldm8");
+    o = run_apps(&ret, "-c fast");
+    CHECK(ret == 1 && !opens, "VCDecTest -c fast: refused (%d)", ret);
+    npci_blocks = 0;
+}
+
+/* vcdec_copy.S on its own: each way, in USR and "SVC" mode, every
+   alignment, widths around the loop sizes; random bytes, so a word or a
+   half put in the wrong place shows; nothing written past a row */
+void vcdec_copy_rows(uint8_t *dst, int dst_stride, const uint8_t *src, int src_stride, int width, int rows, int mode);
+static void copy_tests(void)
+{
+    static const int widths[] = { 0, 1, 3, 4, 7, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129, 200, 1000 };
+    static uint8_t src[4 * 1100 + 64], dst[4 * 1100 + 64];
+    int bad = 0;
+    srand(7);
+    for (unsigned i = 0; i < sizeof src; i++) src[i] = (uint8_t)rand();
+    for (int mode = 0; mode < 8; mode++) {
+        if ((mode & 3) == 3) continue;
+        for (int so = 0; so < 4; so++)
+            for (int doff = 0; doff < 4; doff++)
+                for (unsigned w = 0; w < sizeof widths / sizeof widths[0]; w++) {
+                    int wd = widths[w], ss = 1040 + so, ds = 1036;
+                    memset(dst, 0x5A, sizeof dst);
+                    vcdec_copy_rows(dst + doff, ds, src + so, ss, wd, 3, mode);
+                    for (int r = 0; r < 3; r++) {
+                        if (memcmp(dst + doff + r * ds, src + so + r * ss, (size_t)wd)) bad++;
+                        for (int x = wd; x < wd + 8; x++)
+                            if (dst[doff + r * ds + x] != 0x5A) { bad++; break; }
+                    }
+                    if (doff && dst[doff - 1] != 0x5A) bad++;
+                }
+    }
+    CHECK(bad == 0, "vcdec_copy_rows: %d wrong", bad);
 }
 
 int main(int argc, char **argv)
@@ -259,12 +337,124 @@ int main(int argc, char **argv)
 
     if (argc > 1) return probe_main(argc, argv);   /* (run.sh's -x check of real MP4s) */
 
+    copy_tests();
+
     /* ---- a whole decode ---- */
     whole(0, 0, 0, 0, "whole");
     whole(0, 1, 0, 0, "whole, receives late");
     whole(VCDEC_SYNC_RECEIVE, 1, 0, 0, "whole, receives waited for");
     whole(0, 1, 1, 3, "whole, unaligned planes");
     whole(0, 0, 2, 1, "whole, odd strides");
+
+    /* ---- the ways of copying, the number of buffers, the memory (0.3) ---- */
+    whole(VCDEC_COPY_LDM8, 0, 0, 0, "LDM 8");
+    whole(VCDEC_COPY_LDM8, 1, 1, 3, "LDM 8, unaligned planes");
+    whole(VCDEC_COPY_NEON, 0, 0, 0, "NEON");
+    whole(VCDEC_COPY_NEON, 1, 2, 1, "NEON, odd strides");
+    for (int n = 1; n <= 8; n += n < 4 ? 2 : 4) {
+        out_buffers = n;
+        whole(0, n & 1, 0, 0, "output buffers");
+        CHECK(nout_max == n, "%d output buffers asked for, the decoder had up to %d", n, nout_max);
+        out_buffers = 0;
+    }
+    whole(VCDEC_OUT_PMP, 0, 0, 0, "a cached pool");
+    CHECK(pmp_invalidates >= 12, "a cached pool: %d cache cleans (12 pictures)", pmp_invalidates);
+    whole(VCDEC_OUT_PMP, 1, 1, 3, "a cached pool, late, unaligned planes");
+    whole(VCDEC_OUT_PMP | VCDEC_COPY_NEON, 1, 0, 0, "a cached pool, NEON");
+    whole(VCDEC_OUT_PMP | VCDEC_COPY_LDM8, 0, 0, 0, "a cached pool, LDM 8");
+    whole(VCDEC_OUT_PMP | VCDEC_OUT_UNCACHED, 0, 0, 0, "an uncached pool");
+    CHECK(pmp_invalidates == 0, "an uncached pool cleaned (%d)", pmp_invalidates);
+    {                                         /* a pool the kernel doesn't make user readable */
+        vcdec_config cc;
+        vcdec *dd = NULL;
+        vcdec_config_init(&cc);
+        reset_fake();
+        mp4_mode = 1;
+        pmp_privileged = 1;
+        cc.width = W; cc.height = H; cc.flags = VCDEC_OUT_PMP | VCDEC_COPY_NEON;
+        cc.log = svc_log;
+        pmp_svc_logged = 0;
+        CHECK(vcdec_open(&dd, &cc) == VCDEC_OK, "a privileged pool: open");
+        setup_planes(0, 0);
+        ngot = wrong_pics = 0;
+        r = feed(dd, 0, 12, 1);
+        CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics, "a pool not readable in USR mode: %d, %d, %d wrong", r, ngot,
+              wrong_pics);
+        CHECK(pmp_svc_logged, "a pool not readable in USR mode: not said");
+        close70(dd, "privileged pool");
+        pmp_privileged = 0;
+    }
+    out_buffers = 6;
+    whole(VCDEC_OUT_PMP | VCDEC_COPY_NEON, 1, 2, 1, "a cached pool, 6 buffers, NEON, odd strides");
+    out_buffers = 0;
+
+    /* a pool: a format change part way (pools freed and made again bigger),
+       a seek after the end; the copy timed */
+    for (int pool = 0; pool < 2; pool++) {
+        unsigned cs = 0;
+        int k;
+        big_efch_at = 3;
+        d = open70(pool ? VCDEC_OUT_PMP : 0);
+        setup_planes(0, 0);
+        for (k = 0; k < 6; k++) vcdec_send(d, aubuf, make_au(k, 100), (int64_t)mp4_pts[k] * 40000, 0, k ? 0 : 1);
+        for (int i = 0; i < 30; i++) vcdec_poll(d);
+        ngot = wrong_pics = 0;
+        r = feed(d, 6, 12, 1);
+        CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics, "format change part way (pool %d): %d, %d, %d wrong", pool, r, ngot,
+              wrong_pics);
+        CHECK(vcdec_copy_benchmark(d, VCDEC_COPY_NEON, 5, planes, strides, &cs) == VCDEC_OK && picture_right(mp4_val(11)),
+              "the copy timed (pool %d)", pool);
+        CHECK(vcdec_flush(d) == VCDEC_OK && recreated == 1, "flush after the end (pool %d)", pool);
+        ngot = wrong_pics = 0;
+        r = feed(d, 6, 12, 1);
+        CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics, "seek after the end (pool %d): %d, %d", pool, r, ngot);
+        close70(d, "pool format change");
+        big_efch_at = 0;
+    }
+    d = open70(0);
+    {
+        unsigned cs;
+        setup_planes(0, 0);
+        CHECK(vcdec_copy_benchmark(d, 0, 1, planes, strides, &cs) == VCDEC_EINVAL, "timing before a picture");
+    }
+    close70(d, "benchmark early");
+
+    {                                         /* a pool ending at the last page below 1 GB: fine */
+        vcdec_config cc;
+        vcdec *dd = NULL;
+        vcdec_config_init(&cc);
+        reset_fake();
+        mp4_mode = 1;
+        pmp_top = 1;
+        cc.width = W; cc.height = H; cc.flags = VCDEC_OUT_PMP;
+        r = vcdec_open(&dd, &cc);
+        CHECK(r == VCDEC_OK, "a pool at the top of the first 1 GB: %d %s", r, vcdec_open_error());
+        if (dd) {
+            setup_planes(0, 0);
+            ngot = 0;
+            CHECK(feed(dd, 0, 12, 1) == VCDEC_EOF && got_is(0, 12), "a pool at the top: decode");
+            close70(dd, "pool at the top");
+        }
+        pmp_top = 0;
+    }
+
+    /* pools refused, or not contiguous: said, nothing left */
+    no_pmp = 1;
+    vcdec_config_init(&c);
+    reset_fake();
+    c.width = W; c.height = H; c.flags = VCDEC_OUT_PMP;
+    r = vcdec_open(&d, &c);
+    CHECK(r == VCDEC_ERROR && strstr(vcdec_open_error(), "Physical Memory Pool") && !pmp_live && !pci_live, "no pools: %d %s",
+          r, vcdec_open_error());
+    npci_blocks = 0;
+    no_pmp = 0;
+    pmp_scattered = 1;
+    reset_fake();
+    r = vcdec_open(&d, &c);
+    CHECK(r == VCDEC_ERROR && strstr(vcdec_open_error(), "contiguous") && !pmp_live && !pci_live, "a scattered pool: %d %s", r,
+          vcdec_open_error());
+    npci_blocks = 0;
+    pmp_scattered = 0;
     CHECK(recreated == 0, "created again without a flush");
 
     /* the pts back as sent, in display order; peek doesn't take */
@@ -439,6 +629,16 @@ int main(int argc, char **argv)
     CHECK(r == VCDEC_ERROR && strstr(vcdec_error(d), "reports an error"), "error event: %d %s", r, vcdec_error(d));
     close70(d, "error event");
     error_event = 0;
+
+    d = open70(0);
+    rx_abort = 3;                             /* a receive aborted: an error, not a picture */
+    setup_planes(0, 0);
+    ngot = wrong_pics = 0;
+    r = feed(d, 0, 12, 1);
+    CHECK(r == VCDEC_ERROR && strstr(vcdec_error(d), "aborted") && ngot == 2 && !wrong_pics, "an aborted receive: %d, %d, %s",
+          r, ngot, vcdec_error(d));
+    close70(d, "aborted receive");
+    rx_abort = 0;
 
     big_efch = 1;                             /* a format change to a bigger size */
     d = open70(0);

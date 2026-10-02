@@ -1,5 +1,37 @@
 # Changes
 
+## vcdec 0.3 and VCDecTest 0.2 (test zip, 2026-10-02)
+
+Three ways that might make vcdec faster, each to be timed on the Pi
+before it is used (the defaults are unchanged):
+
+- vcdec_config.out_buffers: 1 to 8 output buffers (3 so far).
+- VCDEC_COPY_LDM8 and VCDEC_COPY_NEON: pictures copied out by LDM/STM of
+  8 words, or by NEON 64 bytes a loop, instead of 4 words. NEON only in
+  USR mode (from a pool): in SVC mode an IRQ could leave the VFP context
+  lazily switched off; there it copies by LDM 8.
+- VCDEC_OUT_PMP (and VCDEC_OUT_UNCACHED: not cacheable, bufferable):
+  pictures arrive in Physical Memory Pools (OS_Memory 12 pages for DMA,
+  contiguous below 1 GB, claimed straight after with OS_DynamicArea 21 and
+  mapped with 22) instead of PCI_RAMAlloc memory, which the PRM says is
+  uncachable and privileged. The pools are removed before the RMA block
+  holding their handler is freed (kept if a pool won't go). The pool's pages are checked
+  contiguous (OS_Memory 0) and readable from USR mode (OS_Memory 24; if
+  not, copied in SVC mode); a cacheable pool is cleaned and invalidated
+  over each picture (ARMop 21, Cache_CleanInvalidateRange) before it's read.
+- vcdec_copy_benchmark: one picture's copy timed, each way.
+- received() reads both callback counters in one SVC copy.
+
+VCDecTest 0.2: -B n, -c ldm4|ldm8|neon, -m pci|pmp|pmpu, -K; the RAM
+disc's area flags shown (to confirm RISC OS 5's PMP flag, bit 20). New
+Obey file Memory (every picture checked in both pools); Speed times hd
+one change at a time.
+
+Host tests: the copy routines on random data (each way, USR and SVC, every
+alignment); the fake now has pools, OS_Memory 0/12/24, the ARMop, a cache
+that holds stale pictures until it's cleaned, privileged pools, and
+aborted receives.
+
 ## h264_vchiq for FFmpeg 5.1.10, and devkit 0.1 (2026-10-02)
 
 - ffmpeg/vchiqdec.c and ffmpeg/0001-avcodec-h264_vchiq.patch: FFmpeg's

@@ -1,0 +1,19 @@
+| Memory: the three clips with every picture checked, arriving in a
+| cacheable Physical Memory Pool (-m pmp: the cache cleaned over each
+| picture before it is read; a wrong picture here means stale cache) and
+| in an uncachable one (-m pmpu); then hd with the likely fastest settings.
+| Reports to ResultM.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 16384K -max 16384K
+Remove <Obey$Dir>.ResultM
+Run <Obey$Dir>.vcdectest -m pmp -o <Obey$Dir>.ResultM <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.vcdectest -m pmp -o <Obey$Dir>.ResultM <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
+Run <Obey$Dir>.vcdectest -m pmp -o <Obey$Dir>.ResultM <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -m pmpu -o <Obey$Dir>.ResultM <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.vcdectest -m pmpu -o <Obey$Dir>.ResultM <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
+Run <Obey$Dir>.vcdectest -m pmpu -o <Obey$Dir>.ResultM <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -m pmp -c neon -B 6 -E -o <Obey$Dir>.ResultM <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig

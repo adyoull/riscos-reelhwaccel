@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCDEC_VERSION "0.2"
+#define VCDEC_VERSION "0.3"
 
 /* results */
 #define VCDEC_OK           0
@@ -49,6 +49,15 @@
 #define VCDEC_SYNC_RECEIVE     2u   /* wait for each picture's bulk transfer as it arrives
                                        (as MMALDecode did) instead of letting it run on */
 #define VCDEC_LOG_MESSAGES     4u   /* every MMAL message to the log */
+/* how pictures are copied out (default: LDM/STM four words a loop) */
+#define VCDEC_COPY_LDM8        8u   /* LDM/STM eight words a loop */
+#define VCDEC_COPY_NEON       16u   /* NEON, 64 bytes a loop (only from a user readable pool;
+                                       otherwise LDM 8: NEON isn't used in SVC mode) */
+/* where pictures arrive (default: PCI_RAMAlloc memory: uncachable, privileged) */
+#define VCDEC_OUT_PMP         32u   /* a Physical Memory Pool of contiguous pages below 1 GB,
+                                       user readable and cacheable (the cache cleaned and
+                                       invalidated over each picture before it's read) */
+#define VCDEC_OUT_UNCACHED    64u   /* with VCDEC_OUT_PMP: the pool not cacheable (bufferable) */
 
 /* vcdec_send's flags */
 #define VCDEC_KEYFRAME      1u
@@ -63,6 +72,7 @@ typedef struct vcdec vcdec;
 typedef struct {
     int width, height;          /* the stream's size (from the container): needed */
     unsigned flags;             /* VCDEC_NO_GPU_MEM_CHECK, ... */
+    int out_buffers;            /* pictures the decoder can fill at once: 0 for 3, up to 8 */
     void (*log)(void *handle, const char *text);   /* optional: what the decoder does */
     void *log_handle;
 } vcdec_config;
@@ -119,6 +129,14 @@ void vcdec_get_stats(const vcdec *d, vcdec_stats *s);
 
 /* The VideoCore's memory (gpu_mem) in MB, or 0 if the firmware doesn't say. */
 unsigned vcdec_gpu_mem(void);
+
+/* Times copying one picture's worth of the first output buffer into the
+   caller's planes, reps times, as vcdec_receive would (`way`: 0, or
+   VCDEC_COPY_LDM8 or VCDEC_COPY_NEON; a cached pool is invalidated before
+   each copy, as after a transfer). Needs a picture to have been received.
+   VCDEC_OK and the time in centiseconds, or VCDEC_EINVAL. */
+int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes[3], const int strides[3],
+                         unsigned *cs);
 
 /* VCDEC_OK if an access unit's SPS (if it has one) is a profile the
    VideoCore decodes, VCDEC_UNSUPPORTED if not. */
