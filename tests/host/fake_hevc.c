@@ -102,6 +102,10 @@ static void phase1(void)
         uint32_t a = cmd[2 * i], v = cmd[2 * i + 1];
         int ok = a < 0x80 || (a >= 0x1000 && a < 0x10A0) || (a >= 0x2000 && a < 0x2FE0) || (a >= 0x4000 && a < 0x4800);
         CHECK(ok, "command %u writes &%X", (unsigned)i, (unsigned)a);
+        if (a >= 0x2000 && a < 0x2FE0) {                 /* the scaling factors */
+            fake_hevc.scaling_writes++;
+            if (v != 0x10101010) fake_hevc.scaling_not_flat++;
+        }
         if (a == 64) bfbase = v;                         /* BFBASE */
         else if (a == 68) bfnum = v;                     /* BFNUM */
         else if (a == 72 && !(v & 0x80)) {               /* BFCONTROL, not the stop: the bitstream starts */

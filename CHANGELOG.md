@@ -1,5 +1,27 @@
 # Changes
 
+## hevcdec 0.1.1 and HEVCTest 0.1.1: why the pictures are wrong (test zip, 2026-10-02)
+
+HEVCTest 0.1 on a Pi 4: the block ran every picture through both phases
+with no errors or retries, and 1080p went through at 230 pictures a
+second (unchecked). The clip with scaling lists (nowpp) was exactly
+right, all 12 pictures. Every clip without them (small, slices, odd,
+hd) was wrong from its first picture, and differently from run to run.
+odd has no WPP either, so the difference is the scaling lists: with
+none, rpivid_h265.c doesn't load the block's scaling factors, and the
+block may be reading whatever its factor memory holds.
+
+- HEVCTest: -s gives flat scaling lists (all 16, which is what "no
+  scaling lists" means) to pictures without any, so the factors are
+  loaded; the same pictures should come out. -d file saves every
+  picture decoded (8-bit 4:2:0, decoding order) to compare with FFmpeg's.
+  New Obey files Flat (ResultS: every clip with -s) and Dump (ResultD;
+  DumpSmall twice and DumpOdd). The clips are the same as 0.1's.
+- hevcdec: a picture with scaling lists enabled but none given is
+  refused (rpivid_h265.c would read through a null pointer).
+- Host tests: -s loads flat factors for every picture of odd and leaves
+  nowpp's own; -d writes FFmpeg's pictures; the refusal.
+
 ## hevcdec 0.1 and HEVCTest 0.1: HEVC on the Pi 4's HEVC block (test zip, 2026-10-02)
 
 The first HEVC decoder, for the first test on a Pi 4.

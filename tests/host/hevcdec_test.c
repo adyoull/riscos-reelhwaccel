@@ -187,6 +187,49 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
         cleaned("a slice refused");
     }
 
+    if (strstr(trace, "odd")) {                 /* -s: flat scaling lists loaded; the same pictures */
+        int plain;
+        fake_hevc_reset();
+        o = run_app(&ret, trace, "-n");
+        plain = fake_hevc.scaling_writes;
+        fake_hevc_reset();
+        o = run_app(&ret, trace, "-s");
+        CHECK(ret == 0 && strstr(o, "Flat scaling lists given to 8 pictures (-s)") &&
+              strstr(o, "Result: OK - every picture exactly") && plain == 0 &&
+              fake_hevc.scaling_writes == 8 * 4064 / 4 && fake_hevc.scaling_not_flat == 0,
+              "hevctest -s (%d, %d then %d scaling writes, %d not flat):\n%s", ret, plain, fake_hevc.scaling_writes,
+              fake_hevc.scaling_not_flat, o);
+        cleaned("-s");
+        fake_hevc_reset();                      /* the flag without the lists: refused, not a crash */
+        o = run_app(&ret, trace, "-z");
+        CHECK(ret == 1 && strstr(o, "Scaling lists enabled but none given") && fake_hevc.phase1s == 0,
+              "scaling lists enabled without lists (%d):\n%s", ret, o);
+        cleaned("-z");
+    }
+    if (strstr(trace, "nowpp")) {               /* -s leaves a clip's own lists alone */
+        fake_hevc_reset();
+        o = run_app(&ret, trace, "-s");
+        CHECK(ret == 0 && strstr(o, "Flat scaling lists given to 0 pictures") && fake_hevc.scaling_writes > 0 &&
+              fake_hevc.scaling_not_flat > 0, "hevctest -s, nowpp (%d):\n%s", ret, o);
+        cleaned("-s nowpp");
+    }
+
+    fake_hevc_reset();                          /* -d: the pictures as decoded, in decoding order */
+    remove("/tmp/hevcdec_test.dump");
+    o = run_app(&ret, trace, "-c 3 -d /tmp/hevcdec_test.dump");
+    {
+        FILE *f = fopen("/tmp/hevcdec_test.dump", "rb");
+        size_t fs = (size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2), got = 0, ok = 0;
+        uint8_t *b = malloc(3 * fs + 1);
+        if (f && b) { got = fread(b, 1, 3 * fs + 1, f); fclose(f); }
+        if (got == 3 * fs && nmap) ok = !memcmp(b, map[0].y, (size_t)w * h);   /* picture 1: FFmpeg's first */
+        CHECK(ret == 0 && got == 3 * fs && ok, "hevctest -d: %zu bytes (%zu a picture), first picture %s:\n%s", got, fs,
+              ok ? "right" : "wrong", o);
+        free(b);
+        remove("/tmp/hevcdec_test.dump");
+    }
+    cleaned("-d");
+
     fake_hevc_reset();
     o = run_app(&ret, trace, "-t");
     CHECK(ret == 0 && strstr(o, "OK - timed"), "hevctest -t (%d):\n%s", ret, o);

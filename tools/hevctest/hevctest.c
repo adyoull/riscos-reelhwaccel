@@ -153,6 +153,8 @@ int probe_main(int argc, char **argv)
 {
     const char *name = NULL;
     int verbose = 0, keep_going = 0, timing = 0, count = 0, nframes = 17, r, i, wrong = 0, done = 0, fatal = 0;
+    int flat = 0;                          /* -s: flat scaling lists given where the stream has none */
+    FILE *dump = NULL;                     /* -d: every picture decoded, 8-bit 4:2:0, in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
     int strides[3];
@@ -171,14 +173,20 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-t")) timing = 1;
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) count = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) nframes = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-s")) flat = 1;
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
+            if (!(dump = fopen(argv[++i], "wb"))) { printf("Can't write %s\n", argv[i]); return 1; }
+        }
 #ifdef PROBE_TEST
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) spoil = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-z")) flat = 2;   /* (host tests: the flag without the lists) */
 #endif
         else if (!name) name = argv[i];
         else name = NULL, i = argc;
     }
     if (!name || nframes < 2 || nframes > MAX_FRAMES || count < 0) {
-        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-c count] [-f frames] trace\n");
+        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-d file] [-c count] [-f frames] trace\n");
+        if (dump) fclose(dump);
         return 1;
     }
     say("hevctest: %s through hevcdec %s\n", name, HEVCDEC_VERSION);
@@ -187,6 +195,17 @@ int probe_main(int argc, char **argv)
     if (count && count < npics) npics = count;
     if (spoil > 0 && spoil <= npics && pics[spoil - 1].nslices > 1)
         pics[spoil - 1].params[1].data_byte_offset = pics[spoil - 1].params[1].bit_size;   /* (refused by setup) */
+    if (flat) {                            /* the same pictures: flat lists are what "no scaling lists" means */
+        int n = 0;
+        for (i = 0; i < npics; i++) {
+            if (pics[i].sps.flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED) continue;
+            pics[i].sps.flags |= V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED;
+            memset(&pics[i].scaling, 16, sizeof pics[i].scaling);
+            pics[i].has_scaling = flat == 1;
+            n++;
+        }
+        say("Flat scaling lists given to %d pictures (-s)\n", n);
+    }
     say("Trace: %d pictures, %ux%u (shown %ux%u) %u-bit\n", npics, (unsigned)pics[0].width, (unsigned)pics[0].height,
         (unsigned)pics[0].out_w, (unsigned)pics[0].out_h, (unsigned)pics[0].depth);
     hevcdec_config_init(&c);
@@ -246,6 +265,12 @@ int probe_main(int argc, char **argv)
         t0 = now_cs();
         hevcdec_frame_to_i420(d, frames[slot], planes, strides, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
         t_conv += now_cs() - t0;
+        if (dump) {
+            int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2, y;
+            for (y = 0; y < (int)p->out_h; y++) fwrite(planes[0] + (size_t)y * strides[0], 1, p->out_w, dump);
+            for (k = 1; k < 3; k++)
+                for (y = 0; y < ch; y++) fwrite(planes[k] + (size_t)y * strides[k], 1, (size_t)cw, dump);
+        }
         {
             int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2;
             uint32_t a[3] = { adler(planes[0], (int)p->out_w, (int)p->out_h, strides[0]),
@@ -281,6 +306,7 @@ out:
         free(file);
         free(planes[0]); free(planes[1]); free(planes[2]);
         if (out2) fclose(out2);
+        if (dump) fclose(dump);
         return ok ? 0 : 1;
     }
 }

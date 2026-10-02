@@ -10,6 +10,7 @@ typedef struct {
     int opens, closes, allocs, writes;
     int left;                         /* closed leaving the memory (a phase never finished) */
     int phase1s, phase2s, slices, ref_errors, unknown_pictures;
+    int scaling_writes, scaling_not_flat;  /* writes to the scaling factors, and those not all 16 */
     /* switches */
     int p1_exhaust, p1_hang, p2_hang, no_block, no_memory;
     size_t memory_left;               /* (0: no limit) */

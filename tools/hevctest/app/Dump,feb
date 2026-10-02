@@ -1,0 +1,15 @@
+| Dump: the pictures the block decodes, saved (-d) so they can be
+| compared with FFmpeg's pixel by pixel: the first three of the small
+| clip to DumpSmall, again to DumpSmall2 (to see what changes from run
+| to run), and all of odd to DumpOdd (8-bit 4:2:0, about 150K
+| a picture). Reports to ResultD.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 32768K -max 32768K
+Remove <Obey$Dir>.ResultD
+Run <Obey$Dir>.hevctest -n -c 3 -d <Obey$Dir>.DumpSmall -o <Obey$Dir>.ResultD <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -n -c 3 -d <Obey$Dir>.DumpSmall2 -o <Obey$Dir>.ResultD <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -n -d <Obey$Dir>.DumpOdd -o <Obey$Dir>.ResultD <Obey$Dir>.clips.odd.trace

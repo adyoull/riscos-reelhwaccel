@@ -22,16 +22,24 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   odd     426x240, 8 pictures (coded 432 wide, cropped)
   hd      1920x1080, 60 pictures, B frames, WPP
 
-Running it (please send back Result, and ResultT if Test is OK):
+Running it (please send back every Result file and the three Dump files):
   Test     Every clip, every picture checked. Writes Result.
   Speed    The 1080p clip without checks: pictures a second. Writes
            ResultT.
   Verbose  The first three pictures of the small clip with the
            decoder's log, if Test fails. Writes ResultV.
+  Flat     Every clip, with flat scaling lists given where a clip has
+           none (the same pictures; it loads the block's scaling
+           factors). Writes ResultS.
+  Dump     Saves the pictures decoded (the first three of small,
+           twice, and all of odd) to DumpSmall, DumpSmall2 and DumpOdd,
+           to compare with FFmpeg's pixel by pixel. Writes ResultD.
 
-This is the first time the block decodes anything from RISC OS. If a
-run says a phase "didn't finish", restart before running anything else;
-if the machine locks up, switch it off and on again.
+0.1 on a Pi 4: the block decoded every picture, and the clip with
+scaling lists (nowpp) came out exactly right; the clips without them
+didn't, differently each run. 0.1.1 adds Flat and Dump to find out why.
+If a run says a phase "didn't finish", restart before running anything
+else; if the machine locks up, switch it off and on again.
 
 Needs: a Raspberry Pi 4 (or 400) with RISC OS 5.23 or later (Physical
 Memory Pools). 8-bit 4:2:0 only for now.

@@ -276,6 +276,8 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         return fail(d, "%ux%u is bigger than the frames (%ux%u)", sps->pic_width_in_luma_samples,
                     sps->pic_height_in_luma_samples, d->ctx.dst_fmt.width, d->ctx.dst_fmt.height), HEVCDEC_UNSUPPORTED;
     if (!pic->nslices) return fail(d, "A picture with no slices");
+    if ((sps->flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED) && !pic->scaling)
+        return fail(d, "Scaling lists enabled but none given");
     f->used = 1;
     f->vb.timestamp = number;
     f->vb.state = 0;
