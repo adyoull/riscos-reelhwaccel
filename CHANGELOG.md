@@ -1,5 +1,28 @@
 # Changes
 
+## h264_vchiq for FFmpeg 5.1.10, and devkit 0.1 (2026-10-02)
+
+- ffmpeg/vchiqdec.c and ffmpeg/0001-avcodec-h264_vchiq.patch: FFmpeg's
+  h264_vchiq decoder on vcdec (`--enable-vchiq`, GPL; asked for by name).
+  Packets through h264_mp4toannexb; the SPS and PPS of Annex B extradata
+  put in front of keyframes that haven't their own; pictures as YUV420P
+  frames with their pts. receive_frame waits only while the VideoCore's
+  input is full or at the end; flush is a seek. Streams it can't take
+  give AVERROR(ENOSYS) at open (profile, bit depth, size, gpu_mem, no
+  VCHIQ), so a player can open h264 instead; a failure part way gives
+  AVERROR_EXTERNAL, then the packets are taken to the end.
+- vcdec 0.2: an EOS with nothing sent before it is the end at once (the
+  VideoCore isn't told, and a flush after it needs no new decoder).
+- tests/host/ffmpeg: FFmpeg 5.1.10 built for arm-linux with the patch and
+  linked with vcdec and the fake (tests/host/fake_vc.c, the fake as a
+  library); libavcodec's API (whole, seeks before and after the end, a
+  slow decoder with its input full, refusals, Annex B extradata, an
+  error) and the ffmpeg command (framecrc, whole and with -ss). Run when
+  FFMPEG_TARBALL is set. The fake gained in_slow (input buffers taken one
+  every so many polls) and an mvhd and tkhd in its MP4.
+- devkit/build.sh: riscos-reelhwaccel-devkit-0.1.tgz (libvcdec.a,
+  vcdec.h, the patch, README).
+
 ## vcdec 0.1 and VCDecTest 0.1 (test zip, 2026-10-02)
 
 On a Pi 4 (gpu_mem=128) every run was OK: every picture of the three

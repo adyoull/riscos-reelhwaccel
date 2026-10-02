@@ -342,6 +342,19 @@ int main(int argc, char **argv)
         rx_late = 0;
     }
 
+    /* an EOS with nothing before it: the end at once, the decoder not told;
+       a flush then needs no new decoder */
+    d = open70(0);
+    setup_planes(0, 0);
+    ngot = wrong_pics = 0;
+    CHECK(vcdec_send_eos(d) == VCDEC_OK && vcdec_receive(d, &p, planes, strides) == VCDEC_EOF && !aus,
+          "an empty stream's end");
+    CHECK(vcdec_flush(d) == VCDEC_OK && !recreated && created == 1, "a flush after an empty stream: %d created again",
+          recreated);
+    r = feed(d, 0, 12, 1);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics, "a decode after an empty stream: %d, %d", r, ngot);
+    close70(d, "empty stream");
+
     /* DISCONTINUITY passed on */
     d = open70(0);
     setup_planes(0, 0);

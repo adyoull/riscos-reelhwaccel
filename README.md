@@ -38,7 +38,7 @@ showed on a Raspberry Pi 4.
   picture comes back with its own pts in display order, 1080p decodes
   and copies out at 58-59 pictures a second, and a flush is clean as
   long as no end-of-stream reached the decoder before it.
-- **`vcdec/`** (0.1): the library itself, from all of that. Open, send
+- **`vcdec/`** (0.2): the library itself, from all of that. Open, send
   an access unit with its pts, take a picture (copied into the caller's
   planes), flush for a seek (after the end of the stream, the decoder is
   created again), close; nothing waits for the decoder but open, flush
@@ -54,14 +54,22 @@ showed on a Raspberry Pi 4.
   units), contiguous memory and interrupt (GIC 130, device 34) all work
   from RISC OS.
 
-Next: FFmpeg's `h264_vchiq` decoder and Reel on top of `vcdec`; then the
+- **`ffmpeg/`**: FFmpeg 5.1.10's `h264_vchiq` decoder on top of vcdec, as
+  a patch (`0001-avcodec-h264_vchiq.patch`, `--enable-vchiq`), tested in
+  FFmpeg itself (libavcodec's API and the `ffmpeg` command) against the
+  fakes. **`devkit/`** packs libvcdec, vcdec.h and the patch for
+  riscos-ffmpeg (FFmpeg, Reel).
+
+Next: h264_vchiq in riscos-ffmpeg's FFmpeg and Reel (a handoff); then the
 HEVC decoder.
 
 ## Building
 
     ./build.sh                 # every Pi test zip, into dist/
     vcdec/build.sh OUTDIR      # libvcdec.a and vcdec.h, for RISC OS
-    tests/host/run.sh          # the host tests
+    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-0.1.tgz
+    FFMPEG_TARBALL=.../ffmpeg-5.1.10.tar.xz tests/host/run.sh   # the host tests
+    ffmpeg/mkpatch.sh .../ffmpeg-5.1.10.tar.xz   # the patch, after vchiqdec.c changes
 
 `build.sh` needs GCCSDK GCC 10 (`CROSS=.../arm-riscos-gnueabihf-`),
 `tools/elf2aif` built (`make -C tools/elf2aif GCCSDK_SRC=<gccsdk>`), and

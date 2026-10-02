@@ -64,7 +64,12 @@ static uint32_t held[32]; static int nheld;
 static int big_efch, corrupt_at = -1, go_quiet, error_event, long_event, awaiting_reformat;
 static int mp4_mode, pts_fifo, no_pts_back, efch_after_flush, rx_late, recreated, big_efch_at, efch_ever;
 static uint32_t first_in_cs;
-static int fail_out_disable, efch_on_flush, disable_refused, ports_on_at_destroy, crop_too_wide;   /* vcdec: a disable that fails; a format change during a flush */
+/* vcdec: a disable that fails; a format change during a flush; ... */
+static int fail_out_disable, efch_on_flush, disable_refused, ports_on_at_destroy, crop_too_wide;
+/* in_slow: a decoder slower than the host. Input buffers (with their data)
+   wait, and one is taken every in_slow dequeues, so the input fills */
+static int in_slow, nslow, slow_ticks, slow_max, slow_running;
+static uint32_t slowq[32][128], slowq_len[32];
 /* counters */
 static int uses, releases, opens, closes, connects, disconnects, freed, created, destroyed, comp_enabled,
            port_on[4], shorts, bulks_tx, bulks_rx, efch_sent, disables_out, flushes, aus, au_pieces_max, idr_dropped;
@@ -73,8 +78,8 @@ static uint32_t stub, time_cs;
 /* the fake decoder's state */
 static uint8_t got_stream[1 << 20];
 static uint32_t got_len, pending_tx, pending_tx_ctx;
-static uint8_t txq[8][65536];
-static uint32_t txq_len[8];
+static uint8_t txq[32][65536];
+static uint32_t txq_len[32];
 static int ntxq, pending_tx_now;
 static uint32_t out_w, out_h, out_size_set;
 static int out_bufs[8], nout, frames_made, eos_in, eos_out_sent, need_rx;
@@ -147,11 +152,14 @@ static void decode_au(void)
 }
 
 /* a flush (or a disable) of the input: the decoder starts again */
+static void slow_return_all(void);
+
 static void decoder_reset(void)
 {
     if (eos_in) eos_then_flush = 1;
     in_au = 0; au_n = 0; ndpb = nready = 0; need_idr = 1; eos_in = eos_out_sent = 0; nfifo = 0; flushed = 1;
     while (nheld) buffer_back(1, held[--nheld], 0, 0, UNKNOWN);
+    slow_return_all();
     if (efch_after_flush) efch_sent = 0;
 }
 
@@ -326,6 +334,7 @@ static void produce(void)
         }
         need_rx = 1; rx_len_expected = size;
         frames_made++;
+
     } else if (eos_in && !eos_out_sent) {
         buffer_back(2, (uint32_t)out_bufs[--nout], 0, 1, mp4_mode ? last_out_pts : UNKNOWN);
         need_rx = 2; rx_len_expected = 8;
@@ -348,6 +357,13 @@ static void firmware(const uint32_t *m, uint32_t len)
     CHECK(m[0] == MAGIC && len <= 512, "bad message");
     if (vc_stuck) return;                    /* (until the machine is restarted) */
     if (m[1] == 10 && p[1] == 2 && p[2] == 2 && hijacked) { vc_stuck = 1; return; }
+    if (in_slow && !slow_running && m[1] == 11 && p[2] == 1 && !need_rx) {   /* an input buffer: waits */
+        CHECK(nslow < 32, "too many input buffers waiting");
+        memcpy(slowq[nslow], m, len);
+        slowq_len[nslow++] = len;
+        if (nslow > slow_max) slow_max = nslow;
+        return;
+    }
     if (need_rx) {
         CHECK(ndeferred < 8, "too many messages while sending");
         if (ndeferred < 8) { memcpy(deferred[ndeferred], m, len); deferred_len[ndeferred++] = len; deferred_ever++; }
@@ -531,6 +547,39 @@ static int in_pci(uint32_t a, uint32_t n)
     return 0;
 }
 
+static void slow_return_all(void)
+{
+    for (int i = 0; i < nslow; i++) {        /* back unread; their data dropped */
+        const uint32_t *p = slowq[i] + 6;
+        if (p[8 + 5]) {
+            CHECK(ntxq > 0, "a waiting input buffer's data missing");
+            memmove(txq[0], txq[1], sizeof txq[0] * (size_t)(ntxq - 1));
+            memmove(txq_len, txq_len + 1, sizeof txq_len[0] * (size_t)(ntxq - 1));
+            ntxq--;
+        }
+        buffer_back(1, p[3], 0, 0, UNKNOWN);
+    }
+    nslow = 0;
+}
+
+static void firmware(const uint32_t *m, uint32_t len);
+
+/* in_slow: the next waiting input buffer taken, every in_slow dequeues */
+static void slow_tick(void)
+{
+    uint32_t m[128], l;
+    if (!nslow || need_rx || pending_tx || ++slow_ticks < in_slow) return;
+    slow_ticks = 0;
+    l = slowq_len[0];
+    memcpy(m, slowq[0], l);
+    memmove(slowq[0], slowq[1], sizeof slowq[0] * (size_t)(nslow - 1));
+    memmove(slowq_len, slowq_len + 1, sizeof slowq_len[0] * (size_t)(nslow - 1));
+    nslow--;
+    slow_running = 1;
+    firmware(m, l);
+    slow_running = 0;
+}
+
 /* rx_late: a receive's data and callback come a few SWIs after it's queued */
 static struct { uint32_t addr, len; int kind; uint8_t data[1 << 16]; } lateq[4];
 static int nlate, late_ticks;
@@ -550,6 +599,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
 {
     uint32_t *R = (uint32_t *)r->r;
     if (n == 0x42 || n == 0x59204) late_rx_finish();
+    if (n == 0x59204) slow_tick();
     switch (n) {
     case 0x42: R[0] = time_cs++; return NULL;
     case 0x591C5: {                          /* BCMSupport_SendTempPropertyBuffer: VC memory */
@@ -614,13 +664,13 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         CHECK(R[3] == 4 && (R[1] & 3) == 0, "transmit flags %u", R[3]);
         /* its message may be waiting (the fake is sending): then so does
            the data, until the message is taken */
-        CHECK(ntxq < 8 && R[2] <= sizeof txq[0], "transmit queue");
+        CHECK(ntxq < 32 && R[2] <= sizeof txq[0], "transmit queue");
         pci_open(1);
         memcpy(txq[ntxq], (const void *)(uintptr_t)R[1], R[2]);
         pci_open(0);
         txq_len[ntxq++] = R[2];
         if (pending_tx) take_tx();
-        else CHECK(ndeferred, "a transmit with no buffer message");
+        else CHECK(ndeferred || nslow, "a transmit with no buffer message");
         return NULL;
     case 0x5920F: {                          /* BulkQueueReceive */
         if (!need_rx) {                      /* nothing being sent: it waits (for good, here) */
@@ -714,6 +764,7 @@ static void reset_fake(void)
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
     recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
+    in_slow = nslow = slow_ticks = slow_max = 0;
 }
 
 /* ---- the MP4: two closed GOPs, decode order I P B B P B, pts in frames ---- */
@@ -761,7 +812,13 @@ static void make_mp4(void)
     }
     close_box();
     open_box("moov");
+    full_box("mvhd", 0); put32(0); put32(0); put32(1000); put32(NMP4 * 40); put32(0x10000); put16(0x100); put16(0);
+    put32(0); put32(0); put32(0x10000); put32(0); put32(0); put32(0); put32(0x10000); put32(0); put32(0); put32(0);
+    put32(0x40000000); for (int i = 0; i < 6; i++) put32(0); put32(2); close_box();   /* (for FFmpeg's demuxer) */
     open_box("trak");
+    full_box("tkhd", 3); put32(0); put32(0); put32(1); put32(0); put32(NMP4 * 40); put32(0); put32(0); put16(0); put16(0);
+    put16(0); put16(0); put32(0x10000); put32(0); put32(0); put32(0); put32(0x10000); put32(0); put32(0); put32(0);
+    put32(0x40000000); put32((uint32_t)W << 16); put32((uint32_t)H << 16); close_box();
     open_box("edts"); full_box("elst", 0); put32(1); put32(12 * 512); put32(1024); put32(0x10000); close_box(); close_box();
     open_box("mdia");
     full_box("mdhd", 0); put32(0); put32(0); put32(12800); put32(NMP4 * 512); put32(0); close_box();

@@ -190,6 +190,7 @@ struct vcdec {
     uint32_t evsize;
     int outputs_given, sent_any, eos_sent, eos_back;
     int eos_seen;                          /* the EOS buffer has come back (not yet taken) */
+    int eos_vc;                            /* an EOS has reached the decoder (a flush must create it again) */
     int heard_output;                      /* a format change or a picture since the first input */
     uint32_t t_first_send, last_heard;
     int reformat;                          /* an EFCH to another format, to act on at the top */
@@ -709,6 +710,7 @@ static int create_component(vcdec *d)
     d->out_on = 1;
     /* (the output's buffers: after the decoder's first format change) */
     d->outputs_given = d->sent_any = d->eos_sent = d->eos_back = d->eos_seen = d->heard_output = d->reformat = 0;
+    d->eos_vc = 0;
     return 0;
 }
 
@@ -857,7 +859,7 @@ int vcdec_poll(vcdec *d)
     if (d->sent_any && !d->heard_output && now - d->t_first_send > STALL_CS)
         return fail(d, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has %u MB: 1080p needs "
                     "gpu_mem=128)", STALL_CS, vcdec_gpu_mem());
-    if (d->eos_sent && !d->eos_seen && now - d->last_heard > STALL_CS) {
+    if (d->eos_vc && !d->eos_seen && now - d->last_heard > STALL_CS) {
         int outs = 0;
         for (int i = 0; i < OUT_BUFS; i++) outs += d->out_state[i] == OB_VC;
         if (outs) return fail(d, VCDEC_ERROR, "Nothing from the decoder for %d cs after the EOS", STALL_CS);
@@ -931,13 +933,17 @@ int vcdec_send_eos(vcdec *d)
     if (d->failed) return d->failed;
     if (d->eos_sent) return VCDEC_OK;
     if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
+    if (!d->sent_any) {                    /* nothing sent: the end at once, the decoder not told */
+        d->eos_sent = d->eos_back = 1;
+        return VCDEC_OK;
+    }
     for (int i = 0; i < IN_BUFS; i++)
         if (!d->in_busy[i]) {
             if (!d->sent_any) { d->sent_any = 1; d->t_first_send = now_cs(); }
             if (buffer_to_vc(d, &d->in_info, i, d->in_buf[i], IN_SIZE, 0, FLAG_EOS, TIME_UNKNOWN, TIME_UNKNOWN))
                 return d->failed;
             d->in_busy[i] = 1;
-            d->eos_sent = 1;
+            d->eos_sent = d->eos_vc = 1;
             d->last_heard = now_cs();
             return VCDEC_OK;
         }
@@ -1010,6 +1016,10 @@ int vcdec_flush(vcdec *d)
     int r;
     if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
     d->stats.flushes++;
+    if (d->eos_sent && !d->eos_vc) {       /* an EOS with nothing before it: nothing to undo */
+        d->eos_sent = d->eos_back = 0;
+        return VCDEC_OK;
+    }
     if (d->eos_sent) {
         /* after an EOS a flush leaves the decoder losing its last pictures
            at the next EOS (0.14-0.17 on the Pi): a new one instead */

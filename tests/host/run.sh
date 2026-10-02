@@ -5,7 +5,8 @@
 # firmware, the firmware mailbox and the HEVC block.
 #
 # Needs: arm-linux-gnueabihf-gcc and libc6-dev-armhf-cross, ffmpeg with libx264
-# (for mp4_check.sh; skipped without), and qemu-arm
+# (for mp4_check.sh; skipped without), FFMPEG_TARBALL=.../ffmpeg-5.1.10.tar.xz for
+# the h264_vchiq tests (tests/host/ffmpeg; skipped without), and qemu-arm
 # with tests/qemu/qemu-8.2.2-align-trap.patch (tests/qemu/build-qemu.sh;
 # QEMU=path if it isn't the qemu-arm on PATH). The HEVCHW module's build
 # check uses arm-linux-gnueabihf-gcc too (MODULE_CROSS=... to change it).
@@ -52,6 +53,9 @@ echo "   the end, input full, bad calls, unsupported streams, decoders that misb
 grep "FAIL\|vcdec_test:" "$O/vcdec_test.out"
 # ... and VCDecTest's MP4 reader against real MP4s (as mmaldecode's)
 "$HERE/mp4_check.sh" "$O/vcdec_test" "$O/vcdectest" || bad=1
+
+# ffmpeg/: the h264_vchiq decoder built into FFmpeg 5.1.10 (FFMPEG_TARBALL; skipped without it)
+"$HERE/ffmpeg/run.sh" "$O" || bad=1
 
 # hevchw/module: the HEVCHW module (its C, and header.s's veneers and IRQ handler) on a fake RISC OS
 arm-linux-gnueabihf-gcc -c -o "$O/hevchw_header.o" "$TOP/hevchw/module/header.s" &&

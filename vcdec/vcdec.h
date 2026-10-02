@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCDEC_VERSION "0.1"
+#define VCDEC_VERSION "0.2"
 
 /* results */
 #define VCDEC_OK           0
