@@ -1,4 +1,4 @@
-From 6411325da4496c22ffc3ff75bf576e853a930981 Mon Sep 17 00:00:00 2001
+From 237c37b4e4edfd0f43087bc3ae52cdaf23992311 Mon Sep 17 00:00:00 2001
 From: Andrew Youll <andrewyoull86@gmail.com>
 Date: Fri, 2 Oct 2026 12:40:07 +0100
 Subject: [PATCH] avcodec: h264_vchiq, H.264 decoded by the Raspberry Pi's
@@ -25,15 +25,15 @@ Options: sync_receive, gpu_mem_check.
  configure              |   6 +
  libavcodec/Makefile    |   1 +
  libavcodec/allcodecs.c |   1 +
- libavcodec/vchiqdec.c  | 338 +++++++++++++++++++++++++++++++++++++++++
- 4 files changed, 346 insertions(+)
+ libavcodec/vchiqdec.c  | 341 +++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 349 insertions(+)
  create mode 100644 libavcodec/vchiqdec.c
 
 diff --git a/configure b/configure
-index d9b4b6f..f4e1f51 100755
+index db8b953..60d92c4 100755
 --- a/configure
 +++ b/configure
-@@ -345,6 +345,8 @@ External library support:
+@@ -343,6 +343,8 @@ External library support:
    --enable-libmfx          enable Intel MediaSDK (AKA Quick Sync Video) code via libmfx [no]
    --enable-libnpp          enable Nvidia Performance Primitives-based code [no]
    --enable-mmal            enable Broadcom Multi-Media Abstraction Layer (Raspberry Pi) via MMAL [no]
@@ -42,7 +42,7 @@ index d9b4b6f..f4e1f51 100755
    --disable-nvdec          disable Nvidia video decoding acceleration (via hwaccel) [autodetect]
    --disable-nvenc          disable Nvidia video encoding code [autodetect]
    --enable-omx             enable OpenMAX IL code [no]
-@@ -1786,6 +1788,7 @@ EXTERNAL_LIBRARY_GPL_LIST="
+@@ -1784,6 +1786,7 @@ EXTERNAL_LIBRARY_GPL_LIST="
      libxavs
      libxavs2
      libxvid
@@ -50,7 +50,7 @@ index d9b4b6f..f4e1f51 100755
  "
  
  EXTERNAL_LIBRARY_NONFREE_LIST="
-@@ -3191,6 +3194,8 @@ h264_rkmpp_decoder_deps="rkmpp"
+@@ -3187,6 +3190,8 @@ h264_rkmpp_decoder_deps="rkmpp"
  h264_rkmpp_decoder_select="h264_mp4toannexb_bsf"
  h264_vaapi_encoder_select="cbs_h264 vaapi_encode"
  h264_v4l2m2m_decoder_deps="v4l2_m2m h264_v4l2_m2m"
@@ -59,7 +59,7 @@ index d9b4b6f..f4e1f51 100755
  h264_v4l2m2m_decoder_select="h264_mp4toannexb_bsf"
  h264_v4l2m2m_encoder_deps="v4l2_m2m h264_v4l2_m2m"
  hevc_amf_encoder_deps="amf"
-@@ -6683,6 +6688,7 @@ enabled libvpx            && {
+@@ -6677,6 +6682,7 @@ enabled libvpx            && {
      fi
  }
  
@@ -93,10 +93,10 @@ index bdfc2f6..5014510 100644
  extern const FFCodec ff_hap_encoder;
 diff --git a/libavcodec/vchiqdec.c b/libavcodec/vchiqdec.c
 new file mode 100644
-index 0000000..6b0f3d4
+index 0000000..478351e
 --- /dev/null
 +++ b/libavcodec/vchiqdec.c
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,341 @@
 +/*
 + * h264_vchiq: H.264 decoded by the Raspberry Pi's VideoCore on RISC OS,
 + * through the VCHIQ module and the firmware's MMAL service (vcdec, from
@@ -165,6 +165,7 @@ index 0000000..6b0f3d4
 +    int failed;                             /* the AVERROR every call returns from now on */
 +    int sync_receive;                       /* option */
 +    int gpu_mem_check;                      /* option */
++    int pci_memory;                         /* option */
 +} VCHIQContext;
 +
 +static void vchiq_log(void *h, const char *text)
@@ -249,7 +250,7 @@ index 0000000..6b0f3d4
 +    c.width = w;
 +    c.height = h;
 +    c.flags = (s->sync_receive ? VCDEC_SYNC_RECEIVE : 0) | (s->gpu_mem_check ? 0 : VCDEC_NO_GPU_MEM_CHECK) |
-+              (av_log_get_level() >= AV_LOG_TRACE ? VCDEC_LOG_MESSAGES : 0);
++              (s->pci_memory ? VCDEC_OUT_PCI : 0) | (av_log_get_level() >= AV_LOG_TRACE ? VCDEC_LOG_MESSAGES : 0);
 +    c.log = vchiq_log;
 +    c.log_handle = avctx;
 +    r = vcdec_open(&s->d, &c);
@@ -259,8 +260,8 @@ index 0000000..6b0f3d4
 +        return r == VCDEC_UNSUPPORTED || r == VCDEC_EINVAL ? AVERROR(ENOSYS) : AVERROR_EXTERNAL;
 +    }
 +    avctx->pix_fmt = AV_PIX_FMT_YUV420P;
-+    av_log(avctx, AV_LOG_VERBOSE, "H.264 on the VideoCore (vcdec %s), %dx%d, gpu_mem %u MB\n", VCDEC_VERSION, w, h,
-+           vcdec_gpu_mem());
++    av_log(avctx, AV_LOG_VERBOSE, "H.264 on the VideoCore (vcdec %s), %dx%d, gpu_mem %u MB%s\n", VCDEC_VERSION, w, h,
++           vcdec_gpu_mem(), s->pci_memory ? ", pictures in PCI memory" : "");
 +    return 0;
 +}
 +
@@ -407,6 +408,8 @@ index 0000000..6b0f3d4
 +      { .i64 = 0 }, 0, 1, VD },
 +    { "gpu_mem_check", "refuse 1080p when gpu_mem is under 128 MB", OFFSET(gpu_mem_check), AV_OPT_TYPE_BOOL,
 +      { .i64 = 1 }, 0, 1, VD },
++    { "pci_memory", "pictures arrive in PCI memory (vcdec 0.3's way), not a cacheable pool", OFFSET(pci_memory),
++      AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
 +    { NULL }
 +};
 +

@@ -22,6 +22,7 @@
 #include <string.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
+#include <libavutil/opt.h>
 #include "fake_vc.h"
 
 static int fails;
@@ -52,6 +53,7 @@ static int got_is(int from, int n)
 
 typedef struct { AVFormatContext *fmt; AVCodecContext *dec; AVPacket *pkt; AVFrame *frame; int tb_frame; } run_t;
 
+static int pci_option;                       /* open_file: -pci_memory 1 */
 static int open_file(run_t *r)
 {
     const AVCodec *c = avcodec_find_decoder_by_name("h264_vchiq");
@@ -66,6 +68,7 @@ static int open_file(run_t *r)
     r->tb_frame = r->fmt->streams[0]->time_base.den / 25;
     r->pkt = av_packet_alloc();
     r->frame = av_frame_alloc();
+    if (pci_option) av_opt_set_int(r->dec->priv_data, "pci_memory", 1, 0);
     return avcodec_open2(r->dec, c, NULL);
 }
 
@@ -148,9 +151,27 @@ int main(void)
         CHECK(e == AVERROR_EOF && got_is(0, 12) && !wrong && *fake_vc_var("aus") == 12,
               "whole file: %d, %d frames, %d wrong", e, ngot, wrong);
         CHECK(avcodec_receive_frame(r.dec, r.frame) == AVERROR_EOF, "EOF again");
+        CHECK(*fake_vc_var("pmp_invalidates") >= 12, "whole file: pictures not from a cached pool (%d cleans)",
+              *fake_vc_var("pmp_invalidates"));
     }
     close_file(&r);
     CHECK(fake_vc_cleaned("whole file"), "whole file: not cleaned up");
+
+    /* -pci_memory 1: PCI memory, as vcdec 0.3 (no pools) */
+    fake_vc_reset();
+    ngot = wrong = 0;
+    pci_option = 1;
+    e = open_file(&r);
+    pci_option = 0;
+    CHECK(e == 0, "open, pci_memory: %d", e);
+    if (!e) {
+        e = decode(&r, 0);
+        CHECK(e == AVERROR_EOF && got_is(0, 12) && !wrong && !*fake_vc_var("pmp_invalidates") && !*fake_vc_var("pmp_made"),
+              "pci_memory: %d, %d frames, %d wrong, %d cleans, %d pools", e, ngot, wrong, *fake_vc_var("pmp_invalidates"),
+              *fake_vc_var("pmp_made"));
+    }
+    close_file(&r);
+    CHECK(fake_vc_cleaned("pci_memory"), "pci_memory: not cleaned up");
 
     /* a seek before the end: three frames, then on from the keyframe at 6 */
     for (int late = 0; late < 2; late++) {

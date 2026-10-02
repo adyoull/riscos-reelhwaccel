@@ -1,5 +1,25 @@
 # Changes
 
+## devkit 0.2: vcdec 0.4 for FFmpeg, h264_vchiq's pci_memory (2026-10-02)
+
+VCDecTest 0.3 on a Pi 4: every run OK. Every picture right with the
+defaults (small, odd, hd; Sync, Seek, SeekEnd and Verbose too) and in PCI
+memory copied by LDM 8 (the fallback). 1080p without checks: 82.4 pictures
+a second (defaults), 64.6 (0.3's defaults), 66.6 (PCI, LDM 8), 82.8 with
+6 buffers, 80.2 with -S.
+
+Where the time goes at 82 a second (12.1 ms a picture): the copy, 9.1 ms
+during a decode against 1.4 ms alone; the cache 0.4 ms; messages, queueing
+and handing back about nothing; vcdec_send 0.9 ms. With -S the waits for
+transfers take 6.9 ms and the copy 4.9 ms. So the copy is slowed by the
+VideoCore's own traffic (its decode and the 3 MB bulk transfer of the next
+picture, about 7 ms) running at the same time.
+
+- h264_vchiq: `pci_memory` option (default off) for 0.3's PCI memory.
+- devkit 0.2: vcdec 0.4 and the patch with that option.
+- Host tests: the FFmpeg tests check the pool is used by default and not
+  with pci_memory (the fake counts pools made).
+
 ## vcdec 0.4 and VCDecTest 0.3 (test zip, 2026-10-02)
 
 VCDecTest 0.2 on a Pi 4 (1080p, no checks): PCI memory with LDM 4 gave 64

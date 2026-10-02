@@ -22,13 +22,15 @@ gives ordinary YUV420P frames, in display order with their pts.
 - **A failure part way** gives AVERROR_EXTERNAL. After that the decoder takes packets until the end of the stream, then gives EOF.
 - **Waiting:** `avcodec_receive_frame` waits for the VideoCore only while its input is full (about one picture's time) or at the end of the stream. Otherwise it gives EAGAIN.
 - **Seeking:** `avcodec_flush_buffers` is a seek. After the end of the stream, vcdec creates the decoder again, so nothing is lost.
-- **Options:** `sync_receive` (wait for each picture's transfer as it arrives) and `gpu_mem_check` (default on).
+- **Options:** `sync_receive` (wait for each picture's transfer as it arrives), `gpu_mem_check` (default on) and `pci_memory` (default off: see below).
+- **Memory (vcdec 0.4):** pictures arrive in a cacheable Physical Memory Pool and are copied out by LDM 8: 1080p at 82 pictures a second on a Pi 4, against 64 from PCI memory. Without a pool (RISC OS before 5.23, or no contiguous pages) vcdec uses PCI memory and logs why (`-v verbose`). `-pci_memory 1` asks for PCI memory, as an escape hatch.
 - **Linking:** add `-lvcdec` after `-lavcodec` when linking programs.
 
 ## vcdec on its own
 
 See `vcdec.h`: open, send an access unit with its pts, receive a picture
-into your planes, flush, close. Nothing waits for the decoder but open,
+into your planes, flush, close. `vcdec_get_stats` says where the output
+buffers are (pools or PCI memory) and where the time inside vcdec went. Nothing waits for the decoder but open,
 flush and close, so it suits a Wimp player polled on null events.
 
 GPL version 2 or later. From riscos-reelhwaccel.

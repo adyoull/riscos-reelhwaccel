@@ -47,8 +47,8 @@ showed on a Raspberry Pi 4.
   when the stream isn't for the VideoCore so the caller can decode in
   software. Pictures arrive in a cacheable Physical Memory Pool (user
   readable; PCI memory if there's none) and are copied out by LDM 8:
-  timed on the Pi with VCDecTest 0.2, that took 1080p from 64 to 82
-  pictures a second. **`tools/vcdectest`** drives it on the Pi as a
+  timed on the Pi with VCDecTest 0.2 and confirmed with 0.3 (every
+  picture right), that took 1080p from 64 to 82 pictures a second. **`tools/vcdectest`** drives it on the Pi as a
   player would: on a Pi 4 every picture right, seeks before and after the
   end of the stream losing nothing, open, flush and close in 0-3 cs.
 - **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's

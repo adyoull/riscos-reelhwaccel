@@ -66,6 +66,7 @@ typedef struct VCHIQContext {
     int failed;                             /* the AVERROR every call returns from now on */
     int sync_receive;                       /* option */
     int gpu_mem_check;                      /* option */
+    int pci_memory;                         /* option */
 } VCHIQContext;
 
 static void vchiq_log(void *h, const char *text)
@@ -150,7 +151,7 @@ static av_cold int vchiq_init(AVCodecContext *avctx)
     c.width = w;
     c.height = h;
     c.flags = (s->sync_receive ? VCDEC_SYNC_RECEIVE : 0) | (s->gpu_mem_check ? 0 : VCDEC_NO_GPU_MEM_CHECK) |
-              (av_log_get_level() >= AV_LOG_TRACE ? VCDEC_LOG_MESSAGES : 0);
+              (s->pci_memory ? VCDEC_OUT_PCI : 0) | (av_log_get_level() >= AV_LOG_TRACE ? VCDEC_LOG_MESSAGES : 0);
     c.log = vchiq_log;
     c.log_handle = avctx;
     r = vcdec_open(&s->d, &c);
@@ -160,8 +161,8 @@ static av_cold int vchiq_init(AVCodecContext *avctx)
         return r == VCDEC_UNSUPPORTED || r == VCDEC_EINVAL ? AVERROR(ENOSYS) : AVERROR_EXTERNAL;
     }
     avctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    av_log(avctx, AV_LOG_VERBOSE, "H.264 on the VideoCore (vcdec %s), %dx%d, gpu_mem %u MB\n", VCDEC_VERSION, w, h,
-           vcdec_gpu_mem());
+    av_log(avctx, AV_LOG_VERBOSE, "H.264 on the VideoCore (vcdec %s), %dx%d, gpu_mem %u MB%s\n", VCDEC_VERSION, w, h,
+           vcdec_gpu_mem(), s->pci_memory ? ", pictures in PCI memory" : "");
     return 0;
 }
 
@@ -308,6 +309,8 @@ static const AVOption options[] = {
       { .i64 = 0 }, 0, 1, VD },
     { "gpu_mem_check", "refuse 1080p when gpu_mem is under 128 MB", OFFSET(gpu_mem_check), AV_OPT_TYPE_BOOL,
       { .i64 = 1 }, 0, 1, VD },
+    { "pci_memory", "pictures arrive in PCI memory (vcdec 0.3's way), not a cacheable pool", OFFSET(pci_memory),
+      AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
     { NULL }
 };
 
