@@ -155,6 +155,7 @@ int probe_main(int argc, char **argv)
     int verbose = 0, keep_going = 0, timing = 0, count = 0, nframes = 17, r, i, wrong = 0, done = 0, fatal = 0;
     int flat = 0;                          /* -s: flat scaling lists given where the stream has none */
     int overran = 0;
+    int uncached = 0;                      /* -u: output frames not cacheable (as before 0.1.4) */
     FILE *dump = NULL;                     /* -d: every picture decoded, 8-bit 4:2:0, in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
@@ -175,6 +176,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) count = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) nframes = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s")) flat = 1;
+        else if (!strcmp(argv[i], "-u")) uncached = 1;
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
             if (!(dump = fopen(argv[++i], "wb"))) { printf("Can't write %s\n", argv[i]); return 1; }
         }
@@ -186,7 +188,7 @@ int probe_main(int argc, char **argv)
         else name = NULL, i = argc;
     }
     if (!name || nframes < 2 || nframes > MAX_FRAMES || count < 0) {
-        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-d file] [-c count] [-f frames] trace\n");
+        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-u] [-d file] [-c count] [-f frames] trace\n");
         if (dump) fclose(dump);
         return 1;
     }
@@ -216,6 +218,7 @@ int probe_main(int argc, char **argv)
         if ((int)pics[i].height > c.height) c.height = (int)pics[i].height;
     }
     c.bit_depth = (int)pics[0].depth;
+    if (uncached) c.cached_frames = 0;
     if (verbose) c.log = log_line;
     t0 = now_cs();
     if ((r = hevcdec_open(&d, &c)) != HEVCDEC_OK) {
@@ -294,6 +297,9 @@ int probe_main(int argc, char **argv)
         t_dec ? (unsigned)(done * 1000 / t_dec % 10) : 0, (unsigned)t_conv);
     say("hevcdec: phase 1 waited %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
         st.cs_phase2, st.phase1_retries);
+    say("hevcdec: output frames %s%s", st.cached_frames ? "cacheable" : "not cacheable",
+        st.cached_frames ? "" : uncached ? " (-u)\n" : " (no cache maintenance)\n");
+    if (st.cached_frames) say(" (cleaning and invalidating them before converting: %u cs of that)\n", st.cs_cache);
     if (!timing) say("%d checked against FFmpeg: %d wrong\n", done, wrong);
     if (st.overruns) {
         say("hevcdec: the block wrote past the end of %u buffers, at most %u bytes past %s (into their guard areas)\n",

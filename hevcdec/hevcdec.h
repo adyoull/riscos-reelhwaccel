@@ -15,8 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
- * 0.1.3: 8-bit 4:2:0 only, one picture at a time (each hevcdec_decode
- * waits for both phases), output frames uncached. Streams without scaling
+ * 0.1.4: 8-bit 4:2:0 only, one picture at a time (each hevcdec_decode
+ * waits for both phases), output frames cacheable (unless the config
+ * says not), converted with NEON. Streams without scaling
  * lists are given flat ones (the block needs its factors loaded).
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
@@ -28,7 +29,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.3"
+#define HEVCDEC_VERSION "0.1.4"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -40,6 +41,7 @@ typedef struct hevcdec_frame hevcdec_frame;
 typedef struct {
     int width, height;          /* the largest picture to come (frames are made this size) */
     int bit_depth;              /* 8 */
+    int cached_frames;          /* 1 (default): output frames cacheable, much quicker to read */
     void (*log)(void *handle, const char *text);
     void *log_handle;
 } hevcdec_config;
@@ -62,6 +64,8 @@ typedef struct {
 typedef struct {
     unsigned pictures, phase1_retries;
     unsigned cs_phase1, cs_phase2;      /* waiting for each phase, centiseconds in all */
+    unsigned cs_cache;                  /* cleaning and invalidating cached frames before reading */
+    int cached_frames;                  /* the frames are cacheable */
     /* buffers the block wrote past the end of (each has a guard area after
        it, so no harm done), the most bytes past any, and which that was */
     unsigned overruns, overrun_max;

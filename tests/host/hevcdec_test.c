@@ -138,7 +138,8 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     o = run_app(&ret, trace, NULL);
     printf("%s", o);
     CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors && !fake_hevc.factors_wrong &&
-          strstr(o, "hevcdec: nothing written past any buffer's end") &&
+          strstr(o, "hevcdec: nothing written past any buffer's end") && strstr(o, "hevcdec: output frames cacheable (") &&
+          fake_hevc.cached_allocs > 0 && fake_hevc.cache_ops > 0 && !fake_hevc.evictions &&
           !fake_hevc.unknown_pictures && fake_hevc.phase2s == nmap,
           "hevctest %s (%d): %d references wrong, %d pictures unknown, %d phase 2s", trace, ret, fake_hevc.ref_errors,
           fake_hevc.unknown_pictures, fake_hevc.phase2s);
@@ -217,6 +218,19 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
               fake_hevc.scaling_not_flat > 0, "hevctest -s, nowpp (%d):\n%s", ret, o);
         cleaned("-s nowpp");
     }
+
+    fake_hevc_reset();                          /* frames not cacheable: asked for (-u), or no cache maintenance */
+    o = run_app(&ret, trace, "-u");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && strstr(o, "output frames not cacheable (-u)") &&
+          fake_hevc.cached_allocs == 0, "hevctest -u (%d, %d cached):\n%s", ret, fake_hevc.cached_allocs, o);
+    cleaned("-u");
+    fake_hevc_reset();
+    fake_hevc.no_cache = 1;
+    o = run_app(&ret, trace, "");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") &&
+          strstr(o, "output frames not cacheable (no cache maintenance)") && fake_hevc.cached_allocs == 0,
+          "no cache maintenance (%d):\n%s", ret, o);
+    cleaned("no cache maintenance");
 
     fake_hevc_reset();                          /* the block writing past a frame: caught by its guard, reported */
     fake_hevc.overrun = 2048;

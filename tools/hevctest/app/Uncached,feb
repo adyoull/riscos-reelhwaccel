@@ -1,0 +1,11 @@
+| Uncached: the 1080p clip with output frames not cacheable (-u), as
+| HEVCTest 0.1.3 and before, every picture checked, to compare the time
+| converting them with Test's. Reports to ResultU.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 32768K -max 32768K
+Remove <Obey$Dir>.ResultU
+Run <Obey$Dir>.hevctest -u -o <Obey$Dir>.ResultU <Obey$Dir>.clips.hd.trace

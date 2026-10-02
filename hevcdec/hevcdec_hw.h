@@ -25,12 +25,18 @@ uint32_t hevcdec_hw_read(void *hw, unsigned int offset);
 uint32_t hevcdec_hw_ictrl(void *hw);
 void hevcdec_hw_ictrl_write(void *hw, uint32_t value);
 
-/* physically contiguous memory the block can use, not cached (writes
-   buffered: they reach memory before the next register write), readable
-   and writable in USR mode; *bus its address on the block's bus. NULL if
-   there's none. */
-void *hevcdec_hw_alloc(void *hw, size_t size, uint64_t *bus);
+/* physically contiguous memory the block can use, readable and writable
+   in USR mode; *bus its address on the block's bus. NULL if there's none.
+   Not cached (writes buffered: they reach memory before the next register
+   write), or with cached set (only if hevcdec_hw_can_cache) cacheable:
+   then what the program writes must be cleaned out to memory, and what
+   the block writes invalidated, with hevcdec_hw_cache_clean_inv. */
+void *hevcdec_hw_alloc(void *hw, size_t size, uint64_t *bus, int cached);
 void hevcdec_hw_free(void *hw, void *p);
+int hevcdec_hw_can_cache(void *hw);
+/* cached memory from p for n bytes: written back and dropped from the
+   caches (whole 64-byte lines) */
+void hevcdec_hw_cache_clean_inv(void *hw, const void *p, size_t n);
 
 uint32_t hevcdec_hw_now_cs(void);
 

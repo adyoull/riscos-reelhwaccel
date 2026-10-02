@@ -34,7 +34,13 @@ static struct hevcdec_hw the_hw;
 static uint32_t regs[NREG], ictrl, clock_now;
 static uint32_t pend[2 * 1024];
 static int npend, opened;
-static struct { void *p; size_t n; } allocs[NALLOC];
+/* p: the program's view; ram: the block's (its bus address). Cacheable
+   memory is modelled as the Pi's caches behave: the program sees p, the
+   block ram; hevcdec_hw_cache_clean_inv writes back what the program
+   changed (p differing from synced) and then reloads p from ram; and when
+   phase 2 ends, anything the program changed and didn't clean is written
+   back anyway (lines evicted), over what the block wrote. */
+static struct { void *p, *ram, *synced; size_t n; int cached; } allocs[NALLOC];
 static struct { uint64_t addr; uint32_t poc; } framepoc[NFRAMEPOC];
 static int nframepoc;
 /* phase 1's findings, for phase 2 */
@@ -50,6 +56,7 @@ static fake_hevc_picture_fn picture_fn;
    fields' overflow when FFmpeg fills them for a stream without PCM.) So a
    picture whose phase 1 doesn't load them comes out wrong. */
 static int factors_wrong;                /* this picture's */
+static void evict_dirty(void);
 
 fake_hevc_state fake_hevc;
 
@@ -57,7 +64,10 @@ fake_hevc_state fake_hevc;
 
 void fake_hevc_reset(void)
 {
-    for (int i = 0; i < NALLOC; i++) { free(allocs[i].p); allocs[i].p = NULL; }
+    for (int i = 0; i < NALLOC; i++) {
+        if (allocs[i].p && allocs[i].cached) { free(allocs[i].ram); free(allocs[i].synced); }
+        free(allocs[i].p); allocs[i].p = NULL;
+    }
     memset(regs, 0, sizeof regs);
     ictrl = 0x44;                        /* (reset value: both enables set) */
     npend = 0; opened = 0; nframepoc = 0; have_hash = 0; nrefs = 0;
@@ -76,8 +86,8 @@ int fake_hevc_live(void)
 static void *mem(uint64_t bus, size_t n, const char *what)
 {
     for (int i = 0; i < NALLOC; i++)
-        if (allocs[i].p && bus >= (uint64_t)(uintptr_t)allocs[i].p &&
-            bus + n <= (uint64_t)(uintptr_t)allocs[i].p + allocs[i].n)
+        if (allocs[i].p && bus >= (uint64_t)(uintptr_t)allocs[i].ram &&
+            bus + n <= (uint64_t)(uintptr_t)allocs[i].ram + allocs[i].n)
             return (void *)(uintptr_t)bus;
     CHECK(0, "%s: %u bytes at &%llx: not the block's memory", what, (unsigned)n, (unsigned long long)bus);
     return NULL;
@@ -218,6 +228,7 @@ static void phase2(void)
             framepoc[nframepoc].addr = y; framepoc[nframepoc].poc = poc; nframepoc++;
         }
     }
+    evict_dirty();
     if (fake_hevc.p2_hang) return;
     if (ictrl & (1u << 6)) ictrl |= 1u << 4;            /* ACTIVE2 */
 }
@@ -279,22 +290,66 @@ void hevcdec_hw_ictrl_write(void *hw, uint32_t v)
     ictrl = (ictrl & ~((1u << 2) | (1u << 6))) | (v & ((1u << 2) | (1u << 6)));   /* enables */
 }
 
-void *hevcdec_hw_alloc(void *hw, size_t size, uint64_t *bus)
+void *hevcdec_hw_alloc(void *hw, size_t size, uint64_t *bus, int cached)
 {
     (void)hw;
     if (fake_hevc.no_memory || (fake_hevc.memory_left && size > fake_hevc.memory_left)) return NULL;
+    CHECK(!cached || !fake_hevc.no_cache, "cacheable memory asked for without cache maintenance");
     for (int i = 0; i < NALLOC; i++)
         if (!allocs[i].p) {
             size_t n = (size + 4095) & ~(size_t)4095;
             if (!(allocs[i].p = aligned_alloc(4096, n))) return NULL;
-            memset(allocs[i].p, 0, n);
+            memset(allocs[i].p, 0, n);                   /* (zeroed, and for cacheable memory cleaned: as hevcdec_hw.c) */
             allocs[i].n = n;
+            allocs[i].cached = cached;
+            allocs[i].ram = allocs[i].p;
+            if (cached) {
+                allocs[i].ram = aligned_alloc(4096, n);
+                allocs[i].synced = malloc(n);
+                memset(allocs[i].ram, 0, n);
+                memset(allocs[i].synced, 0, n);
+                fake_hevc.cached_allocs++;
+            }
             if (fake_hevc.memory_left) fake_hevc.memory_left -= size;
-            *bus = (uint64_t)(uintptr_t)allocs[i].p;
+            *bus = (uint64_t)(uintptr_t)allocs[i].ram;
             fake_hevc.allocs++;
             return allocs[i].p;
         }
     return NULL;
+}
+
+int hevcdec_hw_can_cache(void *hw) { (void)hw; return !fake_hevc.no_cache; }
+
+void hevcdec_hw_cache_clean_inv(void *hw, const void *p, size_t n)
+{
+    (void)hw;
+    fake_hevc.cache_ops++;
+    for (int i = 0; i < NALLOC; i++) {
+        uint8_t *b = allocs[i].p, *r = allocs[i].ram, *sy = allocs[i].synced;
+        size_t a, e;
+        if (!b || (const uint8_t *)p + n <= b || (const uint8_t *)p >= b + allocs[i].n) continue;
+        CHECK(allocs[i].cached, "cache maintenance on memory that isn't cacheable");
+        if (!allocs[i].cached) return;
+        a = (const uint8_t *)p < b ? 0 : (size_t)((const uint8_t *)p - b);
+        e = (const uint8_t *)p + n > b + allocs[i].n ? allocs[i].n : (size_t)((const uint8_t *)p + n - b);
+        a &= ~(size_t)63; e = (e + 63) & ~(size_t)63;
+        if (e > allocs[i].n) e = allocs[i].n;
+        for (size_t k = a; k < e; k++) if (b[k] != sy[k]) r[k] = b[k];   /* (cleaned) */
+        memcpy(b + a, r + a, e - a);                                     /* (invalidated) */
+        memcpy(sy + a, r + a, e - a);
+        return;
+    }
+    CHECK(0, "cache maintenance on memory that isn't the block's");
+}
+
+static void evict_dirty(void)                            /* (lines the program wrote and didn't clean) */
+{
+    for (int i = 0; i < NALLOC; i++)
+        if (allocs[i].p && allocs[i].cached) {
+            uint8_t *b = allocs[i].p, *r = allocs[i].ram, *sy = allocs[i].synced;
+            for (size_t k = 0; k < allocs[i].n; k++)
+                if (b[k] != sy[k]) { r[k] = b[k]; sy[k] = b[k]; fake_hevc.evictions++; }
+        }
 }
 
 void hevcdec_hw_free(void *hw, void *p)
@@ -304,8 +359,10 @@ void hevcdec_hw_free(void *hw, void *p)
         if (allocs[i].p == p) {
             /* (a frame's POC forgotten with it) */
             for (int k = 0; k < nframepoc; k++)
-                if (framepoc[k].addr >= (uint64_t)(uintptr_t)p && framepoc[k].addr < (uint64_t)(uintptr_t)p + allocs[i].n)
+                if (framepoc[k].addr >= (uint64_t)(uintptr_t)allocs[i].ram &&
+                    framepoc[k].addr < (uint64_t)(uintptr_t)allocs[i].ram + allocs[i].n)
                     framepoc[k] = framepoc[--nframepoc], k--;
+            if (allocs[i].cached) { free(allocs[i].ram); free(allocs[i].synced); }
             free(p);
             allocs[i].p = NULL;
             return;

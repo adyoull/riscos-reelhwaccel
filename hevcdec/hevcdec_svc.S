@@ -48,4 +48,21 @@ hevcdec_svc_read:
         pop     {r4, pc}
         .size   hevcdec_svc_read, . - hevcdec_svc_read
 
+/* void hevcdec_svc_call(uint32_t fn, uint32_t r0, uint32_t r1): fn (a
+   kernel ARMop) called in SVC mode with r0, r1 */
+        .global hevcdec_svc_call
+        .type   hevcdec_svc_call, %function
+hevcdec_svc_call:
+        push    {r4-r6, lr}
+        mov     r4, r0
+        mov     r5, r1
+        mov     r6, r2
+        swi     0x16                            @ OS_EnterOS
+        mov     r0, r5
+        mov     r1, r6
+        blx     r4
+        swi     0x7C                            @ OS_LeaveOS
+        pop     {r4-r6, pc}
+        .size   hevcdec_svc_call, . - hevcdec_svc_call
+
         .section .note.GNU-stack, "", %progbits

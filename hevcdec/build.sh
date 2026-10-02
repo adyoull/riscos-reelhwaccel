@@ -11,9 +11,10 @@ CF="-O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -fstack-clash-protection -Wa
 mkdir -p "$O"
 ${CROSS}gcc $CF -Wextra -I"$HERE" -c -o "$O/hevcdec.o" "$HERE/hevcdec.c"
 ${CROSS}gcc $CF -Wextra -I"$HERE" -c -o "$O/hevcdec_hw.o" "$HERE/hevcdec_hw.c"
+${CROSS}gcc ${CF/vfpv3/neon-vfpv4} -Wextra -I"$HERE" -c -o "$O/hevcdec_conv.o" "$HERE/hevcdec_conv.c"   # (NEON: the Pi 4 has it)
 ${CROSS}gcc $CF -Wno-pointer-sign -Wno-sign-compare -Wno-unused-parameter -Wno-unused-variable -I"$HERE" -I"$HERE/shim" \
   -c -o "$O/rpivid_h265.o" "$HERE/rpivid_h265.c"
 ${CROSS}gcc -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -c -o "$O/hevcdec_svc.o" "$HERE/hevcdec_svc.S"
 rm -f "$O/libhevcdec.a"
-${CROSS}ar rcs "$O/libhevcdec.a" "$O/hevcdec.o" "$O/hevcdec_hw.o" "$O/rpivid_h265.o" "$O/hevcdec_svc.o"
+${CROSS}ar rcs "$O/libhevcdec.a" "$O/hevcdec.o" "$O/hevcdec_hw.o" "$O/hevcdec_conv.o" "$O/rpivid_h265.o" "$O/hevcdec_svc.o"
 cp "$HERE/hevcdec.h" "$HERE/hevc_ctrls.h" "$O/"

@@ -1,5 +1,32 @@
 # Changes
 
+## hevcdec 0.1.4 and HEVCTest 0.1.4: cacheable output frames, NEON conversion (test zip, 2026-10-02)
+
+HEVCTest 0.1.3 on a Pi 4: every picture of every clip right; nothing
+written past any buffer's end (so the block doesn't overrun them); the
+block idle at close (interrupt control &44); Repeat, 13 runs back to
+back, without the start-up crash. 1080p decoded at 222-231 pictures a
+second, but converting each picture out of the block's format took
+29 ms (174 cs for 60): memory that isn't cacheable, read byte by byte for
+chroma.
+
+- hevcdec: output frames cacheable (hevcdec_config.cached_frames, on by
+  default), as vcdec's pictures: cleaned after they're zeroed and after
+  their guard is written, cleaned and invalidated (the kernel's
+  Cache_CleanInvalidateRange ARMop, from OS_MMUControl 2, in SVC mode)
+  before hevcdec_frame_to_i420 reads one and before a guard is checked.
+  Without the ARMop, not cacheable, as before. hevcdec_stats: cs_cache,
+  cached_frames.
+- hevcdec_conv.c: the conversion column by column (the frame read in
+  order), luma 64 and 16 bytes at a time, chroma split by NEON's VLD2
+  (built for NEON: the block is only on the Pi 4).
+- HEVCTest: -u (frames not cacheable); says which; Obey file Uncached
+  (ResultU) to compare the conversion time.
+- The fake HEVC block models the caches: the program's view and the
+  block's memory apart, brought together only by the cache maintenance;
+  what the program wrote and didn't clean is written back after phase 2.
+  A missing invalidate or clean fails the tests.
+
 ## hevcdec 0.1.3 and HEVCTest 0.1.3: guard areas (test zip, 2026-10-02)
 
 HEVCTest 0.1.2 on a Pi 4: every picture of every clip exactly right

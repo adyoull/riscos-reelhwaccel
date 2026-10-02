@@ -19,6 +19,7 @@
 #include "hevcdec.h"
 #include "rpivid.h"
 #include "rpivid_hw.h"
+#include "hevcdec_conv.h"
 
 #define MAX_FRAMES  VB2_MAX_FRAME
 #define WAIT_CS     100                    /* a phase not done in this: an error */
@@ -29,6 +30,7 @@
 struct hevcdec_frame {
     struct vb2_v4l2_buffer vb;           /* (first: rpivid_h265.c sees this) */
     int used;
+    int cached;                          /* cacheable: invalidated before it's read */
 };
 
 struct hevcdec {
@@ -48,7 +50,8 @@ struct hevcdec {
        came out with whatever factors were left (HEVCTest 0.1 on a Pi 4);
        given flat lists (all 16, what "no scaling lists" means) with the
        SPS copied to enable them, every picture was right (0.1.1). */
-    struct { void *p; size_t size; const char *what; int reported; } guarded[MAX_GUARDED];
+    struct { void *p; size_t size; const char *what; int reported, cached; } guarded[MAX_GUARDED];
+    int cached_frames;                   /* frames cacheable (config, and the machine can) */
     unsigned overruns, overrun_max;     /* buffers the block wrote past, and by how much at most */
     const char *overrun_what;
     struct v4l2_ctrl_hevc_sps sps_flat;
@@ -114,6 +117,7 @@ static void guard_check(hevcdec *d, int k)
 {
     const uint8_t *g = (const uint8_t *)d->guarded[k].p + d->guarded[k].size;
     size_t n = GUARD;
+    if (d->guarded[k].cached) hevcdec_hw_cache_clean_inv(d->hw, g, GUARD);   /* (what's in memory) */
     while (n && g[n - 1] == GUARD_BYTE) n--;
     if (n && !d->guarded[k].reported) {
         d->guarded[k].reported = 1;
@@ -124,16 +128,18 @@ static void guard_check(hevcdec *d, int k)
     }
 }
 
-static void *dma_get(hevcdec *d, size_t size, uint64_t *bus, const char *what)
+static void *dma_get(hevcdec *d, size_t size, uint64_t *bus, const char *what, int cached)
 {
     int k;
     void *p;
     for (k = 0; k < MAX_GUARDED && d->guarded[k].p; k++) {}
     if (k == MAX_GUARDED) return NULL;
     size = (size + 63) & ~(size_t)63;
-    if (!(p = hevcdec_hw_alloc(d->hw, size + GUARD, bus))) return NULL;
+    if (!(p = hevcdec_hw_alloc(d->hw, size + GUARD, bus, cached))) return NULL;
     memset((uint8_t *)p + size, GUARD_BYTE, GUARD);
+    if (cached) hevcdec_hw_cache_clean_inv(d->hw, (uint8_t *)p + size, GUARD);   /* (out to memory) */
     d->guarded[k].p = p; d->guarded[k].size = size; d->guarded[k].what = what; d->guarded[k].reported = 0;
+    d->guarded[k].cached = cached;
     return p;
 }
 
@@ -148,7 +154,7 @@ static void dma_put(hevcdec *d, void *p)
 void *hevcdec_dma_alloc(size_t size, dma_addr_t *addr)
 {
     uint64_t bus = 0;
-    void *p = cur ? dma_get(cur, size, &bus, "a buffer of rpivid's (PU, coefficients, bitstream or collocated)") : NULL;
+    void *p = cur ? dma_get(cur, size, &bus, "a buffer of rpivid's (PU, coefficients, bitstream or collocated)", 0) : NULL;
     *addr = p ? bus : 0;
     return p;
 }
@@ -168,7 +174,7 @@ dma_addr_t hevcdec_dma_map(const void *ptr, size_t size)
         size_t cap = size < 65536 ? 65536 : size * 2;
         if (d->cmd) dma_put(d, d->cmd);
         d->cmd_cap = 0;
-        if (!(d->cmd = dma_get(d, cap, &d->cmd_bus, "phase 1's command list"))) return 0;
+        if (!(d->cmd = dma_get(d, cap, &d->cmd_bus, "phase 1's command list", 0))) return 0;
         d->cmd_cap = cap;
     }
     memcpy(d->cmd, ptr, size);
@@ -201,6 +207,7 @@ void hevcdec_config_init(hevcdec_config *c)
 {
     memset(c, 0, sizeof *c);
     c->bit_depth = 8;
+    c->cached_frames = 1;
 }
 
 const char *hevcdec_open_error(void) { return open_err; }
@@ -210,6 +217,7 @@ void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s)
     hevcdec *w = (hevcdec *)d;                   /* (the guards checked now) */
     for (int k = 0; k < MAX_GUARDED; k++) if (w->guarded[k].p) guard_check(w, k);
     *s = d->stats;
+    s->cached_frames = d->cached_frames;
     s->overruns = d->overruns;
     s->overrun_max = d->overrun_max;
     s->overrun_what = d->overrun_what;
@@ -258,8 +266,10 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
         return HEVCDEC_ERROR;
     }
     d->started = 1;
-    logf_(d, "hevcdec %s: frames %ux%u (NV12, 128-byte columns of %u lines), %u bytes each", HEVCDEC_VERSION,
-          f->width, f->height, f->plane_fmt[0].bytesperline, f->plane_fmt[0].sizeimage);
+    d->cached_frames = c->cached_frames && hevcdec_hw_can_cache(d->hw);
+    logf_(d, "hevcdec %s: frames %ux%u (NV12, 128-byte columns of %u lines), %u bytes each, %s", HEVCDEC_VERSION,
+          f->width, f->height, f->plane_fmt[0].bytesperline, f->plane_fmt[0].sizeimage,
+          d->cached_frames ? "cacheable" : c->cached_frames ? "not cacheable (no cache maintenance)" : "not cacheable");
     *out = d;
     return HEVCDEC_OK;
 }
@@ -274,7 +284,8 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
     fr->vb.vb2_buf.index = (unsigned)i;
     fr->vb.vb2_buf.num_planes = 1;
     fr->vb.planes[0].length = d->ctx.dst_fmt.plane_fmt[0].sizeimage;
-    if (!(fr->vb.vaddr = dma_get(d, fr->vb.planes[0].length, &fr->vb.addr, "an output frame"))) {
+    fr->cached = d->cached_frames;
+    if (!(fr->vb.vaddr = dma_get(d, fr->vb.planes[0].length, &fr->vb.addr, "an output frame", fr->cached))) {
         free(fr);
         fail(d, "No contiguous memory for a %u byte frame", (unsigned)d->ctx.dst_fmt.plane_fmt[0].sizeimage);
         return NULL;
@@ -358,7 +369,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
             size_t cap = sl->size < 65536 ? 65536 : sl->size * 2;
             if (d->src.vaddr) dma_put(d, d->src.vaddr);
             d->src_cap = 0;
-            if (!(d->src.vaddr = dma_get(d, cap, &d->src.addr, "the slice buffer")))
+            if (!(d->src.vaddr = dma_get(d, cap, &d->src.addr, "the slice buffer", 0)))
                 return fail(d, "No contiguous memory for a %u byte slice", (unsigned)sl->size);
             d->src_cap = cap;
         }
@@ -403,31 +414,21 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
 
 /* (NV12 in 128-byte columns: column k holds x 128k..128k+127; its luma
    rows, 128 bytes each, then from row height (the frames' 16-aligned
-   height) its chroma rows, U and V interleaved) */
+   height) its chroma rows, U and V interleaved.) A cacheable frame is
+   cleaned and invalidated first: the block wrote it behind the cache,
+   which may hold lines of what was there before (read, or fetched
+   ahead). The copying is hevcdec_conv.c's (NEON). */
 void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
                            int y0, int w, int h)
 {
     const uint8_t *b = f->vb.vaddr;
     const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
-    const int cw = (w + 1) / 2, ch = (h + 1) / 2;
-    for (int y = 0; y < h; y++) {                       /* luma: a run per column crossed */
-        uint8_t *dst = planes[0] + (size_t)y * strides[0];
-        for (int x = 0; x < w;) {
-            int sx = x0 + x, n = 128 - (sx & 127);
-            if (n > w - x) n = w - x;
-            memcpy(dst + x, b + (size_t)(sx >> 7) * col + (size_t)(y0 + y) * 128 + (sx & 127), (size_t)n);
-            x += n;
-        }
+    if (f->cached) {
+        uint32_t t0 = hevcdec_hw_now_cs();
+        hevcdec_hw_cache_clean_inv(d->hw, b, f->vb.planes[0].length);
+        d->stats.cs_cache += hevcdec_hw_now_cs() - t0;
     }
-    for (int y = 0; y < ch; y++) {                      /* chroma */
-        uint8_t *u = planes[1] + (size_t)y * strides[1], *v = planes[2] + (size_t)y * strides[2];
-        for (int x = 0; x < cw; x++) {
-            int sx = x0 + 2 * x;
-            const uint8_t *s = b + (size_t)(sx >> 7) * col + c_off + (size_t)(y0 / 2 + y) * 128 + (sx & 126);
-            u[x] = s[0];
-            v[x] = s[1];
-        }
-    }
+    hevcdec_col128_to_i420(b, col, c_off, planes, strides, x0, y0, w, h);
 }
 
 void hevcdec_close(hevcdec *d)

@@ -22,12 +22,14 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   odd     426x240, 8 pictures (coded 432 wide, cropped)
   hd      1920x1080, 60 pictures, B frames, WPP
 
-Running it (please send back Result, ResultT and ResultR):
+Running it (please send back Result, ResultT and ResultU):
   Test     Every clip, every picture checked. Writes Result.
   Speed    The 1080p clip without checks: pictures a second. Writes
            ResultT.
   Verbose  The first three pictures of the small clip with the
            decoder's log, if Test fails. Writes ResultV.
+  Uncached The 1080p clip with the output frames not cacheable, as
+           before 0.1.4, to compare. Writes ResultU.
   Repeat   hevctest run straight after itself 13 times (the small
            clip ten times, the 1080p clip three). Writes ResultR.
   Dump     Saves the pictures decoded (the first three of small,
@@ -44,7 +46,12 @@ was right. 0.1.2's hevcdec always loads them, and every picture of
 every clip was right. 0.1.3 looks into hevctest sometimes stopping at
 once ("EMT trap") when run straight after itself: every buffer the block
 uses now has a guard area after it, and hevctest says whether the block
-wrote past any; Repeat runs it back to back.
+wrote past any; Repeat runs it back to back. 0.1.3 on a Pi 4: all
+right, nothing written past any buffer, Repeat fine. But converting a
+1080p picture from the block's format took 29 ms, reading memory that
+isn't cacheable. 0.1.4 makes the output frames cacheable (cleaned and
+invalidated before each is read) and converts with NEON; Test's 1080p
+line "converting them" should be much lower than Uncached's.
 If a run says a phase "didn't finish", restart before running anything
 else; if the machine locks up, switch it off and on again.
 

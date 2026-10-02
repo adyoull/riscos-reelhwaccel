@@ -7,11 +7,13 @@
  *    property mailbox;
  *  - memory: a Physical Memory Pool for each buffer (OS_DynamicArea 0, 21,
  *    22, OS_Memory 12 for contiguous pages, as vcdec's pools), mapped not
- *    cacheable (bufferable); on the Pi 4 the block's bus address is the
+ *    cacheable (bufferable), or cacheable (output frames: cleaned and
+ *    invalidated with the kernel's Cache_CleanInvalidateRange ARMop, from
+ *    OS_MMUControl 2, called in SVC mode, as vcdec); on the Pi 4 the block's bus address is the
  *    physical address (the SCB's dma-ranges map bus 0-16 GB to physical
  *    0-16 GB: Raspberry Pi Linux's bcm2711-rpi-ds.dtsi);
  *  - the time: OS_ReadMonotonicTime.
- * PRM: OS_Memory 0/12/13, OS_DynamicArea 0/1/21/22.
+ * PRM: OS_Memory 0/12/13, OS_DynamicArea 0/1/21/22, OS_MMUControl 2.
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
@@ -25,7 +27,9 @@
 #define OS_ReadMonotonicTime  0x42
 #define OS_DynamicArea        0x66
 #define OS_Memory             0x68
+#define OS_MMUControl         0x6B
 #define OS_SynchroniseCodeAreas 0x6E
+#define ARMOP_CACHE_CLEAN_INVALIDATE_RANGE 21
 #define BCMSupport_SendTempPropertyBuffer 0x591C5
 
 #define HEVC_PHYS   0xFEB00000u
@@ -46,6 +50,7 @@
 
 void hevcdec_svc_writes(uint32_t base, const uint32_t *pairs, int n);
 uint32_t hevcdec_svc_read(uint32_t addr);
+void hevcdec_svc_call(uint32_t fn, uint32_t r0, uint32_t r1);
 
 typedef struct { void *base; uint32_t area, pages; } pool_t;
 
@@ -56,6 +61,7 @@ struct hevcdec_hw {
     int nw;
     pool_t pools[MAX_POOLS];
     int stuck;                        /* a pool wouldn't go: the handler stays */
+    uint32_t armop_cci;               /* Cache_CleanInvalidateRange (0: none) */
 };
 
 static _kernel_oserror *swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
@@ -128,8 +134,20 @@ int hevcdec_hw_open(hevcdec_hw **out, char *err, size_t errlen)
         r.r[0] = 1; r.r[1] = (int)hw->stub; r.r[2] = (int)(hw->stub + 4);
         swi(OS_SynchroniseCodeAreas, &r);
     }
+    memset(&r, 0, sizeof r);                           /* the cache maintenance for cached frames */
+    r.r[0] = 2 | ARMOP_CACHE_CLEAN_INVALIDATE_RANGE << 8;
+    if (!swi(OS_MMUControl, &r)) hw->armop_cci = (uint32_t)r.r[0];
     *out = hw;
     return 0;
+}
+
+int hevcdec_hw_can_cache(void *h) { return ((hevcdec_hw *)h)->armop_cci != 0; }
+
+void hevcdec_hw_cache_clean_inv(void *h, const void *p, size_t n)
+{
+    hevcdec_hw *hw = h;
+    uint32_t a = (uint32_t)(uintptr_t)p;
+    if (hw->armop_cci && n) hevcdec_svc_call(hw->armop_cci, a & ~63u, (uint32_t)(a + n + 63) & ~63u);
 }
 
 void hevcdec_hw_write(void *h, unsigned int offset, uint32_t value)
@@ -184,7 +202,7 @@ static void pool_free(hevcdec_hw *hw, pool_t *p)
     p->base = NULL;
 }
 
-void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus)
+void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus, int cached)
 {
     hevcdec_hw *hw = h;
     _kernel_swi_regs r;
@@ -211,7 +229,10 @@ void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus)
     r.r[0] = 21; r.r[1] = (int)p->area; r.r[2] = (int)(uintptr_t)l; r.r[3] = (int)pages;
     if (swi(OS_DynamicArea, &r)) { free(l); pool_free(hw, p); return NULL; }
     p->pages = pages;
-    for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = j; l[3 * j + 2] = PAGE_LOCK | PAGE_NOT_CACHEABLE; }
+    if (cached && !hw->armop_cci) cached = 0;
+    for (uint32_t j = 0; j < pages; j++) {
+        l[3 * j] = j; l[3 * j + 1] = j; l[3 * j + 2] = PAGE_LOCK | (cached ? 0 : PAGE_NOT_CACHEABLE);
+    }
     memset(&r, 0, sizeof r);
     r.r[0] = 22; r.r[1] = (int)p->area; r.r[2] = (int)(uintptr_t)l; r.r[3] = (int)pages;
     if (swi(OS_DynamicArea, &r)) { free(l); pool_free(hw, p); return NULL; }
@@ -230,6 +251,7 @@ void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus)
         if (swi(OS_Memory, &r) || !(r.r[1] & 1)) { pool_free(hw, p); return NULL; }
     }
     memset(p->base, 0, (size_t)pages << 12);
+    if (cached) hevcdec_hw_cache_clean_inv(hw, p->base, (size_t)pages << 12);   /* (the zeros out to memory) */
     *bus = phys[0];
     return p->base;
 }

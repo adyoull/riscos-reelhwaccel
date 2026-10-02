@@ -12,9 +12,9 @@ O=$(cd "$1" && pwd)/hevc
 mkdir -p "$O"
 bad=0
 H=$TOP/tests/host
-arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DPROBE_TEST -Wall -Wno-unused-function \
+arm-linux-gnueabihf-gcc -O1 -marm -mfpu=neon -mno-unaligned-access -DPROBE_TEST -Wall -Wno-unused-function \
   -I"$TOP/hevcdec" -I"$TOP/hevcdec/shim" -I"$H" -no-pie -o "$O/hevcdec_test" "$H/hevcdec_test.c" "$H/fake_hevc.c" \
-  "$TOP/hevcdec/hevcdec.c" "$TOP/tools/hevctest/hevctest.c" \
+  "$TOP/hevcdec/hevcdec.c" "$TOP/hevcdec/hevcdec_conv.c" "$TOP/tools/hevctest/hevctest.c" \
   -Wno-pointer-sign -Wno-sign-compare -Wno-unused-parameter -Wno-unused-variable "$TOP/hevcdec/rpivid_h265.c" || exit 1
 args=()
 if [ -n "${FFMPEG_TARBALL:-}" ] && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx265; then
