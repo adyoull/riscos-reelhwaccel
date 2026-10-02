@@ -1,10 +1,10 @@
-| SeekE: as Seek, but with EOS on the last picture's own buffer, as 0.13
-| and 0.14 sent it (0.14 lost the last two pictures). Reports to ResultSE.
+| SeekM: as Seek, but the way FFmpeg's mmaldec flushes on Linux: both
+| ports disabled, flushed, then enabled again. Reports to ResultM.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
 RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
 RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
 WimpSlot -min 16384K -max 16384K
-Remove <Obey$Dir>.ResultSE
-Run <Obey$Dir>.mmaldecode -v -n -s 10 -e -o <Obey$Dir>.ResultSE <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Remove <Obey$Dir>.ResultM
+Run <Obey$Dir>.mmaldecode -v -n -s 10 -M -o <Obey$Dir>.ResultM <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig

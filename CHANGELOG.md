@@ -1,5 +1,20 @@
 # Changes
 
+## MMALDecode 0.16 (test zip, 2026-10-02)
+
+0.15 on a Pi 4: every MP4 check OK; 1080p 36.5 pictures a second with
+checksums, 59.2 timed (one LDM/STM copy each). EOS on its own buffer
+didn't save Seek: after a flush or a disable, EOS (either way) comes
+back without the last two pictures (the decoder's reorder delay), its
+pts the last picture's plus one frame. SeekE lost the same two.
+
+- Seek variants: -D marks the first buffer after the seek DISCONTINUITY;
+  -C disables and enables the component after the flush; -M does what
+  FFmpeg's mmaldec does (ports disabled, flushed, enabled). Obey files
+  SeekDC, SeekC and SeekM; SeekD and SeekE (settled) removed.
+- The fake loses the waiting pictures after any flush, either EOS, as
+  the Pi; 0.15 fails against it.
+
 ## MMALDecode 0.15 (test zip, 2026-10-02)
 
 0.14 on a Pi 4: every MP4 check OK (pts back with each picture, in

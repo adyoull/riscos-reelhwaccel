@@ -46,7 +46,7 @@
  *   8. -t: no checksums, only the pts; the time spent receiving and in
  *      the one copy of each picture (out of the PCI memory) is reported.
  *
- *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] [-e] stream expected.crc [expected.sig]
+ *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F|-C|-M] [-D]] [-t] [-e] stream expected.crc [expected.sig]
  *      stream    raw H.264 (Annex B), or MP4 (H.264 in avc1/avc3)
  *      -o file   also add the report to file
  *      -n        don't stop at the first wrong picture
@@ -54,6 +54,9 @@
  *      -d dir    the first three pictures (and event data) saved
  *      -s N      flush after N pictures, then seek to the last keyframe (MP4)
  *      -F        with -s: disable and enable the ports instead of FLUSH
+ *      -D        with -s: the first buffer after the seek marked DISCONTINUITY
+ *      -C        with -s: after the FLUSH, the component disabled and enabled
+ *      -M        with -s: ports disabled, flushed and enabled (FFmpeg's mmaldec)
  *      -t        time, don't check the pictures
  *      -e        (MP4) EOS on the last access unit's buffer, not on an empty
  *                one after it (0.13-0.14's way: loses pictures after a flush)
@@ -122,6 +125,7 @@ enum { ES_VIDEO = 3 };
 #define FLAG_FRAME_START 2u
 #define FLAG_FRAME_END 4u
 #define FLAG_KEYFRAME  8u
+#define FLAG_DISCONTINUITY 0x10u
 #define TIME_UNKNOWN   0x8000000000000000ull
 #define SHORT_DATA     128
 /* The decoder recommends 20 input buffers (ril.video_decode's input port
@@ -1200,6 +1204,7 @@ int probe_main(int argc, char **argv)
     uint32_t vcmem = 0, copy_cs = 0, au_pos = 0;
     int frames = 0, eos_sent = 0, eos_seen = 0, fatal = 0, i, format_changes = 0, events = 0, outputs_given = 0;
     int eos_on_data = 0;
+    int seek_disc = 0, seek_comp = 0, seek_mm = 0, disc_pending = 0;
     int cur_s = 0, seek_s = -1, seek_after = 0, seek_disable = 0, seeked = 0, before_flush = 0, missing = 0, checked = 0;
     _kernel_oserror *e;
     static const uint32_t code[9] = { 0xe3510004u, 0x05903000u, 0x02833001u, 0x05803000u, 0xe3510012u,
@@ -1218,6 +1223,9 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) dump_dir = argv[++i];
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-F")) seek_disable = 1;
+        else if (!strcmp(argv[i], "-D")) seek_disc = 1;
+        else if (!strcmp(argv[i], "-C")) seek_comp = 1;
+        else if (!strcmp(argv[i], "-M")) seek_mm = 1;
         else if (!strcmp(argv[i], "-t")) timing = 1;
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) x_out = argv[++i];
         else if (!stream_name) stream_name = argv[i];
@@ -1227,7 +1235,7 @@ int probe_main(int argc, char **argv)
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0) {
-        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] [-e] stream expected.crc [expected.sig]\n");
+        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F|-C|-M] [-D]] [-t] [-e] stream expected.crc [expected.sig]\n");
         return 1;
     }
     say("mmaldecode: %s on the VideoCore, through VCHIQ and MMAL\n", stream_name);
@@ -1375,6 +1383,7 @@ int probe_main(int argc, char **argv)
                     n = au_len - au_pos < IN_SIZE ? au_len - au_pos : IN_SIZE;
                     if (!au_pos) {
                         flags = FLAG_FRAME_START | (sm->key ? FLAG_KEYFRAME : 0);
+                        if (disc_pending) { flags |= FLAG_DISCONTINUITY; disc_pending = 0; }   /* -D */
                         pts = (uint64_t)sm->pts;
                         dts = (uint64_t)sm->dts;
                     }
@@ -1485,11 +1494,28 @@ int probe_main(int argc, char **argv)
                     fatal = 1;
                     break;
                 }
-                say("\nAfter %d pictures: %s, then on from the last keyframe (sample %d, pts %s)\n", frames,
-                    seek_disable ? "both ports disabled and enabled again" : "both ports flushed", seek_s,
-                    us_text((uint64_t)seek_pts, t));
+                say("\nAfter %d pictures: %s%s, then on from the last keyframe (sample %d, pts %s)\n", frames,
+                    seek_disable ? "both ports disabled and enabled again" :
+                    seek_mm ? "both ports disabled, flushed and enabled again (as FFmpeg's mmaldec)" :
+                    seek_comp ? "both ports flushed, the component disabled and enabled again" : "both ports flushed",
+                    seek_disc ? ", the next buffer marked DISCONTINUITY" : "", seek_s, us_text((uint64_t)seek_pts, t));
                 before_flush = frames;
-                if (seek_disable) {
+                /* 0.14-0.15 on the Pi: after FLUSH or disable/enable, EOS (on
+                   the data or on its own) came back without the last two
+                   pictures (the decoder's reorder delay): -D, -C and -M try
+                   to leave the decoder as it is after a fresh start */
+                if (seek_mm) {              /* FFmpeg's mmaldec ffmmal_flush: disable, flush, enable */
+                    if (port_action(&in_info, ACTION_DISABLE, "Input disable (seek)")) { fatal = 1; break; }
+                    in_on = 0;
+                    if (port_action(&out_info, ACTION_DISABLE, "Output disable (seek)")) { fatal = 1; break; }
+                    out_on = 0;
+                    if (port_action(&in_info, ACTION_FLUSH, "Input flush") ||
+                        port_action(&out_info, ACTION_FLUSH, "Output flush")) { fatal = 1; break; }
+                    if (port_action(&in_info, ACTION_ENABLE, "Input enable (seek)")) { fatal = 1; break; }
+                    in_on = 1;
+                    if (port_action(&out_info, ACTION_ENABLE, "Output enable (seek)")) { fatal = 1; break; }
+                    out_on = 1;
+                } else if (seek_disable) {
                     if (port_action(&out_info, ACTION_DISABLE, "Output disable (seek)")) { fatal = 1; break; }
                     out_on = 0;
                     if (port_action(&in_info, ACTION_DISABLE, "Input disable (seek)")) { fatal = 1; break; }
@@ -1502,7 +1528,13 @@ int probe_main(int argc, char **argv)
                            port_action(&out_info, ACTION_FLUSH, "Output flush")) {
                     fatal = 1;
                     break;
+                } else if (seek_comp) {     /* -C: then the component off and on */
+                    if (simple(T_COMPONENT_DISABLE, "Disable (seek)")) { fatal = 1; break; }
+                    enabled = 0;
+                    if (simple(T_COMPONENT_ENABLE, "Enable (seek)")) { fatal = 1; break; }
+                    enabled = 1;
                 }
+                disc_pending = seek_disc;
                 say("  done in %u cs\n\n", (unsigned)(now_cs() - t0));
                 /* an EOS from before the flush (all the stream was sent)
                    isn't the end any more: the stream goes again */

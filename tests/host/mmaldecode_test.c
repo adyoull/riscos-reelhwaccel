@@ -88,7 +88,9 @@ static int in_au, need_idr, aus_decoded, n_au_pts;
 static pic_t dpb[8], ready[64];
 static int ndpb, nready, flushed;          /* (flushed: since the start) */
 static uint64_t last_out_pts = UNKNOWN;
-static int eos_with_data, eos_lost;     /* (the Pi's EOS buffer: the last pts plus a picture's time) */
+static int eos_with_data, eos_lost;
+static uint64_t max_ready_pts;              /* (the latest picture decoded and not lost) */
+static int disc_fixes, disc_seen, comp_cycles, flush_while_off;   /* -D, -C, -M */     /* (the Pi's EOS buffer: the last pts plus a picture's time) */
 static uint64_t fifo_pts[64];               /* pts_fifo: the input's pts, in decode order */
 static int nfifo;
 
@@ -98,6 +100,7 @@ static void to_ready(int all)
         int m = 0;
         for (int i = 1; i < ndpb; i++) if (dpb[i].pts < dpb[m].pts) m = i;
         ready[nready++] = dpb[m];
+        if (max_ready_pts == UNKNOWN || dpb[m].pts > max_ready_pts) max_ready_pts = dpb[m].pts;
         dpb[m] = dpb[--ndpb];
     }
 }
@@ -145,16 +148,18 @@ static void decoder_reset(void)
 }
 
 /* EOS reached the decoder: the DPB is emptied in order - except, as the
-   Pi (0.14), after a flush when EOS came on an access unit's own buffer:
-   then the pictures still waiting are lost, and the EOS buffer comes back
-   with that unit's pts. (EOS on an empty buffer after a flush: assumed to
-   drain, as FFmpeg's mmaldec sends it.) */
+   Pi (0.14 and 0.15), after a flush or a disable of the input: then the
+   pictures still waiting (its reorder delay, two here) are lost, whether
+   EOS came on the last access unit's buffer or on an empty one, and the
+   EOS buffer comes back with the last picture's pts plus a picture's time.
+   disc_fixes: a decoder for which DISCONTINUITY on the first buffer after
+   the flush avoids it (not seen on the Pi yet: to test -D's report). */
 static void eos_drain(void)
 {
-    if (flushed && eos_with_data) {
+    if (flushed && !(disc_fixes && disc_seen)) {
         eos_lost += ndpb;
         ndpb = 0;
-        last_out_pts = au_pts;
+        last_out_pts = max_ready_pts + 40000;
         return;
     }
     to_ready(1);
@@ -357,7 +362,7 @@ static void firmware(const uint32_t *m, uint32_t len)
         reply(m, r, sizeof r);
         break;
     }
-    case 6: comp_enabled = 1; { uint32_t r = 0; reply(m, &r, 4); } break;
+    case 6: if (port_on[1] || port_on[2]) comp_cycles++; comp_enabled = 1; { uint32_t r = 0; reply(m, &r, 4); } break;
     case 7: comp_enabled = 0; { uint32_t r = 0; reply(m, &r, 4); } break;
     case 5: destroyed++; { uint32_t r = 0; reply(m, &r, 4); } break;
     case 10: {                               /* PORT_ACTION */
@@ -367,7 +372,7 @@ static void firmware(const uint32_t *m, uint32_t len)
         if (p[2] == 1) { port_on[port] = 1; if (port == 2) awaiting_reformat = 0; }
         else {                               /* 2 disable, 3 flush: the port's buffers back before the reply */
             if (p[2] == 2) port_on[port] = 0;
-            else flushes++;
+            else { flushes++; if (!port_on[port]) flush_while_off++; }
             if (port == 2) {
                 if (p[2] == 2) disables_out++;
                 while (nout) buffer_back(2, (uint32_t)out_bufs[--nout], 0, 0, UNKNOWN);
@@ -401,6 +406,7 @@ static void firmware(const uint32_t *m, uint32_t len)
             pending_pts = (uint64_t)p[16] | (uint64_t)p[17] << 32;
             if (mp4_mode) {
                 CHECK(flags & (2 | 4) || in_au || (flags == 1 && !length), "a buffer outside an access unit (flags &%X)", flags);
+                if ((flags & 0x10) && flushed) disc_seen++;   /* -D */
                 if (flags & 2) {             /* FRAME_START: the pts is on this one */
                     CHECK(!in_au, "FRAME_START inside an access unit");
                     in_au = 1; au_n = 0; au_pieces = 0; au_pts = pending_pts;
@@ -629,7 +635,7 @@ static void reset_fake(void)
     got_len = pending_tx = 0; nheld = 0; awaiting_reformat = 0; hijacked = vc_stuck = 0; out_w = W; out_h = H; nout = frames_made = eos_in = eos_out_sent = need_rx = 0;
     noutq = 0; ndeferred = deferred_ever = 0; ntxq = pending_tx_now = 0;
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
-    flushed = 0; eos_lost = 0;
+    flushed = 0; eos_lost = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
 }
 
 /* ---- the MP4: two closed GOPs, decode order I P B B P B, pts in frames ---- */
@@ -903,19 +909,39 @@ int main(int argc, char **argv)
     cleaned("no pts");
     no_pts_back = 0;
 
-    o = run_mp4(&ret, "-s", "3", NULL);       /* flush after 3 pictures, on from the keyframe at pts 6 */
-    printf("%s", o);
-    CHECK(ret == 0 && !eos_lost && flushes == 2 && strstr(o, "both ports flushed") && strstr(o, "sample 6, pts 240000") &&
-          strstr(o, "Before the flush: 3 pictures") && strstr(o, "from the keyframe on, 6\n") && strstr(o, "all of them") && strstr(o, "Result: OK"),
-          "flush and seek (%d, %d flushes):\n%s", ret, flushes, o);
+    o = run_mp4(&ret, "-s", "3", NULL);       /* flush after 3 pictures, on from the keyframe at pts 6: */
+    printf("%s", o);                          /* as the Pi, the last two pictures are lost at EOS */
+    CHECK(ret == 1 && eos_lost == 2 && flushes == 2 && strstr(o, "both ports flushed") && strstr(o, "sample 6, pts 240000") &&
+          strstr(o, "Before the flush: 3 pictures") && strstr(o, "from the keyframe on, 4\n") &&
+          strstr(o, "picture 10 (pts 400000) never came back") && strstr(o, "picture 11 (pts 440000) never came back") &&
+          strstr(o, "some missing"), "flush and seek (%d, %d flushes, %d lost):\n%s", ret, flushes, eos_lost, o);
     cleaned("seek");
 
-    o = run_mp4(&ret, "-s", "3", "-F");       /* the same with disable and enable */
-    CHECK(ret == 0 && flushes == 0 && disables_out == 2 && strstr(o, "disabled and enabled again") &&
-          strstr(o, "all of them") && strstr(o, "Result: OK"), "disable and seek (%d, %d disables):\n%s", ret, disables_out, o);
+    o = run_mp4(&ret, "-s", "3", "-F");       /* the same with disable and enable (the Pi: the same loss) */
+    CHECK(ret == 1 && eos_lost == 2 && flushes == 0 && disables_out == 2 && strstr(o, "disabled and enabled again") &&
+          strstr(o, "some missing"), "disable and seek (%d, %d disables):\n%s", ret, disables_out, o);
     cleaned("seek -F");
 
-    o = run_mp4(&ret, "-s", "3", "-e");       /* 0.14's way, EOS on the last unit: after a flush, two lost (the Pi) */
+    o = run_mp4(&ret, "-s", "3", "-D");       /* DISCONTINUITY on the first buffer after the flush: sent */
+    CHECK(disc_seen == 1 && strstr(o, "marked DISCONTINUITY") && ret == 1 && eos_lost == 2, "-D (%d, %d marked):\n%s", ret, disc_seen, o);
+    cleaned("seek -D");
+    disc_fixes = 1;                           /* ... and a decoder it helps: every picture, reported OK */
+    o = run_mp4(&ret, "-s", "3", "-D");
+    CHECK(ret == 0 && !eos_lost && strstr(o, "all of them") && strstr(o, "Result: OK"), "-D fixing (%d):\n%s", ret, o);
+    cleaned("seek -D fix");
+    disc_fixes = 0;
+
+    o = run_mp4(&ret, "-s", "3", "-C");       /* flush, then the component off and on */
+    CHECK(comp_cycles == 1 && flushes == 2 && strstr(o, "component disabled and enabled again") && ret == 1,
+          "-C (%d, %d cycles):\n%s", ret, comp_cycles, o);
+    cleaned("seek -C");
+
+    o = run_mp4(&ret, "-s", "3", "-M");       /* FFmpeg's mmaldec: ports off, flushed, on */
+    CHECK(flush_while_off == 2 && disables_out == 2 && strstr(o, "as FFmpeg's mmaldec") && ret == 1,
+          "-M (%d, %d flushes while off):\n%s", ret, flush_while_off, o);
+    cleaned("seek -M");
+
+    o = run_mp4(&ret, "-s", "3", "-e");       /* 0.14's way, EOS on the last unit: after a flush, two lost too (the Pi) */
     CHECK(ret == 1 && eos_lost == 2 && strstr(o, "never came back") && strstr(o, "some missing"),
           "-e after a flush (%d, %d lost):\n%s", ret, eos_lost, o);
     cleaned("-e seek");
@@ -925,8 +951,10 @@ int main(int argc, char **argv)
     cleaned("-e");
 
     efch_after_flush = 1;                     /* a decoder that announces its format again after a flush */
-    o = run_mp4(&ret, "-s", "3", NULL);
+    disc_fixes = 1;
+    o = run_mp4(&ret, "-s", "3", "-D");
     CHECK(ret == 0 && strstr(o, "all of them") && strstr(o, "Result: OK"), "EFCH after flush (%d):\n%s", ret, o);
+    disc_fixes = 0;
     cleaned("seek EFCH");
     efch_after_flush = 0;
 

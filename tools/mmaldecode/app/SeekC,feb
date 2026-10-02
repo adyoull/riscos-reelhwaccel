@@ -1,10 +1,10 @@
-| SeekD: as Seek, but the ports are disabled and enabled again instead of
-| flushed (in case the FLUSH doesn't answer). Reports to ResultSD.
+| SeekC: as Seek, but after the flush the decoder component is disabled
+| and enabled again. Reports to ResultC.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
 RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
 RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
 WimpSlot -min 16384K -max 16384K
-Remove <Obey$Dir>.ResultSD
-Run <Obey$Dir>.mmaldecode -v -n -s 10 -F -o <Obey$Dir>.ResultSD <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Remove <Obey$Dir>.ResultC
+Run <Obey$Dir>.mmaldecode -v -n -s 10 -C -o <Obey$Dir>.ResultC <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
