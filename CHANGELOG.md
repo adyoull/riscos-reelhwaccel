@@ -1,5 +1,22 @@
 # Changes
 
+## MMALDecode 0.17 (test zip, 2026-10-02)
+
+0.16 on a Pi 4: DISCONTINUITY (echoed back on the first picture, flags
+&1C), a component disable/enable, and mmaldec's disable-flush-enable all
+lost the same two pictures. In every seek run so far the whole clip and
+its EOS had been sent before the flush (60 samples, 20 buffers ahead):
+the decoder lost its last pictures at the second EOS. Without a seek,
+EOS always drained.
+
+- -s holds EOS back until after the seek (as a player seeking before the
+  end), when the seek point is at least 8 samples from the end; -E sends
+  it early as before. Obey files Seek, SeekD (-F) and SeekE (-E);
+  SeekDC, SeekC and SeekM removed (the options stay).
+- The fake loses the waiting pictures only after a flush that followed
+  an EOS, which fits every Pi run; a flush before any EOS is assumed to
+  drain (Seek checks it).
+
 ## MMALDecode 0.16 (test zip, 2026-10-02)
 
 0.15 on a Pi 4: every MP4 check OK; 1080p 36.5 pictures a second with

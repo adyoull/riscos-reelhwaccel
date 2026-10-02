@@ -1,7 +1,8 @@
 | Seek: the small clip from its MP4; after 10 pictures both of the
-| decoder's ports are flushed (MMAL's FLUSH), then it goes on from the
-| clip's last keyframe (picture 40): every picture from there must come
-| back. Every message is written out (-v). Reports to ResultS.
+| decoder's ports are flushed and it goes on from the keyframe at picture
+| 40. The end of the stream (EOS) is held back until after the seek, as in
+| a player that seeks before the end. Every message is written out (-v).
+| Reports to ResultS.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.

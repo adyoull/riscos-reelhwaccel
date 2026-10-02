@@ -3,9 +3,9 @@ MMALDecode - H.264 decoded by the VideoCore, from RISC OS
 
 Hardware H.264 decoding for Reel on the Raspberry Pi: the firmware's
 video decoder, driven through RISC OS's VCHIQ module. 0.12 decoded
-whole clips correctly (1080p with gpu_mem=128). 0.13 to 0.16 try what
-a player needs on top of that (0.16 tries three ways to stop a seek
-losing the last two pictures):
+whole clips correctly (1080p with gpu_mem=128). 0.13 to 0.17 try what
+a player needs on top of that (0.17: does a seek lose the last two
+pictures only when the end of the stream was sent before it?):
 
   - MP4 input: each picture's data goes to the decoder on its own, with
     its time (pts), as FFmpeg and Reel will send it;
@@ -35,18 +35,15 @@ Running it (please send back every Result file):
              Result. If 1080p stalls, set gpu_mem=128 in CONFIG/TXT
              (see below).
   Seek       The small clip; after 10 pictures it flushes the decoder
-             and carries on from the keyframe at picture 40. Writes
-             every message to ResultS.
-  SeekDC     As Seek, with the first picture after the flush marked
-             as a discontinuity. Writes ResultDC.
-  SeekC      As Seek, then the decoder switched off and on again.
-             Writes ResultC.
-  SeekM      As Seek, but flushed the way FFmpeg does on Linux (ports
-             off, flushed, on). Writes ResultM.
-             Seek has so far lost the last two pictures of the clip
-             (the decoder doesn't empty itself at the end after a
-             flush); these three try to stop that. If one stops with
-             "no reply", restart the machine before running the next.
+             and carries on from the keyframe at picture 40. The end of
+             the stream is held back until after the seek, as a player
+             would. Writes every message to ResultS.
+  SeekD      As Seek, but switching the decoder's ports off and on
+             instead of flushing. Writes ResultSD.
+  SeekE      As Seek, but the end of the stream is sent before the
+             flush, as 0.13 to 0.16 did (they all lost the last two
+             pictures). Writes ResultSE. If Seek and SeekD keep every
+             picture and SeekE doesn't, that was the cause.
   Speed      The three MP4s without checks: pictures a second, and the
              copying time, two ways (word by word, and in blocks).
              Writes ResultT.

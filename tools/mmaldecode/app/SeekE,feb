@@ -1,10 +1,11 @@
-| SeekC: as Seek, but after the flush the decoder component is disabled
-| and enabled again. Reports to ResultC.
+| SeekE: as Seek, but EOS goes as soon as the stream has been sent, before
+| the flush (as 0.13 to 0.16 did, when every seek lost the last two
+| pictures). Reports to ResultSE.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
 RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
 RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
 WimpSlot -min 16384K -max 16384K
-Remove <Obey$Dir>.ResultC
-Run <Obey$Dir>.mmaldecode -v -n -s 10 -C -o <Obey$Dir>.ResultC <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Remove <Obey$Dir>.ResultSE
+Run <Obey$Dir>.mmaldecode -v -n -s 10 -E -o <Obey$Dir>.ResultSE <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig

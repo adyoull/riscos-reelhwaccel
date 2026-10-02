@@ -46,7 +46,7 @@
  *   8. -t: no checksums, only the pts; the time spent receiving and in
  *      the one copy of each picture (out of the PCI memory) is reported.
  *
- *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F|-C|-M] [-D]] [-t] [-e] stream expected.crc [expected.sig]
+ *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F|-C|-M] [-D] [-E]] [-t] [-e] stream expected.crc [expected.sig]
  *      stream    raw H.264 (Annex B), or MP4 (H.264 in avc1/avc3)
  *      -o file   also add the report to file
  *      -n        don't stop at the first wrong picture
@@ -57,6 +57,8 @@
  *      -D        with -s: the first buffer after the seek marked DISCONTINUITY
  *      -C        with -s: after the FLUSH, the component disabled and enabled
  *      -M        with -s: ports disabled, flushed and enabled (FFmpeg's mmaldec)
+ *      -E        with -s: EOS may be sent before the seek (0.13-0.16's way; the
+ *                decoder then loses its last pictures at the second EOS)
  *      -t        time, don't check the pictures
  *      -e        (MP4) EOS on the last access unit's buffer, not on an empty
  *                one after it (0.13-0.14's way: loses pictures after a flush)
@@ -1204,7 +1206,7 @@ int probe_main(int argc, char **argv)
     uint32_t vcmem = 0, copy_cs = 0, au_pos = 0;
     int frames = 0, eos_sent = 0, eos_seen = 0, fatal = 0, i, format_changes = 0, events = 0, outputs_given = 0;
     int eos_on_data = 0;
-    int seek_disc = 0, seek_comp = 0, seek_mm = 0, disc_pending = 0;
+    int seek_disc = 0, seek_comp = 0, seek_mm = 0, disc_pending = 0, eos_early = 0, eos_held = 0;
     int cur_s = 0, seek_s = -1, seek_after = 0, seek_disable = 0, seeked = 0, before_flush = 0, missing = 0, checked = 0;
     _kernel_oserror *e;
     static const uint32_t code[9] = { 0xe3510004u, 0x05903000u, 0x02833001u, 0x05803000u, 0xe3510012u,
@@ -1226,6 +1228,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-D")) seek_disc = 1;
         else if (!strcmp(argv[i], "-C")) seek_comp = 1;
         else if (!strcmp(argv[i], "-M")) seek_mm = 1;
+        else if (!strcmp(argv[i], "-E")) eos_early = 1;
         else if (!strcmp(argv[i], "-t")) timing = 1;
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) x_out = argv[++i];
         else if (!stream_name) stream_name = argv[i];
@@ -1235,7 +1238,7 @@ int probe_main(int argc, char **argv)
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0) {
-        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F|-C|-M] [-D]] [-t] [-e] stream expected.crc [expected.sig]\n");
+        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F|-C|-M] [-D] [-E]] [-t] [-e] stream expected.crc [expected.sig]\n");
         return 1;
     }
     say("mmaldecode: %s on the VideoCore, through VCHIQ and MMAL\n", stream_name);
@@ -1374,6 +1377,17 @@ int probe_main(int argc, char **argv)
                     if (!au_len) cur_s++;   /* (an empty sample) */
                 }
                 if (fatal) break;
+                /* -s: EOS waits until after the seek, as in a player that
+                   seeks before the end (0.13-0.16 on the Pi: every seek had
+                   sent EOS before the flush, and every one lost the last two
+                   pictures at the second EOS; -E sends it as they did). Not
+                   when the seek point is too near the end to be reached
+                   without EOS (the decoder keeps its last pictures until
+                   then): the seek then simply never comes */
+                if (cur_s == nsamples && seek_after && !seeked && !eos_early && seek_after + 8 <= nsamples) {
+                    if (!eos_held) { eos_held = 1; if (verbose) say("  (EOS held back until after the seek)\n"); }
+                    break;
+                }
                 if (cur_s == nsamples) {    /* EOS, empty (or only empty samples were left) */
                     n = 0;
                     flags = FLAG_EOS;
@@ -1397,7 +1411,11 @@ int probe_main(int argc, char **argv)
                            a flush, EOS on the last access unit's buffer came back
                            at once with that unit's pts, and the two pictures
                            still waiting to be shown were lost */
-                        if (++cur_s == nsamples && eos_on_data) { flags |= FLAG_EOS; eos_sent = 1; }
+                        if (++cur_s == nsamples && eos_on_data &&
+                            (!seek_after || seeked || eos_early || seek_after + 8 > nsamples)) {
+                            flags |= FLAG_EOS;
+                            eos_sent = 1;
+                        }
                     }
                 }
             } else {
@@ -1494,7 +1512,8 @@ int probe_main(int argc, char **argv)
                     fatal = 1;
                     break;
                 }
-                say("\nAfter %d pictures: %s%s, then on from the last keyframe (sample %d, pts %s)\n", frames,
+                say("\nAfter %d pictures (%s): %s%s, then on from the last keyframe (sample %d, pts %s)\n", frames,
+                    eos_held ? "the whole stream sent, EOS held back" : cur_s == nsamples ? "EOS already sent" : "the stream part sent",
                     seek_disable ? "both ports disabled and enabled again" :
                     seek_mm ? "both ports disabled, flushed and enabled again (as FFmpeg's mmaldec)" :
                     seek_comp ? "both ports flushed, the component disabled and enabled again" : "both ports flushed",
