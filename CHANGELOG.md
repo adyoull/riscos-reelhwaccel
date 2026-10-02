@@ -1,5 +1,20 @@
 # Changes
 
+## devkit 0.2.1: h264_vchiq zero-copy (2026-10-02)
+
+VCDecTest 0.3.1 on a Pi 4: every run OK. Every picture was right held in
+place (-Z) for small, odd and hd, and for hd holding 4 at a time in 6
+buffers through a seek after the end and a close with 4 still held. The
+copying runs (Test, Memory, Sync, Seek, SeekEnd, Verbose) were also right.
+1080p without checks: copied 82.4 pictures a second with 9.9 ms of each
+picture inside vcdec_receive; zero-copy 85.7 with 0.13 ms; zero-copy with
+each picture read once (as a player showing it) 84.7, 4 buffers 84.7,
+4 held of 6 84.7. So the decoder and its transfers now set the rate
+(about 85 a second) and the ARM is left almost all its time.
+
+- devkit 0.2.1: vcdec 0.4.1 and the patch with zero_copy (on by default)
+  and out_buffers.
+
 ## vcdec 0.4.1 and VCDecTest 0.3.1: zero-copy (test zip, 2026-10-02)
 
 At 82 pictures a second the copy out of vcdec's buffer took 9 ms of each
