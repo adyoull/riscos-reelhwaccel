@@ -2,6 +2,22 @@
 
 ## vcdec 0.1 and VCDecTest 0.1 (test zip, 2026-10-02)
 
+On a Pi 4 (gpu_mem=128) every run was OK: every picture of the three
+clips right (within rounding), in display order with its own pts.
+
+- Test: 640x360 400 pictures a second, 426x240 273, 1080p 45.3 (each
+  picture copied out and checksummed). Sync (each receive waited for):
+  375, 250, 41.6, so letting the receives run on is worth about 10%.
+- Speed (no checksums): 1080p 64.6 pictures a second with each copied
+  into the caller's planes (58.3 with -S; MMALDecode 0.17: 58-59).
+- Seek: flush in 3 cs, the 3 pictures already decoded dropped, all 20
+  from the keyframe on.
+- SeekEnd: after the EOS the decoder is created again (1-2 cs) and all
+  20 (small) and 50 (hd) pictures from the keyframe come back; the new
+  component sends its format change again. The fake's fresh decoder is
+  the Pi's.
+- open and close: 0-1 cs.
+
 vcdec, the library Reel and FFmpeg will use for H.264 on the VideoCore,
 built on what MMALDecode 0.12 to 0.17 found on a Pi 4:
 
@@ -35,7 +51,7 @@ Verbose. The clips are MMALDecode 0.17's.
 Host tests: tests/host/vcdec_test.c against the same fake, which now
 also refuses output buffers before its format change, can finish
 receives late, makes a fresh decoder when the component is created
-again (not yet seen on the Pi: SeekEnd will say), and can change format
+again, and can change format
 part way or during a flush.
 
 ## MMALDecode 0.17 (test zip, 2026-10-02)

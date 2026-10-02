@@ -45,8 +45,10 @@ showed on a Raspberry Pi 4.
   and close, so a player can drive it from Wimp null events. It checks
   the profile, the size and `gpu_mem` (1080p needs 128 MB), and says
   when the stream isn't for the VideoCore so the caller can decode in
-  software. **`tools/vcdectest`** drives it on the Pi as a player would
-  (not yet run there).
+  software. **`tools/vcdectest`** drives it on the Pi as a player would:
+  on a Pi 4 every picture right, 1080p at 45 pictures a second with
+  every picture checksummed and 65 without, seeks before and after the
+  end of the stream losing nothing, open, flush and close in 0-3 cs.
 - **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
   units), contiguous memory and interrupt (GIC 130, device 34) all work

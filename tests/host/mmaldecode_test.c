@@ -24,15 +24,15 @@
  * decoder takes each access unit (FRAME_START to FRAME_END) with the pts
  * on its first buffer, wants SPS and PPS before every IDR, keeps a DPB of
  * two and gives pictures out in pts order with their pts (as FFmpeg's
- * mmaldec relies on; not yet seen on the Pi). A FLUSH or a disable of the
+ * mmaldec relies on; as the Pi since 0.14). A FLUSH or a disable of the
  * input drops what it holds and returns the buffers before the reply;
  * after it, nothing until an IDR. Checked: pts and display order, a
  * decoder that returns pts in decode order (caught) or none (matched in
  * order), flush or disable then seek, -t.
  * vcdec (tests/host/vcdec_test.c) includes this file with FAKE_ONLY (no
- * main): a component destroyed and created again is a fresh decoder (not
- * yet seen on the Pi: VCDecTest's SeekEnd), and with rx_late the bulk
- * receives finish a few SWIs after they're queued.
+ * main): a component destroyed and created again is a fresh decoder (as
+ * the Pi: VCDecTest 0.1's SeekEnd kept every picture after it), and with
+ * rx_late the bulk receives finish a few SWIs after they're queued.
  */
 #include <stddef.h>
 #include <stdint.h>
