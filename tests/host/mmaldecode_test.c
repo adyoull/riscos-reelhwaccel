@@ -155,8 +155,9 @@ static void decoder_reset(void)
    second EOS the pictures still waiting (its reorder delay, two here) are
    lost, whether EOS came on the last access unit's buffer or on an empty
    one, and the EOS buffer comes back with the last picture's pts plus a
-   picture's time. (Every Pi seek so far had sent EOS before the flush; a
-   flush before any EOS is assumed to drain - 0.17's Seek checks it.)
+   picture's time. A flush before any EOS drains at the end as normal
+   (0.17 on the Pi: Seek and SeekD, EOS held back, 60 of 60; SeekE, EOS
+   before the flush, lost two).
    disc_fixes: a decoder for which DISCONTINUITY on the first buffer after
    the flush avoids it (not seen on the Pi yet: to test -D's report). */
 static void eos_drain(void)

@@ -2,6 +2,11 @@
 
 ## MMALDecode 0.17 (test zip, 2026-10-02)
 
+On a Pi 4: Seek and SeekD (EOS held back) kept all 60 pictures, the
+EOS buffer's pts 2400000; SeekE (EOS before the flush) lost the last
+two. So a flush is clean as long as no EOS reached the decoder before
+it; after an EOS, the decoder doesn't drain at the next one.
+
 0.16 on a Pi 4: DISCONTINUITY (echoed back on the first picture, flags
 &1C), a component disable/enable, and mmaldec's disable-flush-enable all
 lost the same two pictures. In every seek run so far the whole clip and
