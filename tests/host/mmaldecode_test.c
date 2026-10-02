@@ -41,7 +41,9 @@
 int probe_main(int argc, char **argv);
 static void pci_open(int rw);
 /* SVC mode: PCI_RAMAlloc memory is reachable only here (and by the "VideoCore") */
-void probe_svc_copy(void *dst, const void *src, size_t n) { pci_open(1); memcpy(dst, src, n); pci_open(0); }
+void probe_svc_copy(void *dst, const void *src, size_t n) { pci_open(1); memcpy(dst, src, n & ~(size_t)3); pci_open(0); }
+static int ldm_copies;
+void probe_svc_copy_ldm(void *dst, const void *src, size_t n) { ldm_copies++; probe_svc_copy(dst, src, n); }
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); fails++; } } while (0)
@@ -77,7 +79,7 @@ static uint8_t cur_frame[1 << 16];
 static void buffer_back(uint32_t port, uint32_t ctx, uint32_t length, uint32_t flags, uint64_t pts);
 
 /* MP4 mode: access units as they arrive, the DPB, the pictures ready */
-typedef struct { uint64_t pts; uint8_t val; } pic_t;
+typedef struct { uint64_t pts; uint8_t val, idr; } pic_t;
 static uint8_t au_data[1 << 18];
 static uint32_t au_n, au_pieces;
 static uint64_t au_pts, pending_pts, au_pts_seen[64];
@@ -85,6 +87,7 @@ static uint32_t pending_flags;
 static int in_au, need_idr, aus_decoded, n_au_pts;
 static pic_t dpb[8], ready[64];
 static int ndpb, nready;
+static uint64_t last_out_pts = UNKNOWN;     /* (the Pi's EOS buffer: the last pts plus a picture's time) */
 static uint64_t fifo_pts[64];               /* pts_fifo: the input's pts, in decode order */
 static int nfifo;
 
@@ -126,7 +129,9 @@ static void decode_au(void)
     aus_decoded++;
     if (nfifo < 64) fifo_pts[nfifo++] = au_pts;
     dpb[ndpb].pts = au_pts;
+    dpb[ndpb].idr = (uint8_t)idr;
     dpb[ndpb++].val = val;
+    if (au_pts + 40000 > last_out_pts || last_out_pts == UNKNOWN) last_out_pts = au_pts + 40000;
     to_ready(0);
 }
 
@@ -265,6 +270,7 @@ static void produce(void)
         }
         if (mp4_mode) {
             uint64_t pts = no_pts_back ? UNKNOWN : ready[0].pts;
+            uint32_t fl = 4 | (ready[0].idr ? 8 : 0);   /* as the Pi: FRAME_END, and KEYFRAME on an IDR's picture */
             if (pts_fifo) {                  /* the input's pts in the order they came, not the pictures' */
                 pts = fifo_pts[0];
                 memmove(fifo_pts, fifo_pts + 1, sizeof fifo_pts[0] * (size_t)--nfifo);
@@ -272,7 +278,7 @@ static void produce(void)
             render(ready[0].val, cur_frame);
             memmove(ready, ready + 1, sizeof ready[0] * (size_t)--nready);
             if (frames_made == corrupt_at) cur_frame[5] ^= 1;
-            buffer_back(2, (uint32_t)out_bufs[--nout], size, 0, pts);
+            buffer_back(2, (uint32_t)out_bufs[--nout], size, fl, pts);
         } else {
             render(vals[swap_frames && frames_made == 1 ? 2 : swap_frames && frames_made == 2 ? 1 : frames_made], cur_frame);
             if (frames_made == corrupt_at) cur_frame[5] ^= 1;
@@ -281,7 +287,7 @@ static void produce(void)
         need_rx = 1; rx_len_expected = size;
         frames_made++;
     } else if (eos_in && !eos_out_sent) {
-        buffer_back(2, (uint32_t)out_bufs[--nout], 0, 1, UNKNOWN);
+        buffer_back(2, (uint32_t)out_bufs[--nout], 0, 1, mp4_mode ? last_out_pts : UNKNOWN);
         need_rx = 2; rx_len_expected = 8;
         eos_out_sent = 1;
     }
@@ -604,7 +610,7 @@ static void reset_fake(void)
     shorts = bulks_tx = bulks_rx = efch_sent = disables_out = flushes = aus = au_pieces_max = idr_dropped = 0;
     got_len = pending_tx = 0; nheld = 0; awaiting_reformat = 0; hijacked = vc_stuck = 0; out_w = W; out_h = H; nout = frames_made = eos_in = eos_out_sent = need_rx = 0;
     noutq = 0; ndeferred = deferred_ever = 0; ntxq = pending_tx_now = 0;
-    in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0;
+    in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
 }
 
 /* ---- the MP4: two closed GOPs, decode order I P B B P B, pts in frames ---- */
@@ -906,7 +912,7 @@ int main(int argc, char **argv)
 
     corrupt_at = 3;                           /* -t: timed, not checked */
     o = run_mp4(&ret, "-t", NULL, NULL);
-    CHECK(ret == 0 && strstr(o, "One copy of a") && strstr(o, "Receiving:") && strstr(o, "OK - timed") &&
+    CHECK(ret == 0 && strstr(o, "word by word") && strstr(o, "LDM/STM") && ldm_copies >= 10 && strstr(o, "Receiving:") && strstr(o, "OK - timed") &&
           !strstr(o, "checked against FFmpeg"), "-t (%d):\n%s", ret, o);
     cleaned("-t");
     corrupt_at = -1;

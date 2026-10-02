@@ -210,6 +210,7 @@ static void say(const char *fmt, ...)
 #ifdef PROBE_TEST
 _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r);   /* tests/host/mmaldecode_test.c */
 void probe_svc_copy(void *dst, const void *src, size_t n);
+void probe_svc_copy_ldm(void *dst, const void *src, size_t n);
 #else
 static _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
 
@@ -233,6 +234,44 @@ static void probe_svc_copy(void *dst, const void *src, size_t n)
         :
         : "r"(dst), "r"(src), "r"(words)
         : "r0", "r4", "r5", "r6", "r7", "r14", "memory", "cc");
+}
+
+/* the same, 32 bytes a loop by LDM/STM (four words each, twice), then
+   single words: -t times it against the word copy. PCI_RAMAlloc memory is
+   probably uncached, where a burst of four words should beat four single
+   loads (0.13 on the Pi: the word copy ran at 130 MB/s) */
+static void probe_svc_copy_ldm(void *dst, const void *src, size_t n)
+{
+    size_t blocks = n / 32, words = (n % 32) / 4;
+    if (!blocks && !words) return;
+    __asm__ volatile(
+        "mov   r4, %0\n\t"
+        "mov   r5, %1\n\t"
+        "mov   r6, %2\n\t"
+        "mov   r7, %3\n\t"
+        "swi   0x16\n\t"                    /* OS_EnterOS */
+        "cmp   r6, #0\n\t"
+        "beq   2f\n\t"
+        "1:\n\t"
+        "ldmia r5!, {r0-r3}\n\t"
+        "stmia r4!, {r0-r3}\n\t"
+        "ldmia r5!, {r0-r3}\n\t"
+        "stmia r4!, {r0-r3}\n\t"
+        "subs  r6, r6, #1\n\t"
+        "bne   1b\n\t"
+        "2:\n\t"
+        "cmp   r7, #0\n\t"
+        "beq   4f\n\t"
+        "3:\n\t"
+        "ldr   r0, [r5], #4\n\t"
+        "str   r0, [r4], #4\n\t"
+        "subs  r7, r7, #1\n\t"
+        "bne   3b\n\t"
+        "4:\n\t"
+        "swi   0x7C\n\t"                    /* OS_LeaveOS */
+        :
+        : "r"(dst), "r"(src), "r"(blocks), "r"(words)
+        : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r14", "memory", "cc");
 }
 #endif
 
@@ -868,6 +907,23 @@ static uint32_t *want;
 static int64_t *want_pts;                  /* each picture's pts, microseconds */
 static int nwant, want_w, want_h;
 
+/* a whole number at *p (after spaces), *p moved past it and a comma.
+   (Not sscanf's long long: UnixLib's filled only the low word - 0.13 on the
+   Pi read every pts as -259612551386748682 + k * 40000.) */
+static int64_t take_int(const char **p)
+{
+    const char *s = *p;
+    int64_t v = 0;
+    int neg = 0;
+    while (*s == ' ') s++;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+    while (*s == ' ') s++;
+    if (*s == ',') s++;
+    *p = s;
+    return neg ? -v : v;
+}
+
 static int read_crcs(const char *name)
 {
     FILE *f = fopen(name, "r");
@@ -876,7 +932,8 @@ static int read_crcs(const char *name)
     if (!f) { say("Can't open %s\n", name); return -1; }
     while (fgets(line, sizeof line, f)) {
         char *x;
-        long long dts, pts;
+        const char *q = line;
+        int64_t pts;
         if (line[0] == '#') {
             sscanf(line, "#dimensions 0: %dx%d", &want_w, &want_h);
             sscanf(line, "#tb 0: %d/%d", &tb_num, &tb_den);
@@ -890,8 +947,10 @@ static int read_crcs(const char *name)
             if (!want || !want_pts) { fclose(f); return -1; }
         }
         want[nwant] = (uint32_t)strtoul(x, NULL, 16);
-        want_pts[nwant] = sscanf(line, "%*d, %lld, %lld,", &dts, &pts) == 2 && tb_den > 0 ?
-                          pts * 1000000 * tb_num / tb_den : nwant;
+        take_int(&q);                       /* stream, dts, pts */
+        take_int(&q);
+        pts = take_int(&q);
+        want_pts[nwant] = tb_den > 0 ? pts * 1000000 * tb_num / tb_den : nwant;
         nwant++;
     }
     fclose(f);
@@ -1076,7 +1135,7 @@ static int check_picture(int k, const buffer_msg_t *b)
         if ((j = want_by_pts(pts)) < 0) {
             wrong++;
             if (wrong <= 5) say("Picture %d: pts %s isn't one of FFmpeg's pictures\n", k, us_text(b->pts, t));
-            return keep_going ? 0 : -1;
+            return keep_going || timing ? 0 : -1;
         }
     } else {
         if (mp4) no_pts++;
@@ -1575,17 +1634,21 @@ int probe_main(int argc, char **argv)
         say("(-t: the pictures were timed, not checked)\n");
         say("Receiving: %u cs waiting for %u KB by bulk transfer; copying out: %u cs for %d pictures\n",
             (unsigned)rx_cs, (unsigned)(rx_bytes >> 10), (unsigned)copy_cs, frames);
-        if (frames && out_size) {           /* the copy on its own, timed precisely */
+        if (frames && out_size) {           /* the copy on its own, timed precisely, two ways */
             uint32_t reps = (64u << 20) / out_size, t0, dt;
             if (reps < 10) reps = 10;
             if (reps > 2000) reps = 2000;
-            t0 = now_cs();
-            for (uint32_t r = 0; r < reps; r++) probe_svc_copy(frame, out_buf[0], out_size);
-            dt = now_cs() - t0;
-            if (!dt) dt = 1;
-            say("One copy of a %u byte picture out of PCI memory: %u.%02u ms (%u MB/s; %u copies in %u cs)\n",
-                (unsigned)out_size, (unsigned)(dt * 1000 / reps / 100), (unsigned)(dt * 1000 / reps % 100),
-                (unsigned)((uint64_t)out_size * reps * 100 / dt / 1000000), (unsigned)reps, (unsigned)dt);
+            for (int way = 0; way < 2; way++) {
+                t0 = now_cs();
+                for (uint32_t r = 0; r < reps; r++)
+                    (way ? probe_svc_copy_ldm : probe_svc_copy)(frame, out_buf[0], out_size);
+                dt = now_cs() - t0;
+                if (!dt) dt = 1;
+                say("One copy of a %u byte picture out of PCI memory, %s: %u.%02u ms (%u MB/s; %u copies in %u cs)\n",
+                    (unsigned)out_size, way ? "LDM/STM 4 words" : "word by word",
+                    (unsigned)(dt * 1000 / reps / 100), (unsigned)(dt * 1000 / reps % 100),
+                    (unsigned)((uint64_t)out_size * reps * 100 / dt / 1000000), (unsigned)reps, (unsigned)dt);
+            }
         }
     } else {
         say("%d of %d checked against FFmpeg: %d wrong\n", mp4 ? checked : frames < nwant ? frames : nwant, nwant, wrong);

@@ -50,5 +50,9 @@ echo "== hevchw_test (the HEVCHW module: maps, register test, the interrupt foun
 "$TOP/tests/qemu/aligntrap.sh" "$O/hevchw_test" | grep -v "^  &\|^$" || bad=1
 "$TOP/hevchw/module/build.sh" "$O/hevchw" | tail -1 || bad=1
 
+# UnixLib's sscanf doesn't fill a long long (%lld: only the low word; MMALDecode 0.13 on the Pi)
+if grep -n 'scanf[^;]*%ll' "$TOP"/tools/*/*.c "$TOP"/hevchw/*/*.c; then
+  echo "FAIL: scanf with %ll (UnixLib fills only the low word)"; bad=1
+fi
 [ $bad = 0 ] && echo "all host tests passed" || echo "SOME HOST TESTS FAILED"
 exit $bad
