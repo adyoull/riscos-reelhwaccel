@@ -37,6 +37,16 @@ struct hevcdec {
     struct vb2_queue vq;
     int started;
     int dead;                            /* a phase never finished: the block may still be at work */
+    /* For a stream without scaling lists. The block keeps its scaling
+       factors from one picture (and one decoder) to the next, and uses
+       them: SPS1's scaling bit is set anyway when FFmpeg's PCM fields
+       (255, 253 without PCM) overflow into it, and rpivid_h265.c loads the
+       factors only when the SPS enables scaling lists. So such pictures
+       came out with whatever factors were left (HEVCTest 0.1 on a Pi 4);
+       given flat lists (all 16, what "no scaling lists" means) with the
+       SPS copied to enable them, every picture was right (0.1.1). */
+    struct v4l2_ctrl_hevc_sps sps_flat;
+    struct v4l2_ctrl_hevc_scaling_matrix flat;
     char err[256];
     hevcdec_frame *frames[MAX_FRAMES];
     struct vb2_v4l2_buffer src;          /* the slice being sent (a contiguous copy) */
@@ -169,6 +179,7 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
         return HEVCDEC_UNSUPPORTED;
     }
     if (!(d = calloc(1, sizeof *d))) { snprintf(open_err, sizeof open_err, "Out of memory"); return HEVCDEC_ERROR; }
+    memset(&d->flat, 16, sizeof d->flat);
     d->cfg = *c;
     if (hevcdec_hw_open(&d->hw, open_err, sizeof open_err)) { free(d); return HEVCDEC_ERROR; }
     cur = d;
@@ -267,6 +278,7 @@ static int wait_done(hevcdec *d, hevcdec_frame *f)
 int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uint64_t number)
 {
     const struct v4l2_ctrl_hevc_sps *sps = pic->sps;
+    const struct v4l2_ctrl_hevc_scaling_matrix *scaling = pic->scaling;
     if (d->dead) return fail(d, "The block didn't finish a picture: restart the machine before decoding again");
     d->err[0] = 0;
     if (sps->chroma_format_idc != 1 || sps->bit_depth_luma_minus8 || sps->bit_depth_chroma_minus8)
@@ -278,6 +290,12 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
     if (!pic->nslices) return fail(d, "A picture with no slices");
     if ((sps->flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED) && !pic->scaling)
         return fail(d, "Scaling lists enabled but none given");
+    if (!(sps->flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED)) {
+        d->sps_flat = *sps;
+        d->sps_flat.flags |= V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED;
+        sps = &d->sps_flat;
+        scaling = &d->flat;
+    }
     f->used = 1;
     f->vb.timestamp = number;
     f->vb.state = 0;
@@ -305,7 +323,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         run.h265.pps = pic->pps;
         run.h265.dec = pic->dec;
         run.h265.slice_params = sl->params;
-        run.h265.scaling_matrix = pic->scaling;
+        run.h265.scaling_matrix = scaling;
         d->cur_src = &d->src;
         d->cur_dst = &f->vb;
         d->job_state = 0;

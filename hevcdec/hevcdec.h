@@ -15,8 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
- * 0.1 is the first test: 8-bit 4:2:0 only, one picture at a time (each
- * hevcdec_decode waits for both phases), output frames uncached.
+ * 0.1.2: 8-bit 4:2:0 only, one picture at a time (each hevcdec_decode
+ * waits for both phases), output frames uncached. Streams without scaling
+ * lists are given flat ones (the block needs its factors loaded).
  *
  * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
  */
@@ -27,7 +28,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.1"
+#define HEVCDEC_VERSION "0.1.2"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */

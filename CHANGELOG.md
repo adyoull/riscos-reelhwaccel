@@ -1,5 +1,25 @@
 # Changes
 
+## hevcdec 0.1.2 and HEVCTest 0.1.2: pictures without scaling lists right (test zip, 2026-10-02)
+
+HEVCTest 0.1.1 on a Pi 4: with flat scaling lists given (Flat, -s) every
+picture of every clip was exactly as FFmpeg decodes it, 1080p included
+(240 pictures a second). Test without them still failed, the same way it
+had after nowpp's lists were loaded; Dump and Verbose, run after Flat,
+were right without -s. So the block keeps its scaling factors from one
+decoder to the next and uses them for streams without scaling lists too:
+SPS1's scaling bit is set anyway by the PCM fields overflowing into it
+(FFmpeg gives 255 and 253 without PCM, as rpi-ffmpeg does for Linux), and
+rpivid_h265.c only loads the factors when the SPS enables scaling lists.
+
+- hevcdec: a picture without scaling lists is given flat ones (all 16)
+  with a copy of its SPS enabling them, so the factors are loaded for
+  every picture.
+- The fake HEVC block now behaves as the Pi did: a picture whose phase 1
+  doesn't load the factors comes out wrong. (Without the fix it fails
+  small, slices and odd and passes nowpp, as HEVCTest 0.1 did.)
+- HEVCTest: Flat removed (hevcdec does it now); -s and Dump kept.
+
 ## hevcdec 0.1.1 and HEVCTest 0.1.1: why the pictures are wrong (test zip, 2026-10-02)
 
 HEVCTest 0.1 on a Pi 4: the block ran every picture through both phases

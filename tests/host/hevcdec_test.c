@@ -137,7 +137,7 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     fake_hevc_reset();
     o = run_app(&ret, trace, NULL);
     printf("%s", o);
-    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors &&
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors && !fake_hevc.factors_wrong &&
           !fake_hevc.unknown_pictures && fake_hevc.phase2s == nmap,
           "hevctest %s (%d): %d references wrong, %d pictures unknown, %d phase 2s", trace, ret, fake_hevc.ref_errors,
           fake_hevc.unknown_pictures, fake_hevc.phase2s);
@@ -187,15 +187,18 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
         cleaned("a slice refused");
     }
 
-    if (strstr(trace, "odd")) {                 /* -s: flat scaling lists loaded; the same pictures */
-        int plain;
+    if (strstr(trace, "odd")) {                 /* no scaling lists: hevcdec loads flat factors, as -s does */
+        int plain, plain_nf;
         fake_hevc_reset();
         o = run_app(&ret, trace, "-n");
-        plain = fake_hevc.scaling_writes;
+        plain = fake_hevc.scaling_writes; plain_nf = fake_hevc.scaling_not_flat;
+        CHECK(ret == 0 && plain == 8 * 4064 / 4 && plain_nf == 0 && !fake_hevc.factors_wrong,
+              "odd: %d scaling writes, %d not flat, %d pictures with stale factors:\n%s", plain, plain_nf,
+              fake_hevc.factors_wrong, o);
         fake_hevc_reset();
         o = run_app(&ret, trace, "-s");
         CHECK(ret == 0 && strstr(o, "Flat scaling lists given to 8 pictures (-s)") &&
-              strstr(o, "Result: OK - every picture exactly") && plain == 0 &&
+              strstr(o, "Result: OK - every picture exactly") &&
               fake_hevc.scaling_writes == 8 * 4064 / 4 && fake_hevc.scaling_not_flat == 0,
               "hevctest -s (%d, %d then %d scaling writes, %d not flat):\n%s", ret, plain, fake_hevc.scaling_writes,
               fake_hevc.scaling_not_flat, o);

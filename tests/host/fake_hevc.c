@@ -43,6 +43,13 @@ static int have_hash;
 static struct { unsigned dpb, poc; } refs[64];
 static int nrefs;
 static fake_hevc_picture_fn picture_fn;
+/* The scaling factors (0x2000-0x2FDF): as on the Pi 4 (HEVCTest 0.1 and
+   0.1.1), the block uses them for every picture and keeps them from one
+   picture, and one decoder, to the next; at power on they're whatever
+   they are. (SPS1's bit 20, scaling lists, is set anyway by the PCM
+   fields' overflow when FFmpeg fills them for a stream without PCM.) So a
+   picture whose phase 1 doesn't load them comes out wrong. */
+static int factors_wrong;                /* this picture's */
 
 fake_hevc_state fake_hevc;
 
@@ -90,7 +97,7 @@ static void phase1(void)
     const uint32_t *cmd;
     uint32_t n = regs[0x70 / 4];                         /* CFNUM */
     uint64_t base = (uint64_t)regs[0x6C / 4] << 6;       /* CFBASE */
-    uint32_t bfbase = 0, bfnum = 0, slicecmds = 0, nmsg = 0;
+    uint32_t bfbase = 0, bfnum = 0, slicecmds = 0, nmsg = 0, nfactors = 0;
     uint32_t msgs[512];
     fake_hevc.phase1s++;
     have_hash = 0;
@@ -105,6 +112,7 @@ static void phase1(void)
         if (a >= 0x2000 && a < 0x2FE0) {                 /* the scaling factors */
             fake_hevc.scaling_writes++;
             if (v != 0x10101010) fake_hevc.scaling_not_flat++;
+            nfactors++;
         }
         if (a == 64) bfbase = v;                         /* BFBASE */
         else if (a == 68) bfnum = v;                     /* BFNUM */
@@ -131,6 +139,7 @@ static void phase1(void)
         }
     }
     CHECK(have_hash, "phase 1 without a bitstream");
+    factors_wrong = nfactors != 4064 / 4;               /* all of them, for this picture */
     if (fake_hevc.p1_exhaust) {                          /* the PU buffer ran out: CFSTATUS short */
         fake_hevc.p1_exhaust = 0;
         regs[0x74 / 4] = n - 1;
@@ -180,10 +189,12 @@ static void phase2(void)
         int cw = (pw + 1) / 2, ch = (ph + 1) / 2;
         CHECK(pw <= w && ph <= h, "a %dx%d picture in a %dx%d frame", pw, ph, w, h);
         memset(out, 0x80, (size_t)col * (size_t)((w + 127) / 128));      /* (outside the window: something) */
+        if (factors_wrong) fake_hevc.factors_wrong++;
         for (int x0 = 0; x0 < pw; x0 += 128) {
             uint8_t *cy = out + (size_t)(x0 / 128) * col, *cc = (uint8_t *)(uintptr_t)c + (size_t)(x0 / 128) * col;
             int n = pw - x0 < 128 ? pw - x0 : 128, nc = cw - x0 / 2 < 64 ? cw - x0 / 2 : 64;
             for (int r = 0; r < ph; r++) memcpy(cy + (size_t)r * 128, py + (size_t)r * pw + x0, (size_t)n);
+            if (factors_wrong) cy[0] ^= 1;                /* (dequantised wrongly: some samples off) */
             for (int r = 0; r < ch; r++)
                 for (int x = 0; x < nc; x++) {
                     cc[(size_t)r * 128 + 2 * x] = pu[(size_t)r * cw + x0 / 2 + x];
