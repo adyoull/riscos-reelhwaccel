@@ -1,0 +1,58 @@
+VCDecTest - the vcdec library on the Raspberry Pi
+================================================
+
+vcdec is the library Reel and FFmpeg will use to have H.264 decoded by the
+VideoCore, through RISC OS's VCHIQ module. It does what MMALDecode 0.12 to
+0.17 found works, behind five calls: open, send an access unit with its
+time, take a picture, flush (for a seek), close. Nothing in it waits for
+the decoder except open, flush and close, so a player can drive it from
+Wimp null events.
+
+VCDecTest drives it as a player would: each turn it sends access units
+until vcdec says the decoder's input is full, then takes every picture
+that's ready. Each picture is copied into the program's own memory and
+checked against a checksum FFmpeg made of the same picture, matched by
+its time (pts). The VideoCore's pictures can differ from FFmpeg's by 1 in
+a few values (rounding), so each is also compared by block averages:
+"within rounding" is fine, anything more is a fault.
+
+New in vcdec, not tried on the Pi before:
+  - the pictures' bulk transfers run on while the next messages are
+    handled, instead of being waited for one by one (Sync waits, as
+    MMALDecode did, to compare);
+  - a seek after the end of the stream creates the decoder again (a flush
+    alone lost the last two pictures in MMALDecode's SeekE): SeekEnd.
+
+The clips (in clips, the same as MMALDecode 0.17's):
+  small  640x360, 60 pictures, H.264 Main with B frames, a keyframe
+         every 20
+  odd    426x240, 30 pictures, H.264 Baseline (a width that isn't a
+         multiple of 32, to check the cropping)
+  hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
+
+Running it (please send back every Result file):
+  Test     The three clips, every picture checked. Writes Result.
+  Sync     As Test, each bulk transfer waited for. Writes ResultSync.
+  Seek     The small clip; after 10 pictures a flush, then on from the
+           keyframe at picture 40, before the end of the stream was sent.
+           Every message written out. Writes ResultSeek.
+  SeekEnd  The small and hd clips, each to the end, then a flush (the
+           decoder created again) and on from the last keyframe to the end
+           again. Writes ResultEnd.
+  Speed    The three clips without checks: pictures a second, with each
+           one copied out; then hd again as Sync. Writes ResultT.
+  Verbose  The small clip with every message (ResultV), if Test doesn't
+           get pictures back.
+
+  Each report says how much memory the VideoCore has (gpu_mem in
+  CONFIG/TXT). 1080p needs gpu_mem=128 or more: vcdec won't open the hd
+  clip below that (at 64 the decoder stalls without a word).
+
+If a run stops part way (the report says "no reply"), the VideoCore's
+decoder can stay stuck until the machine is restarted: restart before
+running anything else. If the machine locks up (it shouldn't), switch it
+off and on again.
+
+Needs: RISC OS 5 on a Raspberry Pi, with the VCHIQ module (in the ROM).
+Part of riscos-reelhwaccel; GPL version 2 or later. The clips are made
+from FFmpeg's testsrc2 pattern.

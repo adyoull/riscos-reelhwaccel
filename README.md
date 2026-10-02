@@ -33,19 +33,32 @@ showed on a Raspberry Pi 4.
   buffers numbered from 1, output buffers only after the decoder's format
   change, every receive queued as its message arrives, and the 20 input
   buffers the decoder recommends.
-  0.13 adds MP4 input (one access unit a buffer, with its pts), checks
-  display order by pts, flush and seek, and timing without checksums
-  (not yet run on the Pi).
+  0.13 to 0.17 added MP4 input (one access unit a buffer, with its pts),
+  display order by pts, flush and seek, and timing: on a Pi 4 every
+  picture comes back with its own pts in display order, 1080p decodes
+  and copies out at 58-59 pictures a second, and a flush is clean as
+  long as no end-of-stream reached the decoder before it.
+- **`vcdec/`** (0.1): the library itself, from all of that. Open, send
+  an access unit with its pts, take a picture (copied into the caller's
+  planes), flush for a seek (after the end of the stream, the decoder is
+  created again), close; nothing waits for the decoder but open, flush
+  and close, so a player can drive it from Wimp null events. It checks
+  the profile, the size and `gpu_mem` (1080p needs 128 MB), and says
+  when the stream isn't for the VideoCore so the caller can decode in
+  software. **`tools/vcdectest`** drives it on the Pi as a player would
+  (not yet run there).
 - **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
   units), contiguous memory and interrupt (GIC 130, device 34) all work
   from RISC OS.
 
-Next: the `vcdec` library and Reel's use of it; then the HEVC decoder.
+Next: FFmpeg's `h264_vchiq` decoder and Reel on top of `vcdec`; then the
+HEVC decoder.
 
 ## Building
 
     ./build.sh                 # every Pi test zip, into dist/
+    vcdec/build.sh OUTDIR      # libvcdec.a and vcdec.h, for RISC OS
     tests/host/run.sh          # the host tests
 
 `build.sh` needs GCCSDK GCC 10 (`CROSS=.../arm-riscos-gnueabihf-`),

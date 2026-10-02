@@ -41,6 +41,18 @@ grep "FAIL\|mmaldecode_test:" "$O/mmaldecode_test.out"
 # ... and its MP4 input against real MP4s from x264, decoded by FFmpeg (skipped without them)
 "$HERE/mp4_check.sh" "$O/mmaldecode_test" "$O" || bad=1
 
+# vcdec: the library, its copy routines (VCDEC_HOST: OS_EnterOS opens the fake's PCI memory), and
+# tools/vcdectest, against the same fake VCHIQ + MMAL decoder (tests/host/mmaldecode_test.c, included)
+arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DVCDEC_HOST -DPROBE_TEST -I$HERE/fake -I$TOP/vcdec -Wall \
+  -Wno-unused-function -no-pie -o "$O/vcdec_test" "$HERE/vcdec_test.c" "$TOP/vcdec/vcdec.c" "$TOP/vcdec/vcdec_copy.S" \
+  "$TOP/tools/vcdectest/vcdectest.c" || bad=1
+echo "== vcdec_test (the library: a whole decode, receives finishing late, unaligned planes, seeks before and after"
+echo "   the end, input full, bad calls, unsupported streams, decoders that misbehave; then VCDecTest on the fake)"
+"$TOP/tests/qemu/aligntrap.sh" "$O/vcdec_test" > "$O/vcdec_test.out" || bad=1
+grep "FAIL\|vcdec_test:" "$O/vcdec_test.out"
+# ... and VCDecTest's MP4 reader against real MP4s (as mmaldecode's)
+"$HERE/mp4_check.sh" "$O/vcdec_test" "$O/vcdectest" || bad=1
+
 # hevchw/module: the HEVCHW module (its C, and header.s's veneers and IRQ handler) on a fake RISC OS
 arm-linux-gnueabihf-gcc -c -o "$O/hevchw_header.o" "$TOP/hevchw/module/header.s" &&
   arm-linux-gnueabihf-objcopy --weaken-symbol=hw_swi "$O/hevchw_header.o" &&
@@ -51,7 +63,7 @@ echo "== hevchw_test (the HEVCHW module: maps, register test, the interrupt foun
 "$TOP/hevchw/module/build.sh" "$O/hevchw" | tail -1 || bad=1
 
 # UnixLib's sscanf doesn't fill a long long (%lld: only the low word; MMALDecode 0.13 on the Pi)
-if grep -n 'scanf[^;]*%ll' "$TOP"/tools/*/*.c "$TOP"/hevchw/*/*.c; then
+if grep -n 'scanf[^;]*%ll' "$TOP"/tools/*/*.c "$TOP"/hevchw/*/*.c "$TOP"/vcdec/*.c; then
   echo "FAIL: scanf with %ll (UnixLib fills only the low word)"; bad=1
 fi
 [ $bad = 0 ] && echo "all host tests passed" || echo "SOME HOST TESTS FAILED"

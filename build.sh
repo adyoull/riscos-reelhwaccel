@@ -9,5 +9,6 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 "$HERE/tools/vchiqprobe/build.sh" "${VCHIQPROBE:-0.1}"
 "$HERE/tools/mmalprobe/build.sh" "${MMALPROBE:-0.1}"
 "$HERE/tools/mmaldecode/build.sh" "${MMALDECODE:-0.17}"
+"$HERE/tools/vcdectest/build.sh" "${VCDECTEST:-0.1}"
 "$HERE/tools/hevcprobe/build.sh" "${HEVCPROBE:-0.1}"
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"

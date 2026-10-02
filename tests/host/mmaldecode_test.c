@@ -29,6 +29,10 @@
  * after it, nothing until an IDR. Checked: pts and display order, a
  * decoder that returns pts in decode order (caught) or none (matched in
  * order), flush or disable then seek, -t.
+ * vcdec (tests/host/vcdec_test.c) includes this file with FAKE_ONLY (no
+ * main): a component destroyed and created again is a fresh decoder (not
+ * yet seen on the Pi: VCDecTest's SeekEnd), and with rx_late the bulk
+ * receives finish a few SWIs after they're queued.
  */
 #include <stddef.h>
 #include <stdint.h>
@@ -58,7 +62,9 @@ static _kernel_oserror err = { 1, "fake error" }, empty = { 2, "none" };
 static int hijacked, vc_stuck, efch_late, swap_frames, hold_inputs;
 static uint32_t held[32]; static int nheld;
 static int big_efch, corrupt_at = -1, go_quiet, error_event, long_event, awaiting_reformat;
-static int mp4_mode, pts_fifo, no_pts_back, efch_after_flush;
+static int mp4_mode, pts_fifo, no_pts_back, efch_after_flush, rx_late, recreated, big_efch_at, efch_ever;
+static uint32_t first_in_cs;
+static int fail_out_disable, efch_on_flush, disable_refused, ports_on_at_destroy, crop_too_wide;   /* vcdec: a disable that fails; a format change during a flush */
 /* counters */
 static int uses, releases, opens, closes, connects, disconnects, freed, created, destroyed, comp_enabled,
            port_on[4], shorts, bulks_tx, bulks_rx, efch_sent, disables_out, flushes, aus, au_pieces_max, idr_dropped;
@@ -247,21 +253,27 @@ static void produce(void)
         if (!eos_in) return;
         n = frame_values(vals);
     }
-    if (!efch_sent && (!efch_late || nout)) {   /* the first thing out: a format change (no buffers needed) */
+    if ((!efch_sent && (!efch_late || nout)) ||
+        (big_efch_at && frames_made == big_efch_at && efch_sent == 1)) {
+        /* the first thing out: a format change (no buffers needed); with
+           big_efch_at, a second one part way, to a bigger size */
         uint32_t ev[5 + 256 / 4 + 1];
         uint32_t *fc;
+        int midway = efch_sent == 1;
         memset(ev, 0, sizeof ev);
         ev[1] = 3; ev[2] = 0; ev[3] = 0x48434645u; ev[4] = 232;
         fc = &ev[5];
-        if (big_efch) { out_w = 200; out_h = 100; }
+        if (big_efch || midway) { out_w = 200; out_h = 100; }
         fc[0] = ((out_w + 31) & ~31u) * ((out_h + 15) & ~15u) * 3 / 2;   /* size min */
         fc[1] = 1; fc[2] = fc[0]; fc[3] = 3;
         fc[5 + 0] = 3; fc[5 + 1] = 0x30323449u;                          /* format: video, I420 */
         fc[13 + 0] = (out_w + 31) & ~31u; fc[13 + 1] = (out_h + 15) & ~15u; /* video width/height */
         fc[13 + 4] = W; fc[13 + 5] = H;                                   /* crop w/h */
+        if (crop_too_wide) fc[13 + 4] = fc[13 + 0] + 8;                   /* (wider than a row) */
         post(16, ev, sizeof ev, 0);
-        efch_sent = 1;
-        if (big_efch) { awaiting_reformat = 1; return; }   /* nothing more until the port is re-enabled */
+        efch_sent = midway ? 2 : 1;
+        efch_ever = 1;
+        if (big_efch || midway) { awaiting_reformat = 1; return; }   /* nothing more until the port is re-enabled */
     }
     if (!nout) return;
     if (long_event == 1) {                   /* an event whose data comes by bulk transfer */
@@ -342,7 +354,18 @@ static void firmware(const uint32_t *m, uint32_t len)
         return;
     }
     switch (m[1]) {
-    case 4: { uint32_t r[5] = { 0, 0xC0DE, 1, 1, 1 }; created++; reply(m, r, sizeof r); break; }
+    case 4: {
+        uint32_t r[5] = { 0, 0xC0DE, 1, 1, 1 };
+        if (created) {                       /* created again: a new decoder, nothing of the old one's */
+            in_au = 0; au_n = 0; ndpb = nready = 0; need_idr = 1; eos_in = eos_out_sent = 0; nfifo = 0;
+            eos_then_flush = 0; efch_sent = 0; aus_decoded = 0; last_out_pts = max_ready_pts = UNKNOWN;
+            efch_ever = 0; first_in_cs = 0;
+            recreated++;
+        }
+        created++;
+        reply(m, r, sizeof r);
+        break;
+    }
     case 8: {                                /* PORT_INFO_GET */
         uint32_t r[6 + 16 + 8 + 13 + 32];
         memset(r, 0, sizeof r);
@@ -370,18 +393,40 @@ static void firmware(const uint32_t *m, uint32_t len)
     }
     case 6: if (port_on[1] || port_on[2]) comp_cycles++; comp_enabled = 1; { uint32_t r = 0; reply(m, &r, 4); } break;
     case 7: comp_enabled = 0; { uint32_t r = 0; reply(m, &r, 4); } break;
-    case 5: destroyed++; { uint32_t r = 0; reply(m, &r, 4); } break;
+    case 5:
+        CHECK((!nout && !port_on[1] && !port_on[2] && !comp_enabled) || disable_refused,
+              "destroyed with ports on or holding %d buffers", nout);
+        ports_on_at_destroy = port_on[1] | port_on[2] << 1;
+        port_on[1] = port_on[2] = comp_enabled = 0;   /* (gone, whatever was on) */
+        nout = 0;
+        destroyed++; { uint32_t r = 0; reply(m, &r, 4); } break;
     case 10: {                               /* PORT_ACTION */
         uint32_t r = 0, port = p[1];
         CHECK(port == 1 || port == 2, "port action on %u", port);
         CHECK(p[2] >= 1 && p[2] <= 3, "port action %u", p[2]);
         if (p[2] == 1) { port_on[port] = 1; if (port == 2) awaiting_reformat = 0; }
-        else {                               /* 2 disable, 3 flush: the port's buffers back before the reply */
+        else if (p[2] == 2 && port == 2 && fail_out_disable) {
+            fail_out_disable = 0;
+            disable_refused = 1;
+            r = 7;                           /* EIO, and the port stays on */
+        } else {                               /* 2 disable, 3 flush: the port's buffers back before the reply */
             if (p[2] == 2) port_on[port] = 0;
             else { flushes++; if (!port_on[port]) flush_while_off++; }
             if (port == 2) {
                 if (p[2] == 2) disables_out++;
                 while (nout) buffer_back(2, (uint32_t)out_bufs[--nout], 0, 0, UNKNOWN);
+                if (p[2] == 3 && efch_on_flush) {   /* a format change (bigger) before the reply */
+                    uint32_t ev[5 + 256 / 4 + 1], *fc = &ev[5];
+                    memset(ev, 0, sizeof ev);
+                    ev[1] = 3; ev[3] = 0x48434645u; ev[4] = 232;
+                    out_w = 200; out_h = 100;
+                    fc[0] = 224 * 112 * 3 / 2; fc[1] = 1; fc[2] = fc[0]; fc[3] = 3;
+                    fc[5 + 0] = 3; fc[5 + 1] = 0x30323449u;
+                    fc[13 + 0] = 224; fc[13 + 1] = 112; fc[13 + 4] = W; fc[13 + 5] = H;
+                    post(16, ev, sizeof ev, 0);
+                    awaiting_reformat = 1;
+                    efch_on_flush = 0;
+                }
             } else {
                 decoder_reset();
             }
@@ -396,6 +441,7 @@ static void firmware(const uint32_t *m, uint32_t len)
         CHECK(d->magic == MAGIC && d->comp == 0xC0DE, "drvbuf");
         if (d->port == 1) {
             CHECK(port_on[1], "input buffer with the port off");
+            if (!first_in_cs) first_in_cs = time_cs;
             if (pim) {
                 CHECK(pim == length && length <= 128, "short data %u/%u", pim, length);
                 memcpy(got_stream + got_len, (const uint8_t *)&p[8 + 14 + 10 + 3], pim);
@@ -432,6 +478,8 @@ static void firmware(const uint32_t *m, uint32_t len)
         } else {
             CHECK(d->port == 2 && port_on[2], "output buffer for port %u (on %d)", d->port, port_on[2]);
             CHECK(p[8 + 4] >= out_size_set, "output alloc_size %u < %u", p[8 + 4], out_size_set);
+            /* rule 2: only after the decoder's format change (or 200 cs) */
+            CHECK(efch_ever || (first_in_cs && time_cs - first_in_cs >= 200), "an output buffer before the format change");
             out_bufs[nout++] = (int)d->ctx;
         }
         produce();
@@ -483,9 +531,25 @@ static int in_pci(uint32_t a, uint32_t n)
     return 0;
 }
 
+/* rx_late: a receive's data and callback come a few SWIs after it's queued */
+static struct { uint32_t addr, len; int kind; uint8_t data[1 << 16]; } lateq[4];
+static int nlate, late_ticks;
+static void late_rx_finish(void)
+{
+    if (!nlate || ++late_ticks < 3) return;
+    late_ticks = 0;
+    pci_open(1);
+    if (lateq[0].kind == 1) memcpy((void *)(uintptr_t)lateq[0].addr, lateq[0].data, lateq[0].len);
+    pci_open(0);
+    memmove(&lateq[0], &lateq[1], sizeof lateq[0] * (size_t)(nlate - 1));
+    nlate--;
+    ((void (*)(uint32_t, uint32_t, uint32_t))(uintptr_t)stub)(stub + 64, 4, 0);
+}
+
 _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
 {
     uint32_t *R = (uint32_t *)r->r;
+    if (n == 0x42 || n == 0x59204) late_rx_finish();
     switch (n) {
     case 0x42: R[0] = time_cs++; return NULL;
     case 0x591C5: {                          /* BCMSupport_SendTempPropertyBuffer: VC memory */
@@ -567,12 +631,19 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
               R[2], rx_len_expected, R[3]);
         CHECK((R[1] & 63) == 0, "receive buffer not aligned");
         CHECK(in_pci(R[1], R[2]), "receive into memory that isn't PCI_RAMAlloc'd");
-        pci_open(1);
-        if (need_rx == 1) memcpy((void *)(uintptr_t)R[1], cur_frame, R[2]);
-        pci_open(0);
+        if (rx_late) {
+            CHECK(nlate < 4, "more than 4 receives outstanding");
+            lateq[nlate].addr = R[1]; lateq[nlate].len = R[2]; lateq[nlate].kind = need_rx;
+            if (need_rx == 1) memcpy(lateq[nlate].data, cur_frame, R[2]);
+            nlate++;
+        } else {
+            pci_open(1);
+            if (need_rx == 1) memcpy((void *)(uintptr_t)R[1], cur_frame, R[2]);
+            pci_open(0);
+            ((stub_fn *)(uintptr_t)stub)(stub + 64, 4, R[4]);  /* the real callback */
+        }
         need_rx = 0;
         bulks_rx++;
-        ((stub_fn *)(uintptr_t)stub)(stub + 64, 4, R[4]);      /* the real callback */
         while (!need_rx && ndeferred) {                         /* what waited, in order */
             uint32_t m[128], l = deferred_len[0];
             memcpy(m, deferred[0], l);
@@ -642,6 +713,7 @@ static void reset_fake(void)
     noutq = 0; ndeferred = deferred_ever = 0; ntxq = pending_tx_now = 0;
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
+    recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
 }
 
 /* ---- the MP4: two closed GOPs, decode order I P B B P B, pts in frames ---- */
@@ -734,6 +806,7 @@ static void make_mp4(void)
 
 static void reset_fake(void);
 
+#ifndef FAKE_ONLY
 /* mmaldecode on the MP4, with these options */
 static char *run_mp4(int *ret, const char *o1, const char *o2, const char *o3)
 {
@@ -786,6 +859,8 @@ static char *run(int *ret, int keep_going)
     return buf;
 }
 
+#endif
+
 static void cleaned(const char *what)
 {
     CHECK(uses == releases, "%s: use/release %d/%d", what, uses, releases);
@@ -797,6 +872,7 @@ static void cleaned(const char *what)
           what, comp_enabled, port_on[1], port_on[2], created, destroyed);
 }
 
+#ifndef FAKE_ONLY
 int main(int argc, char **argv)
 {
     int ret;
@@ -1007,3 +1083,4 @@ int main(int argc, char **argv)
     printf(fails ? "mmaldecode_test: %d failures\n" : "mmaldecode_test: all passed\n", fails);
     return fails != 0;
 }
+#endif

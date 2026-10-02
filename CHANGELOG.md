@@ -1,5 +1,43 @@
 # Changes
 
+## vcdec 0.1 and VCDecTest 0.1 (test zip, 2026-10-02)
+
+vcdec, the library Reel and FFmpeg will use for H.264 on the VideoCore,
+built on what MMALDecode 0.12 to 0.17 found on a Pi 4:
+
+- vcdec_open (checks the size, up to 1920x1088, and gpu_mem: 1080p needs
+  128 MB), vcdec_send (one Annex B access unit with its pts and dts;
+  VCDEC_AGAIN when the 20 input buffers are full, never half sent; the
+  SPS's profile checked: Baseline, Main or High), vcdec_send_eos,
+  vcdec_peek and vcdec_receive (the next picture in display order,
+  copied by LDM/STM into the caller's three planes), vcdec_flush,
+  vcdec_close, vcdec_poll. VCDEC_UNSUPPORTED says "decode it in
+  software".
+- The pictures' bulk transfers are queued as their messages arrive and
+  run on while vcdec carries on, counted by the RMA callback;
+  VCDEC_SYNC_RECEIVE waits for each instead, as MMALDecode did.
+- A flush before the end of the stream is FLUSH of both ports (0.17's
+  Seek); after the end (EOS sent) the component is destroyed and created
+  again, since a flush alone loses the last pictures at the next EOS.
+- A format change to another size is acted on between calls; pictures
+  not yet taken keep their layout, and their buffers grow when taken.
+- A decoder that says nothing after the first input (gpu_mem too small)
+  or after the EOS is reported, not waited for.
+- The copy routines (vcdec_copy.S) run in SVC mode, as PCI memory needs:
+  32 bytes a loop by LDM/STM, then words, then bytes, exact lengths, any
+  alignment.
+
+VCDecTest drives it as a player would (send until full, take what's
+ready) and checks every picture against FFmpeg's: Test, Sync, Seek,
+SeekEnd (a seek after the end: the decoder created again), Speed,
+Verbose. The clips are MMALDecode 0.17's.
+
+Host tests: tests/host/vcdec_test.c against the same fake, which now
+also refuses output buffers before its format change, can finish
+receives late, makes a fresh decoder when the component is created
+again (not yet seen on the Pi: SeekEnd will say), and can change format
+part way or during a flush.
+
 ## MMALDecode 0.17 (test zip, 2026-10-02)
 
 On a Pi 4: Seek and SeekD (EOS held back) kept all 60 pictures, the

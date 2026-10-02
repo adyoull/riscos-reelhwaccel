@@ -1,0 +1,13 @@
+| Test: the three H.264 clips through vcdec, as a player drives it (send
+| until the input is full, take every picture ready), every picture
+| checked against FFmpeg's own decode, matched by pts. Reports to Result.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 16384K -max 16384K
+Remove <Obey$Dir>.Result
+Run <Obey$Dir>.vcdectest -o <Obey$Dir>.Result <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.vcdectest -o <Obey$Dir>.Result <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
+Run <Obey$Dir>.vcdectest -o <Obey$Dir>.Result <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig

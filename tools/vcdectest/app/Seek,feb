@@ -1,0 +1,12 @@
+| Seek: the small clip; after 10 pictures vcdec_flush, then on from the
+| keyframe at picture 40, before the end of the stream has been sent
+| (MMALDecode 0.17's Seek). Every message is written out (-v). Reports
+| to ResultSeek.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 16384K -max 16384K
+Remove <Obey$Dir>.ResultSeek
+Run <Obey$Dir>.vcdectest -v -n -s 10 -o <Obey$Dir>.ResultSeek <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
