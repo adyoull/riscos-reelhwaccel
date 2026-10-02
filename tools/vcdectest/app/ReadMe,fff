@@ -10,23 +10,17 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
-New in 0.2 (vcdec 0.3): three ways that might make it faster, to time on
-the Pi before any of them is used for real.
+New in 0.3 (vcdec 0.4): VCDecTest 0.2's results made the defaults.
+Pictures now arrive in a cacheable Physical Memory Pool and are copied out
+by LDM/STM of 8 words a loop: 1080p went from 64 to 82 pictures a second
+on a Pi 4, every picture right. More output buffers and NEON made no
+difference, so they stay off. If a pool can't be had (RISC OS before 5.23,
+or no contiguous pages), vcdec says so and uses PCI memory as before.
 
-  - More output buffers. vcdec gave the decoder 3; while the program copies
-    one picture out, the decoder may have too few left to fill.
-  - Other ways of copying the pictures out: LDM/STM of 8 words a loop, and
-    NEON (only from a pool, in USR mode), against 4 words a loop so far.
-  - Other memory for the pictures to arrive in. So far it was PCI_RAMAlloc
-    memory, which the PRM says is uncachable and closed to USR mode: every
-    picture is copied out of it in SVC mode at about 500 MB/s. Now it can
-    be a Physical Memory Pool instead (RISC OS 5's OS_DynamicArea 21/22):
-    pages OS_Memory 12 picks as physically contiguous below 1 GB (as VCHIQ
-    needs), mapped readable from USR mode, cacheable or not (the uncached
-    one is bufferable, like PCI memory). With the cacheable one, vcdec
-    cleans and invalidates the cache over each picture before reading it
-    (Cache_CleanInvalidateRange); if VCHIQ and the cache don't agree,
-    Memory will show wrong pictures.
+Each report now also says where the time inside vcdec goes (messages from
+the decoder, queueing the pictures' transfers, handing buffers back, the
+cache, the copy) and how long vcdec_send took: at 82 a second the copy is
+under 2 ms of each picture's 12, and these show what the rest is.
 
 The clips (in clips, the same as before):
   small  640x360, 60 pictures, H.264 Main with B frames, a keyframe
@@ -35,29 +29,26 @@ The clips (in clips, the same as before):
          multiple of 32, to check the cropping)
   hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
 
-Running it (please send back every Result file):
-  Memory   New: the three clips, every picture checked, arriving in a
-           cacheable pool and in an uncachable one; then hd with 6
-           buffers, NEON and the cacheable pool, with a seek after the
-           end. Writes ResultM. Run this first.
-  Speed    Changed: hd without checks, one change at a time - 3, 4 and 6
-           buffers; LDM 4, LDM 8 and NEON; PCI memory and the two
-           pools, each with the copy on its own timed three ways.
+Running it (please send back Result, ResultM, ResultT and ResultEnd):
+  Test     The three clips with vcdec's defaults (a cacheable pool,
+           LDM 8), every picture checked. Writes Result. Run this first.
+  Memory   Changed: the three clips checked in PCI memory, copied by
+           LDM 8 (what vcdec falls back to). Writes ResultM.
+  Speed    Changed: hd without checks - the defaults, with the copy on
+           its own timed each way; 0.3's defaults (PCI memory, LDM 4);
+           PCI memory with LDM 8; 6 buffers; each transfer waited for.
            Writes ResultT.
-  Test     The three clips as before (PCI memory, 3 buffers, LDM 4),
-           every picture checked. Writes Result.
-  Sync     As Test, each bulk transfer waited for. Writes ResultSync.
-  Seek     The small clip; a flush after 10 pictures, then on from the
-           keyframe at picture 40. Writes ResultSeek.
   SeekEnd  The small and hd clips, each to the end, then a flush (the
            decoder created again) and on from the last keyframe. Writes
            ResultEnd.
+  Sync     As Test, each bulk transfer waited for. Writes ResultSync.
+  Seek     The small clip; a flush after 10 pictures, then on from the
+           keyframe at picture 40. Writes ResultSeek.
   Verbose  The small clip with every message (ResultV).
 
   Each report says how much memory the VideoCore has (gpu_mem in
-  CONFIG/TXT); 1080p needs gpu_mem=128 or more. Memory and Speed also
-  show the RAM disc's dynamic area flags (to confirm the flag RISC OS 5
-  uses for a Physical Memory Pool), and where each pool's pages are.
+  CONFIG/TXT); 1080p needs gpu_mem=128 or more, and where each pool's
+  pages are.
 
 If a run stops part way (the report says "no reply"), the VideoCore's
 decoder can stay stuck until the machine is restarted: restart before
@@ -65,6 +56,6 @@ running anything else. If the machine locks up (it shouldn't), switch it
 off and on again.
 
 Needs: RISC OS 5 on a Raspberry Pi, with the VCHIQ module (in the ROM);
-the pools need RISC OS 5.23 or later.
+the pools need RISC OS 5.23 or later (on older ones, PCI memory as before).
 Part of riscos-reelhwaccel; GPL version 2 or later. The clips are made
 from FFmpeg's testsrc2 pattern.

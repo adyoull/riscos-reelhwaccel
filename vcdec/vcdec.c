@@ -198,8 +198,13 @@ struct vcdec {
     uint8_t *out_buf[MAX_OUT];
     uint32_t out_cap[MAX_OUT], out_need;
     int out_state[MAX_OUT];
-    uint32_t out_area[MAX_OUT];            /* VCDEC_OUT_PMP: each buffer's pool (dynamic area number) */
-    uint32_t armop_cci;                    /* VCDEC_OUT_PMP, cached: the kernel's Cache_CleanInvalidateRange */
+    uint32_t out_area[MAX_OUT];            /* each pool buffer's dynamic area number */
+    int out_pool[MAX_OUT];                 /* the buffer is in a pool (else PCI memory) */
+    int use_pool;                          /* new buffers in pools (cleared on falling back to PCI memory) */
+    int pool_only;                         /* VCDEC_OUT_PMP: no falling back */
+    int pool_uncached;                     /* VCDEC_OUT_UNCACHED */
+    char why[160];                         /* why a pool couldn't be had */
+    uint32_t armop_cci;                    /* cached pools: the kernel's Cache_CleanInvalidateRange */
     int copy_way;                          /* vcdec_copy_rows's way: 0 LDM 4, 1 LDM 8, 2 NEON */
     int pmp_svc;                           /* a pool not readable in USR mode (OS_Memory 24): copied in SVC */
     int pool_stuck;                        /* a pool couldn't be removed: the RMA block (its handler) is kept */
@@ -354,24 +359,33 @@ static int pmp_free(vcdec *d, uint32_t area, uint32_t pages)
     return 0;
 }
 
+/* (pmp_alloc's reason for giving up: the caller falls back, or fails) */
+static void why(vcdec *d, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(d->why, sizeof d->why, fmt, ap);
+    va_end(ap);
+}
+
 static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
 {
     uint32_t pages = (size + 4095) >> 12, first, *l, phys[2];
-    int uncached = (d->cfg.flags & VCDEC_OUT_UNCACHED) != 0;
+    int uncached = d->pool_uncached;
     _kernel_swi_regs r;
     _kernel_oserror *e;
     char name[32];
     void *base;
     /* the pool and the page list first: OS_Memory 12's pages are only sure
        to be free if claiming them is the next thing that takes pages */
-    if (!(l = malloc(pages * 12))) { fail(d, VCDEC_ERROR, "Out of memory"); return NULL; }
+    if (!(l = malloc(pages * 12))) { why(d, "Out of memory"); return NULL; }
     snprintf(name, sizeof name, "vcdec picture");
     memset(&r, 0, sizeof r);
     r.r[0] = 0; r.r[1] = -1; r.r[2] = 0; r.r[3] = -1;
     r.r[4] = (int)(DA_SPECIFIC_PAGES | DA_PMP | DA_NOT_DRAGGABLE);   /* (access 0: user read/write) */
     r.r[5] = (int)(pages << 12); r.r[6] = (int)(d->stub + 72); r.r[7] = 0;
     r.r[8] = (int)(uintptr_t)name; r.r[9] = (int)pages;
-    if ((e = vc_swi(OS_DynamicArea, &r)) != NULL) { free(l); fail(d, VCDEC_ERROR, "A Physical Memory Pool: %s", e->errmess); return NULL; }
+    if ((e = vc_swi(OS_DynamicArea, &r)) != NULL) { free(l); why(d, "A Physical Memory Pool: %s", e->errmess); return NULL; }
     *area_out = (uint32_t)r.r[1];
     base = (void *)(uintptr_t)(uint32_t)r.r[3];
     memset(&r, 0, sizeof r);               /* contiguous pages for DMA below 1 GB (R4-R7: RISC OS 5.29+) */
@@ -379,14 +393,14 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
     r.r[4] = 0; r.r[5] = 0; r.r[6] = (int)(VC_RAM_TOP - 1); r.r[7] = 0;
     if ((e = vc_swi(OS_Memory, &r)) != NULL) {
         free(l); pmp_free(d, *area_out, 0);
-        fail(d, VCDEC_ERROR, "OS_Memory 12 (%u pages): %s", (unsigned)pages, e->errmess);
+        why(d, "OS_Memory 12 (%u pages): %s", (unsigned)pages, e->errmess);
         return NULL;
     }
     first = (uint32_t)r.r[3];
     for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = first + j; l[3 * j + 2] = PAGE_LOCK; }
     if ((e = pmp_op(d, 21, *area_out, l, pages)) != NULL) {
         free(l); pmp_free(d, *area_out, pages);
-        fail(d, VCDEC_ERROR, "Claiming %u pages from %u: %s", (unsigned)pages, (unsigned)first, e->errmess);
+        why(d, "Claiming %u pages from %u: %s", (unsigned)pages, (unsigned)first, e->errmess);
         return NULL;
     }
     for (uint32_t j = 0; j < pages; j++) {
@@ -396,7 +410,7 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
     }
     if ((e = pmp_op(d, 22, *area_out, l, pages)) != NULL) {
         free(l); pmp_free(d, *area_out, pages);
-        fail(d, VCDEC_ERROR, "Mapping %u pages: %s", (unsigned)pages, e->errmess);
+        why(d, "Mapping %u pages: %s", (unsigned)pages, e->errmess);
         return NULL;
     }
     free(l);
@@ -405,14 +419,14 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
         uint32_t blk[3] = { 0, (uint32_t)(uintptr_t)base + (k ? (pages - 1) << 12 : 0), 0 };
         if ((e = swi(OS_Memory, 0x2200, (uint32_t)(uintptr_t)blk, 1, 0, NULL, NULL)) != NULL) {
             pmp_free(d, *area_out, pages);
-            fail(d, VCDEC_ERROR, "OS_Memory 0: %s", e->errmess);
+            why(d, "OS_Memory 0: %s", e->errmess);
             return NULL;
         }
         phys[k] = blk[2];
     }
     if (phys[1] != phys[0] + ((pages - 1) << 12) || phys[1] > VC_RAM_TOP - 4096) {
         pmp_free(d, *area_out, pages);
-        fail(d, VCDEC_ERROR, "The pool's pages aren't contiguous below 1 GB (&%08X..&%08X)", (unsigned)phys[0],
+        why(d, "The pool's pages aren't contiguous below 1 GB (&%08X..&%08X)", (unsigned)phys[0],
              (unsigned)phys[1]);
         return NULL;
     }
@@ -433,18 +447,36 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
 }
 
 /* output buffer i made `size` bytes (any old one freed): 0, or -1 failed */
+static void out_free(vcdec *d, int i)
+{
+    if (!d->out_buf[i]) return;
+    if (d->out_pool[i]) pmp_free(d, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
+    else pci_free(d, d->out_buf[i]);
+    d->out_buf[i] = NULL;
+    d->out_cap[i] = 0;
+    d->out_pool[i] = 0;
+}
+
+/* no pool to be had: PCI memory from now on (unless VCDEC_OUT_PMP) */
+static int pool_fallback(vcdec *d)
+{
+    if (d->pool_only) return fail(d, VCDEC_ERROR, "%s", d->why);
+    logf_(d, "No picture pool (%s): PCI memory instead", d->why);
+    d->use_pool = 0;
+    return 0;
+}
+
 static int out_alloc(vcdec *d, int i, uint32_t size)
 {
-    if (d->out_buf[i]) {
-        if (d->cfg.flags & VCDEC_OUT_PMP) pmp_free(d, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
-        else pci_free(d, d->out_buf[i]);
-        d->out_buf[i] = NULL;
-        d->out_cap[i] = 0;
+    out_free(d, i);
+    if (d->use_pool) {
+        if ((d->out_buf[i] = pmp_alloc(d, size, &d->out_area[i])) != NULL) d->out_pool[i] = 1;
+        else if (pool_fallback(d)) return -1;
     }
-    if (d->cfg.flags & VCDEC_OUT_PMP) d->out_buf[i] = pmp_alloc(d, size, &d->out_area[i]);
-    else if (!(d->out_buf[i] = pci_alloc(d, size)))
+    if (!d->out_buf[i] && !(d->out_buf[i] = pci_alloc(d, size))) {
         fail(d, VCDEC_ERROR, "No PCI memory (PCI_RAMAlloc) for %u byte pictures", (unsigned)size);
-    if (!d->out_buf[i]) return -1;
+        return -1;
+    }
     d->out_cap[i] = size;
     return 0;
 }
@@ -587,7 +619,12 @@ static void handle_msg(vcdec *d, uint32_t got)
                 return;
             }
             /* the picture's bytes, or an empty EOS's 8 (as Linux's driver, to keep order) */
-            if (queue_receive(d, d->out_buf[k], b->length ? b->length : 8, &p->seq)) return;
+            {
+                uint32_t t0 = now_cs();
+                int bad = queue_receive(d, d->out_buf[k], b->length ? b->length : 8, &p->seq);
+                d->stats.cs_queue += now_cs() - t0;
+                if (bad) return;
+            }
             d->out_state[k] = OB_HELD;
             d->nheld++;
             d->heard_output = 1;
@@ -737,8 +774,10 @@ static int give_outputs(vcdec *d)
         if (d->out_state[i] == OB_FREE) {
             if (d->out_cap[i] < d->out_need && out_alloc(d, i, d->out_need))   /* (a picture was in it */
                 return d->failed;                                              /* when the size grew) */
+            uint32_t t0 = now_cs();
             if (buffer_to_vc(d, &d->out_info, i, d->out_buf[i], d->out_cap[i], 0, 0, TIME_UNKNOWN, TIME_UNKNOWN))
                 return -1;
+            d->stats.cs_give += now_cs() - t0;
             d->out_state[i] = OB_VC;
         }
     return 0;
@@ -873,7 +912,16 @@ void vcdec_config_init(vcdec_config *c)
 const char *vcdec_open_error(void) { return open_err; }
 const char *vcdec_error(const vcdec *d) { return d ? d->err : open_err; }
 
-void vcdec_get_stats(const vcdec *d, vcdec_stats *s) { *s = d->stats; }
+void vcdec_get_stats(const vcdec *d, vcdec_stats *s)
+{
+    *s = d->stats;
+    s->pool_buffers = s->pci_buffers = 0;
+    for (int i = 0; i < d->nout; i++)
+        if (d->out_buf[i]) {
+            if (d->out_pool[i]) s->pool_buffers++;
+            else s->pci_buffers++;
+        }
+}
 
 int vcdec_open(vcdec **out, const vcdec_config *c)
 {
@@ -909,11 +957,15 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
     }
     d->cfg = *c;
     d->nout = c->out_buffers > 0 ? (c->out_buffers < MAX_OUT ? c->out_buffers : MAX_OUT) : OUT_BUFS_DEFAULT;
-    d->copy_way = c->flags & VCDEC_COPY_NEON ? 2 : c->flags & VCDEC_COPY_LDM8 ? 1 : 0;
-    if (d->copy_way == 2 && !(c->flags & VCDEC_OUT_PMP))
+    d->copy_way = c->flags & VCDEC_COPY_NEON ? 2 : c->flags & VCDEC_COPY_LDM8 ? 1 : c->flags & VCDEC_COPY_LDM4 ? 0 : 1;
+    d->use_pool = !(c->flags & VCDEC_OUT_PCI);
+    d->pool_only = d->use_pool && (c->flags & VCDEC_OUT_PMP);
+    d->pool_uncached = (c->flags & VCDEC_OUT_UNCACHED) != 0;
+    if (d->copy_way == 2 && !d->use_pool)
         logf_(d, "NEON is only used in USR mode: pictures from PCI memory are copied by LDM 8 instead");
     d->waiting = "";
-    logf_(d, "vcdec %s: %dx%d; the VideoCore has %u MB (gpu_mem)", VCDEC_VERSION, c->width, c->height, mb);
+    logf_(d, "vcdec %s: %dx%d; the VideoCore has %u MB (gpu_mem); pictures copied out by %s", VCDEC_VERSION, c->width,
+          c->height, mb, d->copy_way == 2 ? "NEON" : d->copy_way ? "LDM 8" : "LDM 4");
     for (int i = 0; i < IN_BUFS; i++)
         if (!(d->in_buf[i] = pci_alloc(d, IN_SIZE))) {
             fail(d, VCDEC_ERROR, "No physically contiguous memory (PCI_RAMAlloc; is the PCI module loaded?)");
@@ -931,10 +983,11 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
         rr.r[0] = 1; rr.r[1] = (int)d->stub; rr.r[2] = (int)(d->stub + 76);
         vc_swi(OS_SynchroniseCodeAreas, &rr);
     }
-    if ((c->flags & (VCDEC_OUT_PMP | VCDEC_OUT_UNCACHED)) == VCDEC_OUT_PMP &&
+    if (d->use_pool && !d->pool_uncached &&
         (e = swi(OS_MMUControl, 2 | ARMOP_CACHE_CLEAN_INVALIDATE_RANGE << 8, 0, 0, 0, &d->armop_cci, NULL)) != NULL) {
-        fail(d, VCDEC_ERROR, "OS_MMUControl 2 (Cache_CleanInvalidateRange; RISC OS 5.23 or later): %s", e->errmess);
-        goto bad;
+        d->armop_cci = 0;
+        why(d, "OS_MMUControl 2 (Cache_CleanInvalidateRange; RISC OS 5.23 or later): %s", e->errmess);
+        if (pool_fallback(d)) goto bad;
     }
     if ((e = swi(VCHIQ_Initialise, 0, 0, 0, 0, &d->instance, NULL)) != NULL) { fail(d, VCDEC_ERROR, "VCHIQ_Initialise: %s", e->errmess); goto bad; }
     if ((e = swi(VCHIQ_Connect, 0, 0, d->instance, 0, NULL, NULL)) != NULL) { fail(d, VCDEC_ERROR, "VCHIQ_Connect: %s", e->errmess); goto bad; }
@@ -970,10 +1023,7 @@ void vcdec_close(vcdec *d)
     if (d->connected) swi(VCHIQ_Disconnect, d->instance, 0, 0, 0, NULL, NULL);
     for (int i = 0; i < IN_BUFS; i++) pci_free(d, d->in_buf[i]);
     for (int i = 0; i < d->nout; i++)      /* (the pools before the RMA block: it holds their handler) */
-        if (d->out_buf[i]) {
-            if (d->cfg.flags & VCDEC_OUT_PMP) pmp_free(d, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
-            else pci_free(d, d->out_buf[i]);
-        }
+        out_free(d, i);
     pci_free(d, d->evbuf);
     if (d->stub && !d->pool_stuck) swi(OS_Module, 7, 0, d->stub, 0, NULL, NULL);
     free(d);
@@ -990,7 +1040,9 @@ int vcdec_poll(vcdec *d)
         /* (a format change can also have come while waiting for a reply) */
         if (d->reformat && do_reformat(d)) return d->failed ? d->failed : VCDEC_ERROR;
         if (!(got = dequeue(d))) break;
+        now = now_cs();
         handle_msg(d, got);
+        d->stats.cs_messages += now_cs() - now;
         if (d->failed) return d->failed;
     }
     now = now_cs();
@@ -1139,15 +1191,21 @@ static void copy_picture(vcdec *d, const held_t *p, uint8_t *const planes[3], co
 {
     const uint8_t *b = d->out_buf[p->buf];
     int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
-    int svc = !(d->cfg.flags & VCDEC_OUT_PMP) || d->pmp_svc;
+    int pool = d->out_pool[p->buf];
+    int svc = !pool || d->pmp_svc;
+    uint32_t t0, t1;
     /* (NEON only in USR mode: in SVC mode an IRQ could leave the VFP context
        lazily switched off, and a trap there isn't VFPSupport's to mend) */
     int mode = (svc && way == 2 ? 1 : way) | (svc ? COPY_SVC : 0);
-    if (d->armop_cci)
+    t0 = now_cs();
+    if (pool && d->armop_cci)
         vcdec_svc_call(d->armop_cci, (uint32_t)(uintptr_t)b, ((uint32_t)(uintptr_t)b + p->length + 63) & ~63u);
+    t1 = now_cs();
     vcdec_copy_rows(planes[0], strides[0], b + p->offsets[0], (int)p->pitch[0], p->width, p->height, mode);
     vcdec_copy_rows(planes[1], strides[1], b + p->offsets[1], (int)p->pitch[1], cw, ch, mode);
     vcdec_copy_rows(planes[2], strides[2], b + p->offsets[2], (int)p->pitch[2], cw, ch, mode);
+    d->stats.cs_cache += t1 - t0;
+    d->stats.cs_copy += now_cs() - t1;
 }
 
 int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes[3], const int strides[3],
@@ -1157,7 +1215,7 @@ int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes
     if (!d->last_ok.length || !d->out_buf[d->last_ok.buf]) return einval(d, "No picture received yet to time");
     t0 = now_cs();
     for (int i = 0; i < reps; i++)
-        copy_picture(d, &d->last_ok, planes, strides, way & VCDEC_COPY_NEON ? 2 : way & VCDEC_COPY_LDM8 ? 1 : 0);
+        copy_picture(d, &d->last_ok, planes, strides, way & VCDEC_COPY_NEON ? 2 : way & VCDEC_COPY_LDM4 ? 0 : 1);
     *cs = now_cs() - t0;
     return VCDEC_OK;
 }

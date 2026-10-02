@@ -90,6 +90,12 @@ static int picture_right(uint8_t val)
 static int out_buffers;                    /* (vcdec_config.out_buffers for open70) */
 static int pmp_svc_logged;
 static void svc_log(void *h, const char *t) { (void)h; if (strstr(t, "isn't readable in USR mode")) pmp_svc_logged = 1; }
+static char logbuf[4096];
+static void cap_log(void *h, const char *t)
+{
+    (void)h;
+    if (strlen(logbuf) + strlen(t) + 2 < sizeof logbuf) { strcat(logbuf, t); strcat(logbuf, "\n"); }
+}
 static vcdec *open70(unsigned flags)
 {
     vcdec_config c;
@@ -97,6 +103,8 @@ static vcdec *open70(unsigned flags)
     int r;
     vcdec_config_init(&c);
     c.width = W; c.height = H; c.flags = flags; c.out_buffers = out_buffers;
+    c.log = cap_log;
+    logbuf[0] = 0;
     reset_fake();
     mp4_mode = 1;
     r = vcdec_open(&d, &c);
@@ -288,10 +296,22 @@ static void app_tests(void)
     CHECK(ret == 0 && strstr(o, "Output buffers: 6; pictures copied out by neon") && strstr(o, "not cacheable") &&
           nout_max == 6 && !pmp_invalidates && strstr(o, "OK - timed"), "VCDecTest -m pmpu -c neon -B 6 (%d):\n%s", ret, o);
     cleaned("app pmpu");
-    o = run_apps(&ret, "-c ldm8 -E");
-    CHECK(ret == 0 && strstr(o, "by ldm8; they arrive in PCI_RAMAlloc memory") && !strstr(o, "RAM disc") && strstr(o, "Result: OK"),
-          "VCDecTest -c ldm8 -E (%d):\n%s", ret, o);
-    cleaned("app ldm8");
+    o = run_apps(&ret, "-m pci -c ldm4 -E");
+    CHECK(ret == 0 && strstr(o, "by ldm4; they arrive in PCI_RAMAlloc memory") && !strstr(o, "RAM disc") && strstr(o, "Result: OK") &&
+          strstr(o, "0 in pools, 3 in PCI memory") && !pmp_invalidates, "VCDecTest -m pci -c ldm4 -E (%d):\n%s", ret, o);
+    cleaned("app pci");
+    o = run_apps(&ret, "-t -K");
+    printf("%s", o);
+    CHECK(ret == 0 && strstr(o, "by ldm8; they arrive in a cacheable Physical Memory Pool if there is one") &&
+          strstr(o, "RAM disc") && strstr(o, "3 in pools, 0 in PCI memory") && strstr(o, "Inside vcdec (cs in all): messages") &&
+          strstr(o, "(pmp, NEON 64 bytes)") && strstr(o, "OK - timed"), "VCDecTest -t -K, the defaults (%d):\n%s", ret, o);
+    cleaned("app defaults");
+    no_pmp = 1;
+    o = run_apps(&ret, "-t -K");
+    CHECK(ret == 0 && strstr(o, "0 in pools, 3 in PCI memory") && strstr(o, "No picture pool") && strstr(o, "(pci, LDM 8 words)") &&
+          strstr(o, "NEON isn't used for PCI") && strstr(o, "OK - timed"), "VCDecTest -t -K, no pools (%d):\n%s", ret, o);
+    cleaned("app no pools");
+    no_pmp = 0;
     o = run_apps(&ret, "-c fast");
     CHECK(ret == 1 && !opens, "VCDecTest -c fast: refused (%d)", ret);
     npci_blocks = 0;
@@ -346,6 +366,79 @@ int main(int argc, char **argv)
     whole(0, 1, 1, 3, "whole, unaligned planes");
     whole(0, 0, 2, 1, "whole, odd strides");
 
+    /* ---- 0.4's defaults: a cached pool, LDM 8; PCI memory and LDM 4 asked for ---- */
+    d = open70(0);
+    setup_planes(0, 0);
+    ngot = wrong_pics = 0;
+    r = feed(d, 0, 12, 1);
+    vcdec_get_stats(d, &s);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.pool_buffers == 3 && !s.pci_buffers && pmp_invalidates >= 12 &&
+          strstr(logbuf, "copied out by LDM 8") && !strstr(logbuf, "No picture pool"),
+          "the defaults: %d, %d pictures, %u in pools, %u PCI, %d cleans; log:\n%s", r, ngot, s.pool_buffers, s.pci_buffers,
+          pmp_invalidates, logbuf);
+    close70(d, "defaults");
+    whole(VCDEC_OUT_PCI, 0, 0, 0, "PCI memory");
+    CHECK(!pmp_live && !pmp_invalidates, "PCI memory asked for: a pool made (%d) or cleaned (%d)", pmp_live, pmp_invalidates);
+    whole(VCDEC_OUT_PCI | VCDEC_COPY_LDM4, 1, 1, 3, "PCI memory, LDM 4, unaligned planes");
+    whole(VCDEC_COPY_LDM4, 0, 2, 1, "a pool, LDM 4, odd strides");
+    whole(VCDEC_OUT_UNCACHED, 0, 0, 0, "an uncached pool (falling back allowed)");
+    CHECK(pmp_invalidates == 0, "an uncached pool cleaned (%d)", pmp_invalidates);
+
+    /* no pool to be had: PCI memory instead, said; with VCDEC_OUT_PMP, a failure */
+    for (int k = 0; k < 3; k++) {
+        static const char *const what[3] = { "pools refused", "a scattered pool", "no Cache_CleanInvalidateRange" };
+        vcdec_config cc;
+        vcdec *dd = NULL;
+        vcdec_config_init(&cc);
+        reset_fake();
+        mp4_mode = 1;
+        no_pmp = k == 0; pmp_scattered = k == 1; no_armop = k == 2;
+        cc.width = W; cc.height = H; cc.log = cap_log;
+        logbuf[0] = 0;
+        r = vcdec_open(&dd, &cc);
+        CHECK(r == VCDEC_OK && strstr(logbuf, "No picture pool") && strstr(logbuf, "PCI memory instead") && !pmp_live,
+              "%s: open %d (%s), %d pools left; log:\n%s", what[k], r, vcdec_open_error(), pmp_live, logbuf);
+        if (dd) {
+            setup_planes(0, 0);
+            ngot = wrong_pics = 0;
+            r = feed(dd, 0, 12, 1);
+            vcdec_get_stats(dd, &s);
+            CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.pci_buffers == 3 && !s.pool_buffers && !pmp_live &&
+                  !pmp_invalidates, "%s: PCI memory instead: %d, %d pictures (%d wrong), %u PCI", what[k], r, ngot, wrong_pics,
+                  s.pci_buffers);
+            vcdec_close(dd);
+        }
+        mp4_mode = 0;
+        cleaned(what[k]);
+        npci_blocks = 0;
+        no_pmp = pmp_scattered = 0;
+    }
+    no_armop = 1;                             /* (no_pmp and pmp_scattered with VCDEC_OUT_PMP: below) */
+    vcdec_config_init(&c);
+    reset_fake();
+    no_armop = 1;
+    c.width = W; c.height = H; c.flags = VCDEC_OUT_PMP;
+    r = vcdec_open(&d, &c);
+    CHECK(r == VCDEC_ERROR && strstr(vcdec_open_error(), "OS_MMUControl") && !pmp_live && !pci_live,
+          "no Cache_CleanInvalidateRange, a pool or nothing: %d %s", r, vcdec_open_error());
+    npci_blocks = 0;
+    no_armop = 0;
+
+    /* pools refused part way (a bigger format): those buffers made again in PCI memory */
+    big_efch_at = 3;
+    d = open70(0);
+    no_pmp = 1;
+    setup_planes(0, 0);
+    ngot = wrong_pics = 0;
+    r = feed(d, 0, 12, 1);
+    vcdec_get_stats(d, &s);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.pci_buffers == 3 && !s.pool_buffers &&
+          strstr(logbuf, "PCI memory instead"), "pools refused part way: %d, %d pictures (%d wrong), %u pool %u PCI; log:\n%s",
+          r, ngot, wrong_pics, s.pool_buffers, s.pci_buffers, logbuf);
+    close70(d, "pools refused part way");
+    no_pmp = 0;
+    big_efch_at = 0;
+
     /* ---- the ways of copying, the number of buffers, the memory (0.3) ---- */
     whole(VCDEC_COPY_LDM8, 0, 0, 0, "LDM 8");
     whole(VCDEC_COPY_LDM8, 1, 1, 3, "LDM 8, unaligned planes");
@@ -394,7 +487,7 @@ int main(int argc, char **argv)
         unsigned cs = 0;
         int k;
         big_efch_at = 3;
-        d = open70(pool ? VCDEC_OUT_PMP : 0);
+        d = open70(pool ? VCDEC_OUT_PMP : VCDEC_OUT_PCI);
         setup_planes(0, 0);
         for (k = 0; k < 6; k++) vcdec_send(d, aubuf, make_au(k, 100), (int64_t)mp4_pts[k] * 40000, 0, k ? 0 : 1);
         for (int i = 0; i < 30; i++) vcdec_poll(d);

@@ -25,9 +25,11 @@
  *                again (a seek after the end)
  *      -t        time, don't check the pictures
  *      -B n      n output buffers (vcdec's default 3; up to 8)
- *      -c way    copying the pictures out: ldm4 (default), ldm8 or neon
- *      -m memory where the pictures arrive: pci (PCI_RAMAlloc, the default),
- *                pmp (a Physical Memory Pool, cacheable) or pmpu (not cacheable)
+ *      -c way    copying the pictures out: ldm8 (vcdec's default), ldm4 or neon
+ *      -m memory where the pictures arrive: auto (vcdec's default: a cacheable
+ *                Physical Memory Pool, or PCI memory if there's none), pci
+ *                (PCI_RAMAlloc), pmp (a cacheable pool, nothing else) or
+ *                pmpu (a pool not cacheable)
  *      -K        after the decode, one picture's copy timed each way
  *   vcdectest -x out stream.mp4   (host check) the Annex B stream as it
  *      would be sent, to out, and each sample's pts, dts and key flag to
@@ -542,11 +544,11 @@ int probe_main(int argc, char **argv)
 {
     const char *stream_name = NULL, *crc_name = NULL, *sig_name = NULL, *x_out = NULL;
     uint8_t *stream = NULL;
-    uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, last_picture, ticks = 0, again_in = 0;
+    uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
     int verbose = 0, sync = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
     int out_buffers = 0, bench = 0;
     unsigned way = 0, memory = 0;
-    const char *way_name = "ldm4", *memory_name = "pci";
+    const char *way_name = "ldm8", *memory_name = "auto";
     int frames = 0, pass_frames = 0, before_flush = 0, fatal = 0, eof = 0, i, r, cur = 0, eos_sent = 0, au_ready = 0;
     int missing = 0, missing2 = 0, pass1_frames = 0, pass1_ok = 0;
     vcdec *d = NULL;
@@ -572,13 +574,15 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-K")) bench = 1;
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) {
             way_name = argv[++i];
-            way = !strcmp(way_name, "ldm8") ? VCDEC_COPY_LDM8 : !strcmp(way_name, "neon") ? VCDEC_COPY_NEON : 0;
-            if (!way && strcmp(way_name, "ldm4")) stream_name = crc_name = NULL, i = argc;
+            way = !strcmp(way_name, "ldm8") ? VCDEC_COPY_LDM8 : !strcmp(way_name, "neon") ? VCDEC_COPY_NEON :
+                  !strcmp(way_name, "ldm4") ? VCDEC_COPY_LDM4 : 0;
+            if (!way) stream_name = crc_name = NULL, i = argc;
         } else if (!strcmp(argv[i], "-m") && i + 1 < argc) {
             memory_name = argv[++i];
             memory = !strcmp(memory_name, "pmp") ? VCDEC_OUT_PMP :
-                     !strcmp(memory_name, "pmpu") ? VCDEC_OUT_PMP | VCDEC_OUT_UNCACHED : 0;
-            if (!memory && strcmp(memory_name, "pci")) stream_name = crc_name = NULL, i = argc;
+                     !strcmp(memory_name, "pmpu") ? VCDEC_OUT_PMP | VCDEC_OUT_UNCACHED :
+                     !strcmp(memory_name, "pci") ? VCDEC_OUT_PCI : 0;
+            if (!memory && strcmp(memory_name, "auto")) stream_name = crc_name = NULL, i = argc;
         }
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) x_out = argv[++i];
         else if (!stream_name) stream_name = argv[i];
@@ -588,8 +592,8 @@ int probe_main(int argc, char **argv)
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end)) {
-        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c ldm4|ldm8|neon] "
-               "[-m pci|pmp|pmpu] [-K] stream.mp4 expected.crc [expected.sig]\n");
+        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
+               "[-m auto|pci|pmp|pmpu] [-K] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
     say("vcdectest: %s through vcdec %s\n", stream_name, VCDEC_VERSION);
@@ -636,9 +640,9 @@ int probe_main(int argc, char **argv)
                 way | memory;
     cfg.out_buffers = out_buffers;
     say("Output buffers: %d; pictures copied out by %s; they arrive in %s\n", out_buffers ? out_buffers : 3, way_name,
-        memory == 0 ? "PCI_RAMAlloc memory" : memory & VCDEC_OUT_UNCACHED ? "a Physical Memory Pool, not cacheable" :
-        "a Physical Memory Pool, cacheable");
-    if (memory) {                          /* (the RAM disc is a PMP on RISC OS 5: its flags show the PMP bit) */
+        memory == VCDEC_OUT_PCI ? "PCI_RAMAlloc memory" : memory & VCDEC_OUT_UNCACHED ? "a Physical Memory Pool, not cacheable" :
+        memory ? "a Physical Memory Pool, cacheable" : "a cacheable Physical Memory Pool if there is one, else PCI memory");
+    if (memory != VCDEC_OUT_PCI) {                          /* (the RAM disc is a PMP on RISC OS 5: its flags show the PMP bit) */
         _kernel_swi_regs r;
         memset(&r, 0, sizeof r);
         r.r[0] = 2; r.r[1] = 5;
@@ -671,7 +675,11 @@ int probe_main(int argc, char **argv)
                 if (!au_len) { cur++; continue; }   /* (an empty sample) */
                 au_ready = 1;
             }
-            r = vcdec_send(d, au, au_len, samples[cur].pts, samples[cur].dts, samples[cur].key ? VCDEC_KEYFRAME : 0);
+            {
+                uint32_t t0 = now_cs();
+                r = vcdec_send(d, au, au_len, samples[cur].pts, samples[cur].dts, samples[cur].key ? VCDEC_KEYFRAME : 0);
+                send_cs += now_cs() - t0;
+            }
             if (r == VCDEC_AGAIN) { again_in++; break; }
             if (r != VCDEC_OK) { say("vcdec_send: %s\n", vcdec_error(d)); fatal = 1; break; }
             au_ready = 0;
@@ -759,24 +767,30 @@ int probe_main(int argc, char **argv)
             (unsigned)ticks, (unsigned)again_in);
         say("Copying the pictures out (vcdec_receive): %u cs in all, %u.%02u ms a picture\n", (unsigned)recv_cs,
             frames ? (unsigned)(recv_cs * 10 / (unsigned)frames) : 0, frames ? (unsigned)(recv_cs * 1000 / (unsigned)frames % 100) : 0);
+        /* where the time went, in cs over the whole run (each part timed to the centisecond: totals only) */
+        say("Inside vcdec (cs in all): messages taken in %u (the pictures' transfers queued: %u), buffers handed back %u, "
+            "cache %u, copying %u; vcdec_send: %u\n", stats.cs_messages, stats.cs_queue, stats.cs_give, stats.cs_cache,
+            stats.cs_copy, (unsigned)send_cs);
     }
+    say("Output buffers at the end: %u in pools, %u in PCI memory\n", stats.pool_buffers, stats.pci_buffers);
     if (bench && eof) {                    /* -K: one picture's copy, each way */
         static const struct { unsigned way; const char *name; } ways[3] = {
-            { 0, "LDM 4 words" }, { VCDEC_COPY_LDM8, "LDM 8 words" }, { VCDEC_COPY_NEON, "NEON 64 bytes" } };
+            { VCDEC_COPY_LDM4, "LDM 4 words" }, { VCDEC_COPY_LDM8, "LDM 8 words" }, { VCDEC_COPY_NEON, "NEON 64 bytes" } };
         uint32_t bytes = frame_len;
         int reps = (int)((64u << 20) / (bytes ? bytes : 1));
         if (reps < 10) reps = 10;
         if (reps > 2000) reps = 2000;
         for (int k = 0; k < 3; k++) {
             unsigned cs = 0;
-            if (k == 2 && !memory) { say("(NEON isn't used for PCI memory: it's copied in SVC mode)\n"); break; }
+            if (k == 2 && !stats.pool_buffers) { say("(NEON isn't used for PCI memory: it's copied in SVC mode)\n"); break; }
             if (vcdec_copy_benchmark(d, ways[k].way, reps, planes, strides, &cs) != VCDEC_OK) {
                 say("Copy timing: %s\n", vcdec_error(d));
                 break;
             }
             if (!cs) cs = 1;
             say("One %ux%u picture copied out (%s, %s): %u.%02u ms (%u MB/s; %d copies in %u cs)\n", (unsigned)want_w,
-                (unsigned)want_h, memory_name, ways[k].name, (unsigned)(cs * 1000u / (unsigned)reps / 100),
+                (unsigned)want_h, stats.pool_buffers ? (stats.pci_buffers ? "pool+pci" : memory & VCDEC_OUT_UNCACHED ? "pmpu" : "pmp") : "pci",
+                ways[k].name, (unsigned)(cs * 1000u / (unsigned)reps / 100),
                 (unsigned)(cs * 1000u / (unsigned)reps % 100), (unsigned)((uint64_t)bytes * (unsigned)reps * 100 / cs / 1000000),
                 reps, cs);
         }

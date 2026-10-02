@@ -1,5 +1,30 @@
 # Changes
 
+## vcdec 0.4 and VCDecTest 0.3 (test zip, 2026-10-02)
+
+VCDecTest 0.2 on a Pi 4 (1080p, no checks): PCI memory with LDM 4 gave 64
+pictures a second; PCI with LDM 8, 72; a cacheable pool, 82, every
+picture right in the checked runs (so the cache maintenance is right). The
+copy on its own: 6.2 ms (PCI, LDM 4), 4.3 (PCI, LDM 8), 1.9 (pool, LDM 4),
+1.4 (pool, LDM 8 or NEON); an uncached pool is no better than PCI memory.
+More output buffers (4, 6) made no difference. The RAM disc's flags,
+&100122, confirm bit 20 as RISC OS 5's PMP flag.
+
+- The defaults are now a cacheable pool and LDM 8. If a pool can't be had
+  (no OS_MMUControl 2, pools refused, pages not contiguous below 1 GB),
+  PCI memory instead, logged; from then on, for every buffer made. Each
+  buffer remembers which it is (freed and copied accordingly).
+  VCDEC_OUT_PMP now means a pool or nothing; VCDEC_OUT_PCI and
+  VCDEC_COPY_LDM4 ask for 0.3's defaults.
+- vcdec_stats: pool_buffers and pci_buffers, and centiseconds spent on
+  messages, queueing transfers, handing buffers back, the cache and the
+  copy (at 82 a second the copy is under 2 ms of each picture's 12).
+
+VCDecTest 0.3: -m auto (the default), -c ldm8 the default; reports where
+the time inside vcdec went and how long vcdec_send took. Memory now checks
+PCI memory with LDM 8 (the fallback); Speed compares the defaults with
+0.3's.
+
 ## vcdec 0.3 and VCDecTest 0.2 (test zip, 2026-10-02)
 
 Three ways that might make vcdec faster, each to be timed on the Pi

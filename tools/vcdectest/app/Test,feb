@@ -1,6 +1,7 @@
-| Test: the three H.264 clips through vcdec, as a player drives it (send
-| until the input is full, take every picture ready), every picture
-| checked against FFmpeg's own decode, matched by pts. Reports to Result.
+| Test: the three H.264 clips through vcdec with its defaults (a cacheable
+| Physical Memory Pool, LDM 8), as a player drives it (send until the
+| input is full, take every picture ready), every picture checked against
+| FFmpeg's own decode, matched by pts. Reports to Result.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.

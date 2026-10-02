@@ -543,6 +543,7 @@ static int npci_blocks, pci_live, no_pci_mem;
 static int pmp_block[32], pmp_area[32], pmp_pages[32], pmp_claimed[32], pmp_mapped[32], pmp_cached[32];
 static uint8_t *pmp_shadow[32];
 static int pmp_live, pmp_invalidates, no_pmp, pmp_scattered, pmp_privileged;
+static int no_armop;                         /* OS_MMUControl 2 unknown (a RISC OS before 5.23) */
 static int recommended;                      /* OS_Memory 12 answered; the claim must come next (PRM) */
 static int pmp_top;                          /* a pool's last page at &3FFFF000 (the top page the VideoCore reaches) */
 static int rx_abort;                         /* this receive (counting from 1) is aborted */
@@ -749,6 +750,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         return &err;
     case 0x6B:                               /* OS_MMUControl 2: ARMop 21 */
         CHECK(R[0] == (2 | 21 << 8), "OS_MMUControl &%X", R[0]);
+        if (no_armop) return &err;
         R[0] = (uint32_t)(uintptr_t)fake_cci;
         return NULL;
     case 0x6E: CHECK(R[0] == 1 && R[1] == stub, "sync"); __builtin___clear_cache((char *)(uintptr_t)stub, (char *)(uintptr_t)stub + 64); return NULL;
@@ -900,7 +902,7 @@ static void reset_fake(void)
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
     recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
-    pmp_invalidates = 0; nout_max = 0; rx_abort = 0; pmp_privileged = 0; recommended = 0; pmp_top = 0;
+    pmp_invalidates = 0; nout_max = 0; rx_abort = 0; pmp_privileged = 0; recommended = 0; pmp_top = 0; no_armop = 0;
     in_slow = nslow = slow_ticks = slow_max = 0;
 }
 

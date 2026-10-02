@@ -38,19 +38,18 @@ showed on a Raspberry Pi 4.
   picture comes back with its own pts in display order, 1080p decodes
   and copies out at 58-59 pictures a second, and a flush is clean as
   long as no end-of-stream reached the decoder before it.
-- **`vcdec/`** (0.3): the library itself, from all of that. Open, send
+- **`vcdec/`** (0.4): the library itself, from all of that. Open, send
   an access unit with its pts, take a picture (copied into the caller's
   planes), flush for a seek (after the end of the stream, the decoder is
   created again), close; nothing waits for the decoder but open, flush
   and close, so a player can drive it from Wimp null events. It checks
   the profile, the size and `gpu_mem` (1080p needs 128 MB), and says
   when the stream isn't for the VideoCore so the caller can decode in
-  software. 0.3 adds, to time on the Pi first: more output buffers,
-  LDM 8 and NEON copies, and pictures arriving in a Physical Memory Pool
-  (user readable, cacheable) instead of uncachable PCI memory.
-  **`tools/vcdectest`** drives it on the Pi as a player would:
-  on a Pi 4 every picture right, 1080p at 45 pictures a second with
-  every picture checksummed and 65 without, seeks before and after the
+  software. Pictures arrive in a cacheable Physical Memory Pool (user
+  readable; PCI memory if there's none) and are copied out by LDM 8:
+  timed on the Pi with VCDecTest 0.2, that took 1080p from 64 to 82
+  pictures a second. **`tools/vcdectest`** drives it on the Pi as a
+  player would: on a Pi 4 every picture right, seeks before and after the
   end of the stream losing nothing, open, flush and close in 0-3 cs.
 - **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
