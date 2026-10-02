@@ -1,5 +1,30 @@
 # Changes
 
+## vcdec 0.4.1 and VCDecTest 0.3.1: zero-copy (test zip, 2026-10-02)
+
+At 82 pictures a second the copy out of vcdec's buffer took 9 ms of each
+1080p picture's 12 (1.4 ms on its own): it competes with the VideoCore's
+decode and transfers. So the caller can now have the buffer itself.
+
+- vcdec_receive_hold: the next picture's planes in vcdec's own buffer
+  (cache cleaned and invalidated first), read only, until vcdec_release.
+  VCDEC_UNSUPPORTED (the picture left for vcdec_receive) for PCI memory,
+  an SVC-only pool, or when holding it would leave the decoder fewer than
+  2 buffers, so a caller holding too many falls back to copies instead of
+  stalling the decoder. Held buffers are left alone by flushes, the
+  decoder created again, and format changes (grown when released).
+- vcdec_close with pictures held: everything but their buffers goes; the
+  last vcdec_release frees those, the RMA block and the rest.
+- Up to 16 output buffers (was 8). vcdec_stats: holds, held_now.
+- h264_vchiq: zero_copy (default on): frames wrap the held buffer
+  (av_buffer_create, read only), released when freed, copies when a
+  picture can't be held; out_buffers (default 6 with zero_copy, else 3).
+  Frames can outlive the decoder.
+
+VCDecTest 0.3.1: -Z (held, checked in place), -H n (n held at a time),
+-R (each held picture read once). New Obey file ZeroCopy (ResultZ); Speed
+compares the copy with zero-copy.
+
 ## devkit 0.2: vcdec 0.4 for FFmpeg, h264_vchiq's pci_memory (2026-10-02)
 
 VCDecTest 0.3 on a Pi 4: every run OK. Every picture right with the

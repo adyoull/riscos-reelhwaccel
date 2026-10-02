@@ -82,7 +82,7 @@ static uint8_t txq[32][65536];
 static uint32_t txq_len[32];
 static int ntxq, pending_tx_now;
 static uint32_t out_w, out_h, out_size_set;
-static int out_bufs[8], nout, nout_max, frames_made, eos_in, eos_out_sent, need_rx;
+static int out_bufs[16], nout, nout_max, frames_made, eos_in, eos_out_sent, need_rx;
 static uint32_t rx_len_expected;
 static uint8_t cur_frame[1 << 16];
 #define UNKNOWN 0x8000000000000000ull
@@ -496,7 +496,8 @@ static void firmware(const uint32_t *m, uint32_t len)
             CHECK(p[8 + 4] >= out_size_set, "output alloc_size %u < %u", p[8 + 4], out_size_set);
             /* rule 2: only after the decoder's format change (or 200 cs) */
             CHECK(efch_ever || (first_in_cs && time_cs - first_in_cs >= 200), "an output buffer before the format change");
-            out_bufs[nout++] = (int)d->ctx;
+            CHECK(nout < 16, "more than 16 output buffers with the decoder");
+            if (nout < 16) out_bufs[nout++] = (int)d->ctx;
             if (nout > nout_max) nout_max = nout;
         }
         produce();
@@ -534,14 +535,15 @@ static void take_tx(void)
 
 /* PCI_RAMAlloc: the only memory VCHIQ's bulk transfers handle (it assumes
    physically contiguous); every bulk range must lie inside one block */
-static uint32_t pci_lo[32], pci_hi[32];
+#define NBLOCKS 96
+static uint32_t pci_lo[NBLOCKS], pci_hi[NBLOCKS];
 static int npci_blocks, pci_live, no_pci_mem;
 /* vcdec's Physical Memory Pools (VCDEC_OUT_PMP): blocks in the same table,
    user readable (never closed). A cached one has a shadow: the "RAM" the
    VideoCore writes; the program sees it only after a cache clean and
    invalidate over the range (as with a real cache that may hold old lines) */
-static int pmp_block[32], pmp_area[32], pmp_pages[32], pmp_claimed[32], pmp_mapped[32], pmp_cached[32];
-static uint8_t *pmp_shadow[32];
+static int pmp_block[NBLOCKS], pmp_area[NBLOCKS], pmp_pages[NBLOCKS], pmp_claimed[NBLOCKS], pmp_mapped[NBLOCKS], pmp_cached[NBLOCKS];
+static uint8_t *pmp_shadow[NBLOCKS];
 static int pmp_live, pmp_invalidates, no_pmp, pmp_scattered, pmp_privileged;
 static int no_armop;
 static int pmp_made;                         /* pools created since the reset */                         /* OS_MMUControl 2 unknown (a RISC OS before 5.23) */
@@ -676,6 +678,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
                   "pool flags &%X, sizes %u %u %u", R[4], R[2], R[5], R[9]);
             CHECK(R[6] == stub + 72 && ((uint32_t *)(uintptr_t)stub)[18] == 0xe1a0f00eu, "pool handler");
             if (no_pmp) return &err;
+            if (npci_blocks >= NBLOCKS) { CHECK(0, "the fake's block table is full"); return &err; }
             p = mmap(NULL, R[5], pmp_privileged ? PROT_NONE : PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             b = npci_blocks++;
             pci_lo[b] = (uint32_t)(uintptr_t)p; pci_hi[b] = pci_lo[b] + R[5];
@@ -780,6 +783,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         void *p;
         CHECK(R[1] == 4096, "PCI alignment %u", R[1]);
         if (no_pci_mem) return &err;
+        if (npci_blocks >= NBLOCKS) { CHECK(0, "the fake's block table is full"); return &err; }
         /* privileged on RISC OS: no access from "USR mode" here (a stray
            access is a SIGSEGV); probe_svc_copy and the fake VideoCore open it */
         p = mmap(NULL, (R[0] + 4095) & ~4095u, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

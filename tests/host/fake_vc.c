@@ -41,7 +41,7 @@ int *fake_vc_var(const char *name)
         { "created", &created }, { "destroyed", &destroyed }, { "opens", &opens }, { "idr_dropped", &idr_dropped },
         { "bulks_tx", &bulks_tx }, { "disc_seen", &disc_seen }, { "in_slow", &in_slow }, { "slow_max", &slow_max },
         { "no_pmp", &no_pmp }, { "pmp_invalidates", &pmp_invalidates }, { "pmp_scattered", &pmp_scattered },
-        { "pmp_made", &pmp_made },
+        { "pmp_made", &pmp_made }, { "pmp_live", &pmp_live },
     };
     for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++)
         if (!strcmp(v[i].n, name)) return v[i].p;
@@ -54,6 +54,13 @@ int *fake_vc_var(const char *name)
 int fake_vc_width(void) { return W; }
 int fake_vc_height(void) { return H; }
 int fake_vc_value(int k) { return mp4_val(k); }
+int fake_vc_in_pool(const void *p)
+{
+    uint32_t a = (uint32_t)(uintptr_t)p;
+    for (int i = 0; i < npci_blocks; i++)
+        if (pmp_block[i] && a >= pci_lo[i] && a < pci_hi[i]) return 1;
+    return 0;
+}
 
 /* a whole program (FFmpeg's own ffmpeg) against the fake: set up before
    main; with FAKE_VC_REPORT set, at the end: the fake's failures and

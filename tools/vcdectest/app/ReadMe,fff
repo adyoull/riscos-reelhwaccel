@@ -10,17 +10,18 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
-New in 0.3 (vcdec 0.4): VCDecTest 0.2's results made the defaults.
-Pictures now arrive in a cacheable Physical Memory Pool and are copied out
-by LDM/STM of 8 words a loop: 1080p went from 64 to 82 pictures a second
-on a Pi 4, every picture right. More output buffers and NEON made no
-difference, so they stay off. If a pool can't be had (RISC OS before 5.23,
-or no contiguous pages), vcdec says so and uses PCI memory as before.
+New in 0.3.1 (vcdec 0.4.1): zero-copy. VCDecTest 0.3 showed that at 82
+pictures a second, copying each 1080p picture out of vcdec's buffer took
+9 ms of its 12 while the VideoCore decoded and sent the next one (1.4 ms
+on its own). Now a player can be handed vcdec's own buffer instead
+(vcdec_receive_hold) and give it back when it has shown the picture
+(vcdec_release): no copy. With -Z, VCDecTest takes pictures that way and
+checks them where they are; -H n holds up to n at a time, as a player's
+queue would; -R reads every byte of each once, as showing it would.
 
-Each report now also says where the time inside vcdec goes (messages from
-the decoder, queueing the pictures' transfers, handing buffers back, the
-cache, the copy) and how long vcdec_send took: at 82 a second the copy is
-under 2 ms of each picture's 12, and these show what the rest is.
+0.3 (vcdec 0.4) made a cacheable Physical Memory Pool and LDM 8 the
+defaults (64 to 82 pictures a second), falling back to PCI memory when a
+pool can't be had.
 
 The clips (in clips, the same as before):
   small  640x360, 60 pictures, H.264 Main with B frames, a keyframe
@@ -29,15 +30,18 @@ The clips (in clips, the same as before):
          multiple of 32, to check the cropping)
   hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
 
-Running it (please send back Result, ResultM, ResultT and ResultEnd):
+Running it (please send back ResultZ and ResultT):
+  ZeroCopy New: the three clips taken without copying, every picture
+           checked where it is; then hd holding 4 at a time, to the end,
+           a seek after it, and closing with pictures still held. Writes
+           ResultZ. Run this first.
+  Speed    Changed: hd without checks - vcdec's copy, then zero-copy:
+           held and released, held and read once, with 4 buffers, and 4
+           held at a time in 6. Writes ResultT.
   Test     The three clips with vcdec's defaults (a cacheable pool,
-           LDM 8), every picture checked. Writes Result. Run this first.
-  Memory   Changed: the three clips checked in PCI memory, copied by
-           LDM 8 (what vcdec falls back to). Writes ResultM.
-  Speed    Changed: hd without checks - the defaults, with the copy on
-           its own timed each way; 0.3's defaults (PCI memory, LDM 4);
-           PCI memory with LDM 8; 6 buffers; each transfer waited for.
-           Writes ResultT.
+           LDM 8, copied out), every picture checked. Writes Result.
+  Memory   The three clips checked in PCI memory, copied by LDM 8 (what
+           vcdec falls back to). Writes ResultM.
   SeekEnd  The small and hd clips, each to the end, then a flush (the
            decoder created again) and on from the last keyframe. Writes
            ResultEnd.

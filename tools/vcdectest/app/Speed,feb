@@ -1,8 +1,8 @@
-| Speed: the hd clip without checksums (-t). First vcdec 0.4's defaults (a
-| cacheable pool, LDM 8) with the copy on its own timed each way (-K); then
-| 0.3's defaults (PCI memory, LDM 4), PCI memory with LDM 8 (the fallback),
-| the defaults with 6 buffers, and with each transfer waited for (-S). Each
-| run says where the time inside vcdec went. Reports to ResultT.
+| Speed: the hd clip without checksums (-t). vcdec's copy (the default),
+| then zero-copy: held and released (-Z), held and every byte read once
+| as a player would (-Z -R), the same with 4 buffers, and 4 held at a time
+| in 6 buffers. Each run says where the time inside vcdec went. Reports to
+| ResultT.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
@@ -10,8 +10,8 @@ RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad Syst
 RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
 WimpSlot -min 16384K -max 16384K
 Remove <Obey$Dir>.ResultT
-Run <Obey$Dir>.vcdectest -t -K -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -t -m pci -c ldm4 -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -t -m pci -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -t -B 6 -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -t -S -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -t -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -t -Z -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -t -Z -R -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -t -Z -R -B 4 -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -t -H 4 -B 6 -R -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig

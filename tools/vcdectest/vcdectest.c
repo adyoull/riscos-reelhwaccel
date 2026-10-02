@@ -10,7 +10,7 @@
  * by pts. The VideoCore's chroma can be 1 lower than FFmpeg's here and
  * there: block means within 1 count as "close" (with the .sig file).
  *
- *   vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K]
+ *   vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
  *             stream.mp4 expected.crc [expected.sig]
  *      -o file   also add the report to file
  *      -v        every MMAL message, and what vcdec does
@@ -31,6 +31,12 @@
  *                (PCI_RAMAlloc), pmp (a cacheable pool, nothing else) or
  *                pmpu (a pool not cacheable)
  *      -K        after the decode, one picture's copy timed each way
+ *      -Z        zero-copy: pictures held in vcdec's buffers (vcdec_receive_hold),
+ *                not copied; checked from there; released at once
+ *      -H n      with -Z: up to n pictures held at a time (a player's queue);
+ *                the oldest released first, the rest after vcdec_close
+ *      -R        with -Z -t: every byte of each held picture read once (as a
+ *                player showing it would)
  *   vcdectest -x out stream.mp4   (host check) the Annex B stream as it
  *      would be sent, to out, and each sample's pts, dts and key flag to
  *      out.pts
@@ -546,7 +552,9 @@ int probe_main(int argc, char **argv)
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
     int verbose = 0, sync = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
-    int out_buffers = 0, bench = 0;
+    int out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
+    vcdec_hold *holds[16];
+    uint32_t read_sum = 0;
     unsigned way = 0, memory = 0;
     const char *way_name = "ldm8", *memory_name = "auto";
     int frames = 0, pass_frames = 0, before_flush = 0, fatal = 0, eof = 0, i, r, cur = 0, eos_sent = 0, au_ready = 0;
@@ -557,6 +565,7 @@ int probe_main(int argc, char **argv)
     uint8_t *planes[3];
     int strides[3];
 
+    memset(&stats, 0, sizeof stats);
     /* (a fresh start each time: the host tests call this more than once) */
     free(want); want = NULL; free(want_pts); want_pts = NULL; nwant = want_w = want_h = 0; nsig = 0;
     out2 = NULL; nsamples = 0; au_len = 0; close_n = far_n = wrong = disorder = dups = extra = timing = keep_going = 0;
@@ -572,6 +581,9 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-t")) timing = 1;
         else if (!strcmp(argv[i], "-B") && i + 1 < argc) out_buffers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-K")) bench = 1;
+        else if (!strcmp(argv[i], "-Z")) zero = 1;
+        else if (!strcmp(argv[i], "-R")) read_all = 1;
+        else if (!strcmp(argv[i], "-H") && i + 1 < argc) { zero = 1; hold_n = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) {
             way_name = argv[++i];
             way = !strcmp(way_name, "ldm8") ? VCDEC_COPY_LDM8 : !strcmp(way_name, "neon") ? VCDEC_COPY_NEON :
@@ -591,9 +603,9 @@ int probe_main(int argc, char **argv)
         else stream_name = NULL;
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
-    if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end)) {
+    if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16) {
         printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
-               "[-m auto|pci|pmp|pmpu] [-K] stream.mp4 expected.crc [expected.sig]\n");
+               "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
     say("vcdectest: %s through vcdec %s\n", stream_name, VCDEC_VERSION);
@@ -639,6 +651,8 @@ int probe_main(int argc, char **argv)
     cfg.flags = (sync ? VCDEC_SYNC_RECEIVE : 0) | (gpu_any ? VCDEC_NO_GPU_MEM_CHECK : 0) | (verbose ? VCDEC_LOG_MESSAGES : 0) |
                 way | memory;
     cfg.out_buffers = out_buffers;
+    if (zero) say("Zero-copy: pictures held in vcdec's buffers (up to %d at a time)%s\n", hold_n,
+                  read_all ? ", each read once" : "");
     say("Output buffers: %d; pictures copied out by %s; they arrive in %s\n", out_buffers ? out_buffers : 3, way_name,
         memory == VCDEC_OUT_PCI ? "PCI_RAMAlloc memory" : memory & VCDEC_OUT_UNCACHED ? "a Physical Memory Pool, not cacheable" :
         memory ? "a Physical Memory Pool, cacheable" : "a cacheable Physical Memory Pool if there is one, else PCI memory");
@@ -700,7 +714,38 @@ int probe_main(int argc, char **argv)
                 if (!keep_going) { fatal = 1; break; }
                 continue;
             }
-            r = vcdec_receive(d, &pic, planes, strides);
+            if (zero) {
+                uint8_t *hp[3];
+                int hs[3];
+                vcdec_hold *h = NULL;
+                if (nholds == hold_n) {          /* the oldest given back first */
+                    vcdec_release(holds[0]);
+                    memmove(holds, holds + 1, sizeof holds[0] * (size_t)(hold_n - 1));
+                    nholds--;
+                }
+                r = vcdec_receive_hold(d, &pic, hp, hs, &h);
+                if (r == VCDEC_UNSUPPORTED) {   /* (PCI memory, or too many held: copied instead) */
+                    unholdable++;
+                    r = vcdec_receive(d, &pic, planes, strides);
+                } else if (r == VCDEC_OK) {
+                    if (!timing)                /* (packed for the checksum) */
+                        for (int pl = 0; pl < 3; pl++) {
+                            int pw = pl ? (want_w + 1) / 2 : want_w, ph = pl ? (want_h + 1) / 2 : want_h;
+                            for (int y = 0; y < ph; y++) memcpy(planes[pl] + y * strides[pl], hp[pl] + y * hs[pl], (size_t)pw);
+                        }
+                    else if (read_all)
+                        for (int pl = 0; pl < 3; pl++) {
+                            int pw = pl ? (want_w + 1) / 2 : want_w, ph = pl ? (want_h + 1) / 2 : want_h;
+                            for (int y = 0; y < ph; y++) {
+                                const uint32_t *w4 = (const uint32_t *)(hp[pl] + y * hs[pl]);
+                                for (int x = 0; x < pw / 4; x++) read_sum += w4[x];
+                            }
+                        }
+                    holds[nholds++] = h;
+                }
+            } else {
+                r = vcdec_receive(d, &pic, planes, strides);
+            }
             if (r != VCDEC_OK) break;
             recv_cs += now_cs() - t0;
             last_picture = now_cs();
@@ -815,7 +860,12 @@ done:
         uint32_t t0 = now_cs();
         vcdec_close(d);
         say("vcdec_close: %u cs\n", (unsigned)(now_cs() - t0));
+        if (nholds) say("%d pictures still held at vcdec_close: released after it\n", nholds);
+        for (int k = 0; k < nholds; k++) vcdec_release(holds[k]);
+        nholds = 0;
     }
+    if (zero) say("Zero-copy: %u pictures held, %d copied instead (not holdable)%s\n", stats.holds, unholdable,
+                  read_all ? (read_sum ? "; all read" : "; all read (sum 0)") : "");
     {
         int complete = seek_end ? pass1_ok && !missing2 : !missing;
         int ok = eof && !fatal && !wrong && complete && !disorder && !dups && (!seek_after || seeked);

@@ -38,7 +38,7 @@ showed on a Raspberry Pi 4.
   picture comes back with its own pts in display order, 1080p decodes
   and copies out at 58-59 pictures a second, and a flush is clean as
   long as no end-of-stream reached the decoder before it.
-- **`vcdec/`** (0.4): the library itself, from all of that. Open, send
+- **`vcdec/`** (0.4.1): the library itself, from all of that. Open, send
   an access unit with its pts, take a picture (copied into the caller's
   planes), flush for a seek (after the end of the stream, the decoder is
   created again), close; nothing waits for the decoder but open, flush
@@ -48,9 +48,12 @@ showed on a Raspberry Pi 4.
   software. Pictures arrive in a cacheable Physical Memory Pool (user
   readable; PCI memory if there's none) and are copied out by LDM 8:
   timed on the Pi with VCDecTest 0.2 and confirmed with 0.3 (every
-  picture right), that took 1080p from 64 to 82 pictures a second. **`tools/vcdectest`** drives it on the Pi as a
-  player would: on a Pi 4 every picture right, seeks before and after the
-  end of the stream losing nothing, open, flush and close in 0-3 cs.
+  picture right), that took 1080p from 64 to 82 pictures a second.
+  0.4.1 adds zero-copy: the caller can take a picture in vcdec's own
+  buffer and give it back when done. **`tools/vcdectest`** drives it on
+  the Pi as a player would: on a Pi 4 every picture right, seeks before
+  and after the end of the stream losing nothing, open, flush and close
+  in 0-3 cs.
 - **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
   units), contiguous memory and interrupt (GIC 130, device 34) all work

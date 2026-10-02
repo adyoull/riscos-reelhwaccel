@@ -28,7 +28,9 @@
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); fails++; } } while (0)
 
-static int got[64], ngot, wrong;
+static int got[64], ngot, wrong, from_pool;
+static AVFrame *kept[8];                     /* (decode: the last `keep` frames kept, as a player's queue) */
+static int keep;
 
 /* a frame from the fake: 70x38, Y = value, U +1, V +2 */
 static void take_frame(const AVFrame *f, int64_t frames_pts)
@@ -41,6 +43,7 @@ static void take_frame(const AVFrame *f, int64_t frames_pts)
             for (int x = 0; x < w && ok; x++) ok = f->data[p][y * f->linesize[p] + x] == (uint8_t)(v + p);
     }
     if (!ok) wrong++;
+    if (fake_vc_in_pool(f->data[0])) from_pool++;
     if (ngot < 64) got[ngot++] = k;
 }
 
@@ -54,6 +57,7 @@ static int got_is(int from, int n)
 typedef struct { AVFormatContext *fmt; AVCodecContext *dec; AVPacket *pkt; AVFrame *frame; int tb_frame; } run_t;
 
 static int pci_option;                       /* open_file: -pci_memory 1 */
+static int copy_option;                      /* open_file: -zero_copy 0 */
 static int open_file(run_t *r)
 {
     const AVCodec *c = avcodec_find_decoder_by_name("h264_vchiq");
@@ -69,6 +73,7 @@ static int open_file(run_t *r)
     r->pkt = av_packet_alloc();
     r->frame = av_frame_alloc();
     if (pci_option) av_opt_set_int(r->dec->priv_data, "pci_memory", 1, 0);
+    if (copy_option) av_opt_set_int(r->dec->priv_data, "zero_copy", 0, 0);
     return avcodec_open2(r->dec, c, NULL);
 }
 
@@ -88,6 +93,11 @@ static int decode(run_t *r, int stop)
     for (;;) {
         while ((e = avcodec_receive_frame(r->dec, r->frame)) == 0) {
             take_frame(r->frame, r->frame->pts / r->tb_frame);
+            if (keep) {
+                av_frame_free(&kept[keep - 1]);
+                memmove(kept + 1, kept, sizeof kept[0] * (size_t)(keep - 1));
+                kept[0] = av_frame_clone(r->frame);
+            }
             av_frame_unref(r->frame);
             if (stop && ngot == stop) return 0;
         }
@@ -143,7 +153,7 @@ int main(void)
 
     /* the whole file */
     fake_vc_reset();
-    ngot = wrong = 0;
+    ngot = wrong = from_pool = 0;
     e = open_file(&r);
     CHECK(e == 0, "open: %d", e);
     if (!e) {
@@ -153,9 +163,49 @@ int main(void)
         CHECK(avcodec_receive_frame(r.dec, r.frame) == AVERROR_EOF, "EOF again");
         CHECK(*fake_vc_var("pmp_invalidates") >= 12, "whole file: pictures not from a cached pool (%d cleans)",
               *fake_vc_var("pmp_invalidates"));
+        CHECK(from_pool == 12, "whole file: %d of 12 frames zero-copy", from_pool);
     }
     close_file(&r);
     CHECK(fake_vc_cleaned("whole file"), "whole file: not cleaned up");
+
+    /* -zero_copy 0: every frame a copy */
+    fake_vc_reset();
+    ngot = wrong = from_pool = 0;
+    copy_option = 1;
+    e = open_file(&r);
+    copy_option = 0;
+    if (!e) {
+        e = decode(&r, 0);
+        CHECK(e == AVERROR_EOF && got_is(0, 12) && !wrong && !from_pool, "zero_copy 0: %d, %d frames, %d wrong, %d from the pool",
+              e, ngot, wrong, from_pool);
+    }
+    close_file(&r);
+    CHECK(fake_vc_cleaned("zero_copy 0"), "zero_copy 0: not cleaned up");
+
+    /* frames kept (three at a time, as a player's queue; with the one being taken, the four that
+       out_buffers 6 lets be held): still held, not written over; past
+       avcodec_free_context too, the decoder's memory going with the last of them */
+    fake_vc_reset();
+    ngot = wrong = from_pool = 0;
+    keep = 3;
+    e = open_file(&r);
+    if (!e) {
+        e = decode(&r, 0);
+        CHECK(e == AVERROR_EOF && got_is(0, 12) && !wrong && from_pool == 12, "three kept: %d, %d frames, %d wrong, %d zero-copy",
+              e, ngot, wrong, from_pool);
+    }
+    close_file(&r);
+    CHECK(*fake_vc_var("pmp_live") == 3, "three kept past close: %d pools left", *fake_vc_var("pmp_live"));
+    wrong = 0;
+    for (int i = 0; i < 3; i++) {
+        if (!kept[i]) { wrong++; continue; }
+        take_frame(kept[i], kept[i]->pts / r.tb_frame);
+        CHECK(got[ngot - 1] == 11 - i, "kept frame %d is picture %d", i, got[ngot - 1]);
+    }
+    CHECK(!wrong, "frames kept past close changed (%d)", wrong);
+    for (int i = 0; i < 3; i++) av_frame_free(&kept[i]);
+    keep = 0;
+    CHECK(fake_vc_cleaned("three kept"), "three kept: not cleaned up");
 
     /* -pci_memory 1: PCI memory, as vcdec 0.3 (no pools) */
     fake_vc_reset();

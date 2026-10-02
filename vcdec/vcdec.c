@@ -96,7 +96,8 @@ enum { ES_VIDEO = 3 };
 #define IN_BUFS        20
 #define IN_SIZE        (64 * 1024)
 #define OUT_BUFS_DEFAULT 3                 /* (MMALDecode's; the decoder asks for 1) */
-#define MAX_OUT        8
+#define MAX_OUT        16
+#define HOLD_SPARE     2                   /* buffers vcdec_receive_hold leaves to the decoder */
 #define CTX_BASE       1
 #define REPLY_CS       300
 #define EFCH_WAIT_CS   200
@@ -169,9 +170,15 @@ void vcdec_copy_rows(uint8_t *dst, int dst_stride, const uint8_t *src, int src_s
 void vcdec_svc_call(uint32_t fn, uint32_t r0, uint32_t r1);
 #define COPY_SVC 4                         /* (vcdec_copy_rows's mode: in SVC mode) */
 
-/* the output buffers: with us and empty, with the decoder, or holding a
-   picture (or the EOS) that is still arriving or not yet taken */
-enum { OB_FREE, OB_VC, OB_HELD };
+/* the output buffers: with us and empty, with the decoder, holding a
+   picture (or the EOS) that is still arriving or not yet taken, or a
+   picture the caller holds (vcdec_receive_hold) */
+enum { OB_FREE, OB_VC, OB_HELD, OB_USER };
+
+struct vcdec_hold {                        /* (one per output buffer) */
+    struct vcdec *d;
+    int buf, live;
+};
 
 typedef struct {                           /* a picture (or the EOS) that has come back */
     int buf;
@@ -222,6 +229,9 @@ struct vcdec {
     int reformat;                          /* an EFCH to another format, to act on at the top */
     format_changed_t fc;
     vcdec_stats stats;
+    struct vcdec_hold holds[MAX_OUT];
+    int nuser;                             /* buffers the caller holds */
+    int closing;                           /* vcdec_close done but for the buffers still held */
 };
 
 static char open_err[200];
@@ -535,6 +545,7 @@ static int wait_received(vcdec *d, uint32_t seq)
 }
 
 static int give_outputs(vcdec *d);
+static void free_all(vcdec *d);
 
 static int buffer_to_vc(vcdec *d, port_info_t *pi, int idx, uint8_t *data, uint32_t alloc, uint32_t len,
                         uint32_t flags, uint64_t pts, uint64_t dts)
@@ -915,6 +926,7 @@ const char *vcdec_error(const vcdec *d) { return d ? d->err : open_err; }
 void vcdec_get_stats(const vcdec *d, vcdec_stats *s)
 {
     *s = d->stats;
+    s->held_now = (unsigned)d->nuser;
     s->pool_buffers = s->pci_buffers = 0;
     for (int i = 0; i < d->nout; i++)
         if (d->out_buf[i]) {
@@ -1023,8 +1035,22 @@ void vcdec_close(vcdec *d)
     if (d->connected) swi(VCHIQ_Disconnect, d->instance, 0, 0, 0, NULL, NULL);
     for (int i = 0; i < IN_BUFS; i++) pci_free(d, d->in_buf[i]);
     for (int i = 0; i < d->nout; i++)      /* (the pools before the RMA block: it holds their handler) */
-        out_free(d, i);
+        if (d->out_state[i] != OB_USER) out_free(d, i);
     pci_free(d, d->evbuf);
+    d->evbuf = NULL;
+    if (d->nuser) {                        /* pictures still held: the rest at the last vcdec_release */
+        logf_(d, "Closed with %d pictures still held: their buffers go when they're released", d->nuser);
+        d->closing = 1;
+        d->cfg.log = NULL;                 /* (its handle may be gone by then: an FFmpeg context) */
+        return;
+    }
+    free_all(d);
+}
+
+/* the last of a closed decoder: the RMA block (the pools' handler, once
+   they've gone) and the structure */
+static void free_all(vcdec *d)
+{
     if (d->stub && !d->pool_stuck) swi(OS_Module, 7, 0, d->stub, 0, NULL, NULL);
     free(d);
 }
@@ -1187,24 +1213,30 @@ int vcdec_peek(vcdec *d, vcdec_picture *pic)
    is cleaned and invalidated over the picture first: the VideoCore wrote
    it to memory behind the cache, which may hold lines of the last one
    (read from here, or fetched ahead). */
+static void picture_cache(vcdec *d, const held_t *p)
+{
+    const uint8_t *b = d->out_buf[p->buf];
+    uint32_t t0 = now_cs();
+    if (d->out_pool[p->buf] && d->armop_cci)
+        vcdec_svc_call(d->armop_cci, (uint32_t)(uintptr_t)b, ((uint32_t)(uintptr_t)b + p->length + 63) & ~63u);
+    d->stats.cs_cache += now_cs() - t0;
+}
+
 static void copy_picture(vcdec *d, const held_t *p, uint8_t *const planes[3], const int strides[3], int way)
 {
     const uint8_t *b = d->out_buf[p->buf];
     int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
     int pool = d->out_pool[p->buf];
     int svc = !pool || d->pmp_svc;
-    uint32_t t0, t1;
+    uint32_t t1;
     /* (NEON only in USR mode: in SVC mode an IRQ could leave the VFP context
        lazily switched off, and a trap there isn't VFPSupport's to mend) */
     int mode = (svc && way == 2 ? 1 : way) | (svc ? COPY_SVC : 0);
-    t0 = now_cs();
-    if (pool && d->armop_cci)
-        vcdec_svc_call(d->armop_cci, (uint32_t)(uintptr_t)b, ((uint32_t)(uintptr_t)b + p->length + 63) & ~63u);
+    picture_cache(d, p);
     t1 = now_cs();
     vcdec_copy_rows(planes[0], strides[0], b + p->offsets[0], (int)p->pitch[0], p->width, p->height, mode);
     vcdec_copy_rows(planes[1], strides[1], b + p->offsets[1], (int)p->pitch[1], cw, ch, mode);
     vcdec_copy_rows(planes[2], strides[2], b + p->offsets[2], (int)p->pitch[2], cw, ch, mode);
-    d->stats.cs_cache += t1 - t0;
     d->stats.cs_copy += now_cs() - t1;
 }
 
@@ -1220,6 +1252,66 @@ int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes
     return VCDEC_OK;
 }
 
+/* the planes don't fit the buffer's bytes */
+static int layout_bad(const held_t *p)
+{
+    int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
+    return (uint32_t)p->width > p->pitch[0] || (uint32_t)cw > p->pitch[1] || (uint32_t)cw > p->pitch[2] ||
+           p->offsets[0] + p->pitch[0] * (uint32_t)p->height > p->length ||
+           p->offsets[1] + p->pitch[1] * (uint32_t)ch > p->length || p->offsets[2] + p->pitch[2] * (uint32_t)ch > p->length;
+}
+
+int vcdec_receive_hold(vcdec *d, vcdec_picture *pic, uint8_t *planes[3], int strides[3], vcdec_hold **hold)
+{
+    const held_t *p;
+    struct vcdec_hold *h;
+    int r, k;
+    *hold = NULL;
+    if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
+    if ((r = head_ready(d)) != 1) return r ? r : VCDEC_AGAIN;
+    p = &d->held[0];
+    k = p->buf;
+    if (!d->out_pool[k] || d->pmp_svc || d->nuser >= d->nout - HOLD_SPARE)
+        return VCDEC_UNSUPPORTED;          /* (left at the head, for vcdec_receive) */
+    if (layout_bad(p)) {
+        release_head(d);
+        return fail(d, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
+    }
+    picture_cache(d, p);
+    if (pic) fill_info(p, pic);
+    for (int i = 0; i < 3; i++) {
+        planes[i] = d->out_buf[k] + p->offsets[i];
+        strides[i] = (int)p->pitch[i];
+    }
+    h = &d->holds[k];
+    h->d = d; h->buf = k; h->live = 1;
+    if (p->flags & FLAG_EOS) d->eos_back = 1;
+    memmove(d->held, d->held + 1, sizeof d->held[0] * (size_t)(d->nheld - 1));
+    d->nheld--;
+    d->out_state[k] = OB_USER;
+    d->nuser++;
+    d->stats.pictures++;
+    d->stats.holds++;
+    *hold = h;
+    return VCDEC_OK;
+}
+
+void vcdec_release(vcdec_hold *h)
+{
+    vcdec *d;
+    if (!h || !h->live) return;
+    d = h->d;
+    h->live = 0;
+    d->nuser--;
+    d->out_state[h->buf] = OB_FREE;
+    if (d->closing) {
+        out_free(d, h->buf);
+        if (!d->nuser) free_all(d);
+    }
+    /* (otherwise the next vcdec_poll hands it to the decoder: nothing is
+       sent from here, which may be an FFmpeg frame's free callback) */
+}
+
 int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const int strides[3])
 {
     const held_t *p;
@@ -1229,10 +1321,7 @@ int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const 
     p = &d->held[0];
     if (pic) fill_info(p, pic);
     if (planes) {
-        int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
-        if ((uint32_t)p->width > p->pitch[0] || (uint32_t)cw > p->pitch[1] || (uint32_t)cw > p->pitch[2] ||
-            p->offsets[0] + p->pitch[0] * (uint32_t)p->height > p->length ||
-            p->offsets[1] + p->pitch[1] * (uint32_t)ch > p->length || p->offsets[2] + p->pitch[2] * (uint32_t)ch > p->length) {
+        if (layout_bad(p)) {
             release_head(d);
             return fail(d, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
         }
@@ -1272,7 +1361,7 @@ int vcdec_flush(vcdec *d)
     d->stats.discarded += (unsigned)d->nheld;
     d->nheld = 0;
     for (int i = 0; i < d->nout; i++)     /* (the flush or the disables sent back the decoder's) */
-        if (d->out_state[i] == OB_HELD || d->eos_sent) d->out_state[i] = OB_FREE;
+        if (d->out_state[i] == OB_HELD || (d->eos_sent && d->out_state[i] != OB_USER)) d->out_state[i] = OB_FREE;
     d->eos_back = d->eos_seen = 0;
     if (d->eos_sent) {
         d->stats.recreated++;

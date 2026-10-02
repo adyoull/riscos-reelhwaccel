@@ -9,4 +9,5 @@ int *fake_vc_var(const char *name);        /* a scenario switch or counter */
 int fake_vc_width(void);
 int fake_vc_height(void);
 int fake_vc_value(int k);                  /* picture k's Y value */
+int fake_vc_in_pool(const void *p);        /* p inside one of vcdec's picture pools */
 #endif

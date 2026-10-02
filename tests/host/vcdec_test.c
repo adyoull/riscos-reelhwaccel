@@ -163,6 +163,175 @@ static int got_is(int from, int n)
     return 1;
 }
 
+/* ---- zero-copy (0.4.1) ---- */
+static vcdec_hold *hq[16];
+static uint8_t *hq_y[16];
+static int hq_val[16], nhq, hold_max = 1, hold_refused, hold_copied;
+
+/* a held picture as the fake made it */
+static int held_right(uint8_t *const hp[3], const int hs[3], uint8_t val)
+{
+    for (int i = 0; i < 3; i++)
+        for (int y = 0; y < (i ? CH : H); y++)
+            for (int x = 0; x < (i ? CW : W); x++)
+                if (hp[i][y * hs[i] + x] != (uint8_t)(val + i)) return 0;
+    return 1;
+}
+
+/* every picture ready, held (up to hold_max at once: at that, the oldest
+   released before the next is taken; each one still held checked
+   unchanged); refused ones copied */
+static int take_hold(vcdec *d)
+{
+    vcdec_picture p;
+    uint8_t *hp[3];
+    int hs[3], r;
+    vcdec_hold *h;
+    for (;;) {
+        if ((r = vcdec_peek(d, &p)) != VCDEC_OK) return r;
+        if (nhq == hold_max) {                   /* (the oldest given back first) */
+            vcdec_release(hq[0]);
+            memmove(hq, hq + 1, sizeof hq[0] * (size_t)(nhq - 1));
+            memmove(hq_y, hq_y + 1, sizeof hq_y[0] * (size_t)(nhq - 1));
+            memmove(hq_val, hq_val + 1, sizeof hq_val[0] * (size_t)(nhq - 1));
+            nhq--;
+        }
+        r = vcdec_receive_hold(d, &p, hp, hs, &h);
+        if (r == VCDEC_UNSUPPORTED) {
+            hold_refused++;
+            if ((r = vcdec_receive(d, &p, planes, strides)) != VCDEC_OK) return r;
+            if (!picture_right(mp4_val((int)(p.pts / 40000)))) wrong_pics++;
+            hold_copied++;
+            if (ngot < 64) got[ngot++] = (int)(p.pts / 40000);
+            continue;
+        }
+        if (r != VCDEC_OK) return r;
+        {
+            int f = (int)(p.pts / 40000);
+            if (!h || p.width != W || p.height != H || !held_right(hp, hs, mp4_val(f))) wrong_pics++;
+            if (ngot < 64) got[ngot++] = f;
+            hq[nhq] = h; hq_y[nhq] = hp[0]; hq_val[nhq] = mp4_val(f); nhq++;
+            for (int i = 0; i < nhq; i++)        /* (the ones still held: not written over) */
+                if (hq_y[i][0] != (uint8_t)hq_val[i] || hq_y[i][W - 1] != (uint8_t)hq_val[i]) wrong_pics++;
+        }
+    }
+}
+
+static void release_all(void)
+{
+    for (int i = 0; i < nhq; i++) vcdec_release(hq[i]);
+    nhq = 0;
+}
+
+static int feed_hold(vcdec *d, int from, int to, int eos)
+{
+    int k = from, r = VCDEC_OK, spins = 0;
+    while (k < to && spins < 10000) {
+        size_t n = make_au(k, 100);
+        r = vcdec_send(d, aubuf, n, (int64_t)mp4_pts[k] * 40000, (int64_t)k * 40000, k % 6 == 0 ? VCDEC_KEYFRAME : 0);
+        if (r == VCDEC_OK) k++;
+        else if (r != VCDEC_AGAIN) return r;
+        if ((r = take_hold(d)) < 0) return r;
+        spins++;
+    }
+    if (!eos) return VCDEC_OK;
+    while ((r = vcdec_send_eos(d)) == VCDEC_AGAIN && spins++ < 10000) take_hold(d);
+    if (r != VCDEC_OK) return r;
+    while ((r = take_hold(d)) == VCDEC_AGAIN && spins++ < 10000) {}
+    return r;
+}
+
+static void hold_tests(void)
+{
+    vcdec *d;
+    vcdec_stats s;
+    int r;
+    /* one held at a time, 3 buffers: every picture held, none copied */
+    d = open70(0);
+    setup_planes(0, 0);
+    ngot = wrong_pics = hold_refused = hold_copied = nhq = 0; hold_max = 1;
+    r = feed_hold(d, 0, 12, 1);
+    vcdec_get_stats(d, &s);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && !hold_refused && s.holds == 12 && s.held_now == 1 &&
+          s.pictures == 12 && pmp_invalidates >= 12, "hold one at a time: %d, %d pictures (%d wrong), %d refused, %u held, %u now",
+          r, ngot, wrong_pics, hold_refused, s.holds, s.held_now);
+    release_all();
+    close70(d, "hold one");
+
+    /* three held at once with 3 buffers: only one can be (2 left to the decoder), the rest copied */
+    d = open70(0);
+    setup_planes(0, 0);
+    ngot = wrong_pics = hold_refused = hold_copied = nhq = 0; hold_max = 3;
+    r = feed_hold(d, 0, 12, 1);
+    vcdec_get_stats(d, &s);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && hold_copied == 11 && s.holds == 1 && s.held_now == 1,
+          "hold three of three buffers: %d, %d pictures (%d wrong), %d copied, %u held", r, ngot, wrong_pics, hold_copied, s.holds);
+    release_all();
+    close70(d, "hold too many");
+
+    /* six buffers, four held at once, receives late: all held; a seek before the end and after it with
+       pictures held (their buffers not the decoder's), then close with them still held */
+    out_buffers = 6;
+    d = open70(0);
+    out_buffers = 0;
+    rx_late = 1;
+    setup_planes(0, 0);
+    ngot = wrong_pics = hold_refused = hold_copied = nhq = 0; hold_max = 4;
+    r = feed_hold(d, 0, 6, 0);
+    for (int i = 0; i < 30 && ngot < 3; i++) take_hold(d);
+    CHECK(vcdec_flush(d) == VCDEC_OK && nhq >= 1, "hold: flush with %d held", nhq);
+    ngot = 0;
+    r = feed_hold(d, 6, 12, 1);
+    CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics && !hold_refused, "hold, seek before the end: %d, %d pictures (%d wrong), %d refused",
+          r, ngot, wrong_pics, hold_refused);
+    CHECK(vcdec_flush(d) == VCDEC_OK && recreated == 1, "hold: flush after the end (%d held)", nhq);
+    ngot = 0;
+    r = feed_hold(d, 6, 12, 1);
+    vcdec_get_stats(d, &s);
+    CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics && !hold_refused && s.held_now == 4,
+          "hold, seek after the end: %d, %d pictures (%d wrong), %d refused, %u held now", r, ngot, wrong_pics, hold_refused,
+          s.held_now);
+    rx_late = 0;
+    vcdec_close(d);
+    CHECK(pmp_live == 4 && freed == 0 && opens == closes, "closed with 4 held: %d pools left, stub freed %d", pmp_live, freed);
+    for (int i = 0; i < nhq; i++)
+        if (hq_y[i][0] != (uint8_t)hq_val[i]) wrong_pics++;
+    CHECK(!wrong_pics, "pictures held past vcdec_close changed");
+    release_all();
+    mp4_mode = 0;
+    cleaned("hold past close");
+
+    /* PCI memory: nothing can be held; every picture copied */
+    d = open70(VCDEC_OUT_PCI);
+    setup_planes(0, 0);
+    ngot = wrong_pics = hold_refused = hold_copied = nhq = 0; hold_max = 1;
+    r = feed_hold(d, 0, 12, 1);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && hold_copied == 12, "hold from PCI memory: %d, %d copied", r, hold_copied);
+    close70(d, "hold PCI");
+
+    /* a release is what gives the buffer back: not released, the decoder runs out */
+    d = open70(0);
+    setup_planes(0, 0);
+    {
+        vcdec_picture p;
+        uint8_t *hp[3];
+        int hs[3];
+        vcdec_hold *h = NULL, *h2 = NULL;
+        for (int k = 0; k < 6; k++) vcdec_send(d, aubuf, make_au(k, 100), (int64_t)mp4_pts[k] * 40000, 0, k ? 0 : 1);
+        for (int i = 0; i < 50 && (r = vcdec_receive_hold(d, &p, hp, hs, &h)) == VCDEC_AGAIN; i++) {}
+        CHECK(r == VCDEC_OK && h && held_right(hp, hs, mp4_val(0)), "hold: first picture %d", r);
+        for (int i = 0; i < 50 && (r = vcdec_receive_hold(d, &p, hp, hs, &h2)) == VCDEC_AGAIN; i++) {}
+        CHECK(r == VCDEC_UNSUPPORTED && !h2, "hold: a second with 3 buffers refused (%d)", r);
+        CHECK(vcdec_receive(d, &p, planes, strides) == VCDEC_OK && p.pts == 40000 && picture_right(mp4_val(1)),
+              "hold: the refused one taken by copying");
+        vcdec_release(h);
+        vcdec_release(NULL);
+        vcdec_get_stats(d, &s);
+        CHECK(s.held_now == 0, "released: %u still held", s.held_now);
+    }
+    close70(d, "hold release");
+}
+
 static void whole(unsigned flags, int late, int skew, int extra, const char *what)
 {
     vcdec *d = open70(flags);
@@ -312,6 +481,24 @@ static void app_tests(void)
           strstr(o, "NEON isn't used for PCI") && strstr(o, "OK - timed"), "VCDecTest -t -K, no pools (%d):\n%s", ret, o);
     cleaned("app no pools");
     no_pmp = 0;
+    o = run_apps(&ret, "-Z");
+    CHECK(ret == 0 && strstr(o, "Zero-copy: pictures held") && strstr(o, "Zero-copy: 12 pictures held, 0 copied") &&
+          strstr(o, "Result: OK - every picture exactly"), "VCDecTest -Z (%d):\n%s", ret, o);
+    cleaned("app -Z");
+    o = run_apps(&ret, "-H 3 -B 5 -E");
+    printf("%s", o);
+    CHECK(ret == 0 && strstr(o, "up to 3 at a time") && strstr(o, "Zero-copy: 18 pictures held, 0 copied") &&
+          strstr(o, "3 pictures still held at vcdec_close") && strstr(o, "Result: OK"), "VCDecTest -H 3 -B 5 -E (%d):\n%s", ret, o);
+    cleaned("app -H 3");
+    o = run_apps(&ret, "-Z -m pci");
+    CHECK(ret == 0 && strstr(o, "Zero-copy: 0 pictures held, 12 copied") && strstr(o, "Result: OK"), "VCDecTest -Z -m pci (%d):\n%s", ret, o);
+    cleaned("app -Z pci");
+    o = run_apps(&ret, "-t -Z -R");
+    CHECK(ret == 0 && strstr(o, "each read once") && strstr(o, "12 pictures held, 0 copied instead (not holdable); all read") &&
+          strstr(o, "OK - timed"), "VCDecTest -t -Z -R (%d):\n%s", ret, o);
+    cleaned("app -Z -R");
+    o = run_apps(&ret, "-H 17");
+    CHECK(ret == 1 && !opens, "VCDecTest -H 17: refused (%d)", ret);
     o = run_apps(&ret, "-c fast");
     CHECK(ret == 1 && !opens, "VCDecTest -c fast: refused (%d)", ret);
     npci_blocks = 0;
@@ -358,6 +545,7 @@ int main(int argc, char **argv)
     if (argc > 1) return probe_main(argc, argv);   /* (run.sh's -x check of real MP4s) */
 
     copy_tests();
+    hold_tests();
 
     /* ---- a whole decode ---- */
     whole(0, 0, 0, 0, "whole");
@@ -450,6 +638,13 @@ int main(int argc, char **argv)
         CHECK(nout_max == n, "%d output buffers asked for, the decoder had up to %d", n, nout_max);
         out_buffers = 0;
     }
+    out_buffers = 16;                         /* (0.4.1: up to 16) */
+    whole(0, 1, 0, 0, "16 output buffers");
+    CHECK(nout_max == 16, "16 output buffers asked for, the decoder had up to %d", nout_max);
+    out_buffers = 40;
+    whole(0, 0, 0, 0, "40 output buffers asked for");
+    CHECK(nout_max == 16, "40 output buffers asked for: the decoder had up to %d (16 the most)", nout_max);
+    out_buffers = 0;
     whole(VCDEC_OUT_PMP, 0, 0, 0, "a cached pool");
     CHECK(pmp_invalidates >= 12, "a cached pool: %d cache cleans (12 pictures)", pmp_invalidates);
     whole(VCDEC_OUT_PMP, 1, 1, 3, "a cached pool, late, unaligned planes");

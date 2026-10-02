@@ -6,8 +6,13 @@
  * The packets go to the VideoCore as Annex B access units (the
  * h264_mp4toannexb filter turns an MP4's avcC packets into those), each
  * with its pts; the pictures come back in display order with their pts
- * and are copied into ordinary YUV420P frames. Nothing is decoded on the
- * ARM.
+ * as YUV420P frames. Nothing is decoded on the ARM. By default (zero_copy)
+ * a frame's planes are vcdec's own picture buffer, held until the frame
+ * is freed (read only; the buffer is the decoder's again after that, so
+ * it has out_buffers of them: 3 + the frames a caller keeps at once);
+ * when one can't be held (PCI memory, or too many held), the picture is
+ * copied into an ordinary frame instead. Free frames in the thread that
+ * decodes (vcdec isn't thread safe).
  *
  * This decoder only waits for the VideoCore when its input is full (about
  * one picture's time) or at the end of the stream; otherwise
@@ -67,6 +72,8 @@ typedef struct VCHIQContext {
     int sync_receive;                       /* option */
     int gpu_mem_check;                      /* option */
     int pci_memory;                         /* option */
+    int zero_copy;                          /* option */
+    int out_buffers;                        /* option */
 } VCHIQContext;
 
 static void vchiq_log(void *h, const char *text)
@@ -152,6 +159,7 @@ static av_cold int vchiq_init(AVCodecContext *avctx)
     c.height = h;
     c.flags = (s->sync_receive ? VCDEC_SYNC_RECEIVE : 0) | (s->gpu_mem_check ? 0 : VCDEC_NO_GPU_MEM_CHECK) |
               (s->pci_memory ? VCDEC_OUT_PCI : 0) | (av_log_get_level() >= AV_LOG_TRACE ? VCDEC_LOG_MESSAGES : 0);
+    c.out_buffers = s->out_buffers ? s->out_buffers : s->zero_copy ? 6 : 3;
     c.log = vchiq_log;
     c.log_handle = avctx;
     r = vcdec_open(&s->d, &c);
@@ -161,8 +169,9 @@ static av_cold int vchiq_init(AVCodecContext *avctx)
         return r == VCDEC_UNSUPPORTED || r == VCDEC_EINVAL ? AVERROR(ENOSYS) : AVERROR_EXTERNAL;
     }
     avctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    av_log(avctx, AV_LOG_VERBOSE, "H.264 on the VideoCore (vcdec %s), %dx%d, gpu_mem %u MB%s\n", VCDEC_VERSION, w, h,
-           vcdec_gpu_mem(), s->pci_memory ? ", pictures in PCI memory" : "");
+    av_log(avctx, AV_LOG_VERBOSE, "H.264 on the VideoCore (vcdec %s), %dx%d, gpu_mem %u MB, %d buffers%s%s\n",
+           VCDEC_VERSION, w, h, vcdec_gpu_mem(), c.out_buffers, s->pci_memory ? ", pictures in PCI memory" : "",
+           s->zero_copy ? ", zero-copy" : "");
     return 0;
 }
 
@@ -210,6 +219,52 @@ static int send_pkt(AVCodecContext *avctx, VCHIQContext *s)
     return 1;
 }
 
+/* a held picture's frame freed: its buffer back to the decoder (or, after
+   close, freed) */
+static void release_hold(void *opaque, uint8_t *data)
+{
+    vcdec_release(opaque);
+}
+
+/* the picture at the head as a frame of vcdec's own buffer: 1, or 0 if it
+   can't be held (then it's copied), or an AVERROR */
+static int hold_frame(AVCodecContext *avctx, VCHIQContext *s, AVFrame *frame)
+{
+    uint8_t *planes[3];
+    int strides[3], r;
+    vcdec_hold *h;
+    r = vcdec_receive_hold(s->d, NULL, planes, strides, &h);
+    if (r == VCDEC_UNSUPPORTED)
+        return 0;
+    if (r != VCDEC_OK)
+        return r < 0 ? map_result(avctx, s, r, "Receiving") : AVERROR_BUG;
+    {                                       /* (the buffer: every plane, so each is inside it) */
+        uint8_t *end = planes[0];
+        for (int i = 0; i < 3; i++) {
+            uint8_t *e = planes[i] + strides[i] * (i ? (avctx->height + 1) / 2 : avctx->height);
+            if (e > end)
+                end = e;
+        }
+        frame->buf[0] = av_buffer_create(planes[0], end - planes[0], release_hold, h, AV_BUFFER_FLAG_READONLY);
+    }
+    if (!frame->buf[0]) {
+        vcdec_release(h);
+        return AVERROR(ENOMEM);
+    }
+    if ((r = ff_decode_frame_props(avctx, frame)) < 0) {
+        av_frame_unref(frame);
+        return r;
+    }
+    for (int i = 0; i < 3; i++) {
+        frame->data[i] = planes[i];
+        frame->linesize[i] = strides[i];
+    }
+    frame->width = avctx->width;
+    frame->height = avctx->height;
+    frame->format = AV_PIX_FMT_YUV420P;
+    return 1;
+}
+
 static int output_frame(AVCodecContext *avctx, VCHIQContext *s, AVFrame *frame, const vcdec_picture *pic)
 {
     int r;
@@ -218,12 +273,17 @@ static int output_frame(AVCodecContext *avctx, VCHIQContext *s, AVFrame *frame, 
             return r;
     }
     avctx->pix_fmt = AV_PIX_FMT_YUV420P;
-    if ((r = ff_get_buffer(avctx, frame, 0)) < 0)
+    r = s->zero_copy ? hold_frame(avctx, s, frame) : 0;
+    if (r < 0)
         return r;
-    r = vcdec_receive(s->d, NULL, frame->data, frame->linesize);
-    if (r != VCDEC_OK) {
-        av_frame_unref(frame);
-        return r < 0 ? map_result(avctx, s, r, "Receiving") : AVERROR_BUG;
+    if (!r) {
+        if ((r = ff_get_buffer(avctx, frame, 0)) < 0)
+            return r;
+        r = vcdec_receive(s->d, NULL, frame->data, frame->linesize);
+        if (r != VCDEC_OK) {
+            av_frame_unref(frame);
+            return r < 0 ? map_result(avctx, s, r, "Receiving") : AVERROR_BUG;
+        }
     }
     frame->pts = pic->pts;
     frame->pkt_dts = AV_NOPTS_VALUE;
@@ -311,6 +371,10 @@ static const AVOption options[] = {
       { .i64 = 1 }, 0, 1, VD },
     { "pci_memory", "pictures arrive in PCI memory (vcdec 0.3's way), not a cacheable pool", OFFSET(pci_memory),
       AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
+    { "zero_copy", "frames are the decoder's own picture buffers, not copies", OFFSET(zero_copy),
+      AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VD },
+    { "out_buffers", "the decoder's picture buffers (0: 6 with zero_copy, else 3)", OFFSET(out_buffers),
+      AV_OPT_TYPE_INT, { .i64 = 0 }, 0, 16, VD },
     { NULL }
 };
 

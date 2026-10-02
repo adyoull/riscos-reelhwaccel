@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCDEC_VERSION "0.4"
+#define VCDEC_VERSION "0.4.1"
 
 /* results */
 #define VCDEC_OK           0
@@ -73,11 +73,13 @@
 #define VCDEC_PIC_DISCONTINUITY 2u
 
 typedef struct vcdec vcdec;
+typedef struct vcdec_hold vcdec_hold;
 
 typedef struct {
     int width, height;          /* the stream's size (from the container): needed */
     unsigned flags;             /* VCDEC_NO_GPU_MEM_CHECK, ... */
-    int out_buffers;            /* pictures the decoder can fill at once: 0 for 3, up to 8 */
+    int out_buffers;            /* output buffers: 0 for 3, up to 16 (with vcdec_receive_hold: 3 + the
+                                   most pictures the caller holds at once) */
     void (*log)(void *handle, const char *text);   /* optional: what the decoder does */
     void *log_handle;
 } vcdec_config;
@@ -98,6 +100,8 @@ typedef struct {
        among them), the transfers' queueing alone, handing buffers back,
        the cache cleaned and invalidated, and the copy */
     unsigned cs_messages, cs_queue, cs_give, cs_cache, cs_copy;
+    /* (0.4.1) pictures taken by vcdec_receive_hold, and held now */
+    unsigned holds, held_now;
 } vcdec_stats;
 
 void vcdec_config_init(vcdec_config *c);
@@ -128,11 +132,30 @@ int vcdec_peek(vcdec *d, vcdec_picture *pic);
    the picture is dropped. VCDEC_OK, VCDEC_AGAIN or VCDEC_EOF. */
 int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const int strides[3]);
 
+/* (0.4.1) The next picture without copying it: planes and strides point
+   into vcdec's own buffer (I420, user readable, the cache already made
+   right), read only, valid until vcdec_release. VCDEC_OK and *hold,
+   VCDEC_AGAIN or VCDEC_EOF as vcdec_receive; or VCDEC_UNSUPPORTED when
+   this picture can't be held (its buffer is PCI memory, or the caller
+   already holds all but 2 of the output buffers): take it with
+   vcdec_receive instead. A held buffer isn't the decoder's again until
+   it's released (at the next call after), so give it enough
+   (vcdec_config.out_buffers). */
+int vcdec_receive_hold(vcdec *d, vcdec_picture *pic, uint8_t *planes[3], int strides[3], vcdec_hold **hold);
+
+/* A held picture given back: exactly once for each hold (a hold is
+   reused for its buffer's next picture). Also after vcdec_close: a closed
+   decoder's last memory goes with its last hold. NULL is ignored. It
+   sends nothing to the decoder, but isn't safe against the other calls
+   from another thread. */
+void vcdec_release(vcdec_hold *hold);
+
 /* Everything sent so far forgotten, and every picture not yet taken
    dropped (a seek): then send from a keyframe. After an EOS, the decoder is
    created again (a flush alone would lose pictures at the next EOS). */
 int vcdec_flush(vcdec *d);
 
+/* Pictures still held stay valid until released. */
 void vcdec_close(vcdec *d);
 
 /* Why the last call failed ("" if none). */

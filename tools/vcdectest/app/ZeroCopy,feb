@@ -1,0 +1,15 @@
+| ZeroCopy: the three clips with every picture checked as held in vcdec's
+| own buffer (-Z: not copied out), then hd holding 4 at a time in 6
+| buffers (-H 4 -B 6), to the end and a seek after it, closing with
+| pictures still held. Reports to ResultZ.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 16384K -max 16384K
+Remove <Obey$Dir>.ResultZ
+Run <Obey$Dir>.vcdectest -Z -o <Obey$Dir>.ResultZ <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.vcdectest -Z -o <Obey$Dir>.ResultZ <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
+Run <Obey$Dir>.vcdectest -Z -o <Obey$Dir>.ResultZ <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -H 4 -B 6 -E -o <Obey$Dir>.ResultZ <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
