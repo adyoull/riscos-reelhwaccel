@@ -155,7 +155,8 @@ int probe_main(int argc, char **argv)
     int verbose = 0, keep_going = 0, timing = 0, count = 0, nframes = 17, r, i, wrong = 0, done = 0, fatal = 0;
     int flat = 0;                          /* -s: flat scaling lists given where the stream has none */
     int overran = 0;
-    int uncached = 0;                      /* -u: output frames not cacheable (as before 0.1.4) */
+    int uncached = 0;
+    int quick = 0;                         /* -q: start, write a line, stop (no decoding: the hardware untouched) */                      /* -u: output frames not cacheable (as before 0.1.4) */
     FILE *dump = NULL;                     /* -d: every picture decoded, 8-bit 4:2:0, in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
@@ -177,6 +178,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) nframes = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-s")) flat = 1;
         else if (!strcmp(argv[i], "-u")) uncached = 1;
+        else if (!strcmp(argv[i], "-q")) quick = 1;
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
             if (!(dump = fopen(argv[++i], "wb"))) { printf("Can't write %s\n", argv[i]); return 1; }
         }
@@ -187,8 +189,14 @@ int probe_main(int argc, char **argv)
         else if (!name) name = argv[i];
         else name = NULL, i = argc;
     }
+    if (quick) {
+        say("hevctest %s: started and wrote this (-q: nothing decoded, the HEVC block untouched)\n", HEVCDEC_VERSION);
+        if (out2) fclose(out2);
+        if (dump) fclose(dump);
+        return 0;
+    }
     if (!name || nframes < 2 || nframes > MAX_FRAMES || count < 0) {
-        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-u] [-d file] [-c count] [-f frames] trace\n");
+        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-u] [-q] [-d file] [-c count] [-f frames] trace\n");
         if (dump) fclose(dump);
         return 1;
     }
@@ -330,13 +338,15 @@ out:
 #include <unistd.h>
 #include <kernel.h>
 /* a hardware exception (an abort, an undefined instruction): what RISC OS
-   said, before UnixLib's backtrace */
+   said, before UnixLib's backtrace. (UnixLib's error handler keeps it in
+   __ul_errbuf: the pc, the error number and message.) */
+extern struct { void *pc; int errnum; char errmess[252]; } __ul_errbuf;
 static void on_fatal(int sig)
 {
     const _kernel_oserror *e = _kernel_last_oserror();
-    printf("\nhevctest: signal %d", sig);
-    if (e) printf(": error &%X, %s", (unsigned)e->errnum, e->errmess);
-    printf("\n");
+    printf("\nhevctest: signal %d: RISC OS error &%X at pc &%08X: %.200s\n", sig, (unsigned)__ul_errbuf.errnum,
+           (unsigned)(uintptr_t)__ul_errbuf.pc, __ul_errbuf.errmess);
+    if (e) printf("  (last error: &%X, %s)\n", (unsigned)e->errnum, e->errmess);
     fflush(stdout);
     signal(sig, SIG_DFL);
     raise(sig);

@@ -256,6 +256,11 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     }
     cleaned("-d");
 
+    fake_hevc_reset();                          /* -q: starts and stops, the block untouched */
+    o = run_app(&ret, trace, "-q");
+    CHECK(ret == 0 && strstr(o, "started and wrote this (-q") && !strstr(o, "Trace:") && fake_hevc.opens == 0,
+          "hevctest -q (%d, %d opens):\n%s", ret, fake_hevc.opens, o);
+
     fake_hevc_reset();
     o = run_app(&ret, trace, "-t");
     CHECK(ret == 0 && strstr(o, "OK - timed"), "hevctest -t (%d):\n%s", ret, o);

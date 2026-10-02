@@ -22,7 +22,7 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   odd     426x240, 8 pictures (coded 432 wide, cropped)
   hd      1920x1080, 60 pictures, B frames, WPP
 
-Running it (please send back Result, ResultT and ResultU):
+Running it (please send back the Result files, and a photo of any EMT trap):
   Test     Every clip, every picture checked. Writes Result.
   Speed    The 1080p clip without checks: pictures a second. Writes
            ResultT.
@@ -30,6 +30,8 @@ Running it (please send back Result, ResultT and ResultU):
            decoder's log, if Test fails. Writes ResultV.
   Uncached The 1080p clip with the output frames not cacheable, as
            before 0.1.4, to compare. Writes ResultU.
+  NoHW     hevctest starts and stops without touching the HEVC block
+           (adds a line to ResultN): for the "EMT trap" below.
   Repeat   hevctest run straight after itself 13 times (the small
            clip ten times, the 1080p clip three). Writes ResultR.
   Dump     Saves the pictures decoded (the first three of small,
@@ -51,7 +53,19 @@ right, nothing written past any buffer, Repeat fine. But converting a
 1080p picture from the block's format took 29 ms, reading memory that
 isn't cacheable. 0.1.4 makes the output frames cacheable (cleaned and
 invalidated before each is read) and converts with NEON; Test's 1080p
-line "converting them" should be much lower than Uncached's.
+line "converting them" should be much lower than Uncached's. 0.1.4: 14 cs
+against 174 (2.3 ms a 1080p picture), Uncached 40 cs; all right.
+
+The EMT trap: hevctest sometimes stops at once ("Fatal signal received:
+EMT trap") when started from the Filer straight after another run, but
+never within one Obey file (Repeat). It happens in UnixLib opening the
+output file, before the HEVC block is used. To find out whose it is,
+please try, starting each straight after the one before finishes:
+  1  NoHW, NoHW, NoHW, ...       (no HEVC block at all)
+  2  Speed, then NoHW            (the block, then none)
+  3  Speed, then Speed
+and photograph the screen if it stops: 0.1.5 now prints RISC OS's own
+error and address first ("hevctest: signal ...").
 If a run says a phase "didn't finish", restart before running anything
 else; if the machine locks up, switch it off and on again.
 

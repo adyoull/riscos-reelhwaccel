@@ -1,5 +1,22 @@
 # Changes
 
+## HEVCTest 0.1.5: whose is the EMT trap? (test zip, 2026-10-02)
+
+HEVCTest 0.1.4 on a Pi 4: every picture right; converting the 60 1080p
+pictures 14 cs with cacheable frames against 174 before (2.3 ms a
+picture; uncached, with the NEON conversion, 40 cs); 1080p decoding at
+222-261 pictures a second; Repeat fine again. But hevctest started from
+the Filer straight after another Obey file stopped once more with
+"EMT trap", never within one Obey file.
+
+- hevctest -q: starts, writes a line, stops, without the HEVC block; Obey
+  file NoHW (ResultN). The ReadMe asks for NoHW after NoHW, NoHW after
+  Speed, Speed after Speed: if NoHW after NoHW fails too, it isn't
+  hevcdec's.
+- On an exception, hevctest prints UnixLib's __ul_errbuf (RISC OS's
+  error number, message and pc) before the backtrace.
+- hevcdec is unchanged (0.1.4).
+
 ## hevcdec 0.1.4 and HEVCTest 0.1.4: cacheable output frames, NEON conversion (test zip, 2026-10-02)
 
 HEVCTest 0.1.3 on a Pi 4: every picture of every clip right; nothing

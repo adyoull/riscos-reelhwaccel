@@ -1,0 +1,11 @@
+| NoHW: hevctest starts, writes a line to ResultN and stops (-q),
+| without touching the HEVC block: to see whether starting it again
+| straight after another run fails ("EMT trap") because of hevcdec or
+| whatever any GCCSDK program does. Adds to ResultN.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 32768K -max 32768K
+Run <Obey$Dir>.hevctest -q -o <Obey$Dir>.ResultN
