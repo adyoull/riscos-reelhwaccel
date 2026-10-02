@@ -256,6 +256,70 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     }
     cleaned("-d");
 
+    /* pipelined (-p): pictures given without waiting, phase 1 of one
+       alongside phase 2 of another (phase 2 made slow here) */
+    fake_hevc_reset();
+    fake_hevc.p2_ticks = 6;
+    o = run_app(&ret, trace, "-p");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && strstr(o, "(pipelined: -p)") &&
+          !fake_hevc.ref_errors && !fake_hevc.unknown_pictures && fake_hevc.phase2s == nmap && fake_hevc.overlaps > 0 &&
+          !fake_hevc.evictions, "hevctest -p %s (%d): %d references wrong, %d unknown, %d phase 2s, %d overlaps:\n%s",
+          trace, ret, fake_hevc.ref_errors, fake_hevc.unknown_pictures, fake_hevc.phase2s, fake_hevc.overlaps, o);
+    cleaned("-p");
+    fake_hevc_reset();                          /* five pictures given ahead, phase 2 slow: more pictures */
+    fake_hevc.p2_ticks = 9;                     /* through phase 1 than PU/coefficient buffer sets */
+    o = run_app(&ret, trace, "-P 5");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors &&
+          fake_hevc.phase2s == nmap && fake_hevc.overlaps > 0,
+          "hevctest -P 5 %s (%d): %d references wrong, %d phase 2s, %d overlaps:\n%s", trace, ret, fake_hevc.ref_errors,
+          fake_hevc.phase2s, fake_hevc.overlaps, o);
+    cleaned("-P 5");
+    fake_hevc_reset();                          /* converting a picture still being decoded waits for it */
+    fake_hevc.p2_ticks = 6;
+    o = run_app(&ret, trace, "-p -w");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly"), "hevctest -p -w (%d):\n%s", ret, o);
+    cleaned("-p -w");
+    fake_hevc_reset();                          /* and phase 1 slow */
+    fake_hevc.p1_ticks = 5;
+    fake_hevc.p2_ticks = 2;
+    o = run_app(&ret, trace, "-p -t");
+    CHECK(ret == 0 && strstr(o, "OK - timed") && fake_hevc.phase2s == nmap, "hevctest -p -t (%d, %d phase 2s):\n%s", ret,
+          fake_hevc.phase2s, o);
+    cleaned("-p -t");
+    fake_hevc_reset();                          /* phase 1 runs out of buffer once, pipelined */
+    fake_hevc.p1_exhaust = 1;
+    fake_hevc.p2_ticks = 4;
+    o = run_app(&ret, trace, "-p -c 5");
+    CHECK(ret == 0 && strstr(o, "run again (buffers grown) 1 times") && strstr(o, "Result: OK"),
+          "hevctest -p, PU exhausted once (%d):\n%s", ret, o);
+    cleaned("-p PU exhausted");
+    fake_hevc_reset();                          /* phase 2 never finishes, pipelined: said, memory left */
+    fake_hevc.p2_hang = 1;
+    o = run_app(&ret, trace, "-p -c 4 -n");
+    CHECK(ret == 1 && strstr(o, "Phase 2 didn't finish") && fake_hevc.left && fake_hevc_live() > 0,
+          "hevctest -p, phase 2 hangs (%d, left %d):\n%s", ret, fake_hevc.left, o);
+    fake_hevc_reset();
+    fake_hevc.p2_ticks = 6;                     /* blocking, with slow phases: as before */
+    fake_hevc.p1_ticks = 3;
+    o = run_app(&ret, trace, "-c 6");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && fake_hevc.overlaps == 0,
+          "hevctest, slow phases, not pipelined (%d, %d overlaps):\n%s", ret, fake_hevc.overlaps, o);
+    cleaned("slow phases");
+    if (strstr(trace, "slices")) {              /* a slice refused, pipelined */
+        int ndone = -1, nall = -1;
+        const char *q;
+        fake_hevc_reset();
+        fake_hevc.quiet = 1;
+        fake_hevc.p2_ticks = 4;
+        o = run_app(&ret, trace, "-p -n -x 2");
+        q = strstr(o, " pictures decoded in");
+        if (q) { while (q > o && q[-1] != '\n') q--; sscanf(q, "%d of %d", &ndone, &nall); }
+        CHECK(ret == 1 && strstr(o, "Picture 2 (poc") && strstr(o, "Slice 1:") && !strstr(o, "free decode env") &&
+              nall == 12 && ndone >= 12 - 5, "hevctest -p, a slice refused (%d, %d of %d):\n%s", ret, ndone, nall, o);
+        fake_hevc.fails = 0;
+        cleaned("-p a slice refused");
+    }
+
     fake_hevc_reset();                          /* -q: starts and stops, the block untouched */
     o = run_app(&ret, trace, "-q");
     CHECK(ret == 0 && strstr(o, "started and wrote this (-q") && !strstr(o, "Trace:") && fake_hevc.opens == 0,

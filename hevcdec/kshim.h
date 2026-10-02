@@ -86,12 +86,13 @@ struct device { int unused; };
 enum dma_data_direction { DMA_TO_DEVICE = 1 };
 void *hevcdec_dma_alloc(size_t size, dma_addr_t *addr);
 void hevcdec_dma_free(void *ptr);
-dma_addr_t hevcdec_dma_map(const void *ptr, size_t size);    /* a copy the block can read */
+dma_addr_t hevcdec_dma_map(const void *ptr, size_t size);    /* a copy the block can read, */
+void hevcdec_dma_unmap(dma_addr_t a);                         /* kept until it's unmapped */
 #define dma_alloc_attrs(d, size, addr, gfp, attrs) hevcdec_dma_alloc((size), (addr))
 #define dma_free_attrs(d, size, ptr, addr, attrs)  hevcdec_dma_free(ptr)
 #define dma_map_single(d, ptr, size, dir)          hevcdec_dma_map((ptr), (size))
 #define dma_mapping_error(d, a)                    ((a) == 0)
-#define dma_unmap_single(d, a, size, dir)          ((void)0)
+#define dma_unmap_single(d, a, size, dir)          hevcdec_dma_unmap(a)
 
 /* ---- videobuf2 / mem2mem / media requests: hevcdec.c's picture ---- */
 struct media_request { int unused; };

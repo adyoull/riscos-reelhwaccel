@@ -1,0 +1,18 @@
+| Pipelined: the clips as Test does, but each picture given to the block
+| without waiting (-p: checked while the block decodes the next); then
+| the 1080p clip timed pipelined, and with four pictures given ahead
+| (-P 4), to compare with Speed. Reports to ResultP.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 32768K -max 32768K
+Remove <Obey$Dir>.ResultP
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.slices.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.nowpp.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.odd.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -p -t -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -P 4 -t -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd.trace

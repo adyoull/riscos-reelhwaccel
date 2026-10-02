@@ -90,9 +90,15 @@ struct rpivid_dev {
     unsigned long max_clock_rate;
     int cache_align;
     void *hw;                            /* hevcdec's (hevcdec_hw.h) */
-    /* the callbacks waiting for each phase's completion */
+    /* each phase: claims waiting (first come first served), whether one is
+       running, its completion callback (armed when it starts), and when it
+       started; phase 1 also its allowance (a claim granted only while one
+       of the PU/coefficient buffer sets is free: phase 2 gives one back) */
+    struct rpivid_hw_irq_ent *q1, *q2;
+    int busy1, busy2, enable1;
     rpivid_irq_callback p1_cb, p2_cb;
     void *p1_v, *p2_v;
+    unsigned int t1, t2;
 };
 
 extern const struct rpivid_dec_ops rpivid_dec_ops_h265;

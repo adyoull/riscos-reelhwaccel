@@ -4,9 +4,9 @@
  * those of Raspberry Pi Linux's rpivid driver (rpivid_hw.h; facts, no code
  * copied). Here registers go through hevcdec's hardware layer (writes
  * gathered until the one that starts a phase), and there are no
- * interrupts: a claim runs at once, and a phase's completion callback is
- * kept until hevcdec.c sees the phase's bit in the interrupt control
- * register (polled). Part of riscos-reelhwaccel. GPL version 2.
+ * interrupts: claims are queued and granted by hevcdec.c, and a phase's
+ * completion callback is kept until hevcdec.c sees the phase's bit in the
+ * interrupt control register (polled). Part of riscos-reelhwaccel. GPL version 2.
  */
 #ifndef HEVCDEC_RPIVID_HW_H
 #define HEVCDEC_RPIVID_HW_H
@@ -111,13 +111,20 @@ static inline void apb_write_vc_len(const struct rpivid_dev *const dev, const un
     apb_write(dev, offset, (x + 63) >> 6);
 }
 
-/* claims: one decode at a time, so a claim is granted at once */
-static inline void rpivid_hw_irq_active1_enable_claim(struct rpivid_dev *dev, int n) { (void)dev; (void)n; }
+/* claims (hevcdec.c): a phase's claim is granted when that phase is free
+   (and for phase 1 while its allowance lasts), in the order claimed; the
+   granted callback starts the phase and arms its completion callback,
+   which hevcdec.c runs when it sees the phase's bit in the interrupt
+   control register (polled). A claim whose callback doesn't start the
+   phase is let go of at once. Work for a "thread" is done there and then. */
+void hevcdec_claim(struct rpivid_dev *dev, int phase, struct rpivid_hw_irq_ent *ient, rpivid_irq_callback cb, void *ctx);
+void hevcdec_enable1(struct rpivid_dev *dev, int n);
+
+static inline void rpivid_hw_irq_active1_enable_claim(struct rpivid_dev *dev, int n) { hevcdec_enable1(dev, n); }
 static inline void rpivid_hw_irq_active1_claim(struct rpivid_dev *dev, struct rpivid_hw_irq_ent *ient,
                                                rpivid_irq_callback ready_cb, void *ctx)
 {
-    (void)ient;
-    ready_cb(dev, ctx);
+    hevcdec_claim(dev, 1, ient, ready_cb, ctx);
 }
 static inline void rpivid_hw_irq_active1_irq(struct rpivid_dev *dev, struct rpivid_hw_irq_ent *ient,
                                              rpivid_irq_callback irq_cb, void *ctx)
@@ -135,8 +142,7 @@ static inline void rpivid_hw_irq_active1_thread(struct rpivid_dev *dev, struct r
 static inline void rpivid_hw_irq_active2_claim(struct rpivid_dev *dev, struct rpivid_hw_irq_ent *ient,
                                                rpivid_irq_callback ready_cb, void *ctx)
 {
-    (void)ient;
-    ready_cb(dev, ctx);
+    hevcdec_claim(dev, 2, ient, ready_cb, ctx);
 }
 static inline void rpivid_hw_irq_active2_irq(struct rpivid_dev *dev, struct rpivid_hw_irq_ent *ient,
                                              rpivid_irq_callback irq_cb, void *ctx)

@@ -1,5 +1,36 @@
 # Changes
 
+## hevcdec 0.1.5 and HEVCTest 0.1.6: the two phases overlapped (test zip, 2026-10-02)
+
+HEVCTest 0.1.5 on a Pi 4: all right. The EMT trap on a quick start from
+the Filer happens with NoHW too (no HEVC block, no hevcdec): it's
+UnixLib's / ARMEABISupport's stack-guard handling at start-up (the abort
+is the stack probe in __riscosify), reported to riscos-unixlib.
+
+- hevcdec: the block's phase 1 of one picture can run alongside phase 2
+  of another, as rpivid_h265.c is written for. Claims are now queued and
+  granted by hevcdec (one phase 1 and one phase 2 at a time, in order;
+  phase 1 only while one of the 3 PU/coefficient buffer sets is free,
+  phase 2 giving one back), and the polling moves whichever phase
+  finished on to the next claim.
+- hevcdec_config.pipelined: hevcdec_decode returns once the picture is
+  given to the block; hevcdec_frame_wait for a picture, hevcdec_finish
+  for all; converting a picture still being decoded waits for it.
+  Without it, as before. hevcdec_stats.cs_wait.
+- Each picture's phase 1 command list now has its own buffer until rpivid
+  unmaps it, and the slices go through a ring of 3 buffers (phase 1
+  reads a picture's last slice from there): with one of each, the next
+  picture overwrote them while phase 1 still read them.
+- HEVCTest: -p (each picture checked while the block decodes the next),
+  -P n (n pictures ahead); Obey file Pipelined (ResultP).
+- The fake HEVC block runs its phases as the Pi does: started by their
+  last register write, finished later, one of each at a time, reading
+  its command list and bitstream as it finishes, and checking that no
+  phase 1 writes buffers a phase 2 is still to read. Mutations caught:
+  no phase 1 allowance, a phase started while busy, one slice buffer,
+  one command list, no limit on pictures given, pipelining ignored,
+  converting without waiting.
+
 ## HEVCTest 0.1.5: whose is the EMT trap? (test zip, 2026-10-02)
 
 HEVCTest 0.1.4 on a Pi 4: every picture right; converting the 60 1080p

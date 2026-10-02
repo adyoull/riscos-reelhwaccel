@@ -15,9 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
- * 0.1.4: 8-bit 4:2:0 only, one picture at a time (each hevcdec_decode
- * waits for both phases), output frames cacheable (unless the config
- * says not), converted with NEON. Streams without scaling
+ * 0.1.5: 8-bit 4:2:0 only; output frames cacheable (unless the config
+ * says not), converted with NEON; pictures one at a time, or pipelined
+ * (config.pipelined: hevcdec_decode returns at once, hevcdec_frame_wait). Streams without scaling
  * lists are given flat ones (the block needs its factors loaded).
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.4"
+#define HEVCDEC_VERSION "0.1.5"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -42,6 +42,10 @@ typedef struct {
     int width, height;          /* the largest picture to come (frames are made this size) */
     int bit_depth;              /* 8 */
     int cached_frames;          /* 1 (default): output frames cacheable, much quicker to read */
+    int pipelined;              /* 0 (default): hevcdec_decode waits for its picture. 1: it returns
+                                   once the picture is given to the block (hevcdec_frame_wait for it),
+                                   so the block decodes while the program works (phase 1 of the next
+                                   picture alongside phase 2 of the last) */
     void (*log)(void *handle, const char *text);
     void *log_handle;
 } hevcdec_config;
@@ -65,6 +69,7 @@ typedef struct {
     unsigned pictures, phase1_retries;
     unsigned cs_phase1, cs_phase2;      /* waiting for each phase, centiseconds in all */
     unsigned cs_cache;                  /* cleaning and invalidating cached frames before reading */
+    unsigned cs_wait;                   /* the program waiting for the block, in all */
     int cached_frames;                  /* the frames are cacheable */
     /* buffers the block wrote past the end of (each has a guard area after
        it, so no harm done), the most bytes past any, and which that was */
@@ -80,10 +85,18 @@ const char *hevcdec_open_error(void);
    if there's no memory. Frames go with hevcdec_close. */
 hevcdec_frame *hevcdec_frame_new(hevcdec *d);
 
-/* Decodes one picture into f, waiting for the block. HEVCDEC_OK, or
-   HEVCDEC_ERROR (hevcdec_error; the decoder can carry on with the next
+/* Decodes one picture into f: waiting for the block, or (pipelined) only
+   until it's given to it. f may be a frame still being decoded or one a
+   later picture no longer refers to (it's waited for first). HEVCDEC_OK,
+   or HEVCDEC_ERROR (hevcdec_error; the decoder can carry on with the next
    IRAP picture), or HEVCDEC_UNSUPPORTED. */
 int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uint64_t number);
+
+/* Waits for f's picture (pipelined): HEVCDEC_OK when it's decoded, or
+   HEVCDEC_ERROR (the block failed it, or the decoder stopped). */
+int hevcdec_frame_wait(hevcdec *d, hevcdec_frame *f);
+/* Waits for every picture given (before a seek, say) */
+int hevcdec_finish(hevcdec *d);
 
 /* Part of the frame's picture as planar 8-bit 4:2:0: w x h from (x, y) in
    luma samples (the SPS's output window; x and y even), U and V

@@ -43,11 +43,27 @@ static int npend, opened;
 static struct { void *p, *ram, *synced; size_t n; int cached; } allocs[NALLOC];
 static struct { uint64_t addr; uint32_t poc; } framepoc[NFRAMEPOC];
 static int nframepoc;
-/* phase 1's findings, for phase 2 */
+/* phase 1's findings for the picture in hand (pic_hash ... factors_wrong),
+   kept for its phase 2 in a record found by its PU buffer */
 static uint32_t pic_hash;
 static int have_hash;
 static struct { unsigned dpb, poc; } refs[64];
 static int nrefs;
+#define NRECS 8
+static struct {
+    int used;                            /* phase 1 done, phase 2 not yet */
+    uint64_t pu, coeff;
+    uint32_t hash;
+    int have_hash, nrefs, factors_wrong;
+    struct { unsigned dpb, poc; } refs[64];
+} recs[NRECS];
+/* The phases run as on the Pi: started by their last register write, and
+   finished some time later (here: a number of reads of the interrupt
+   control register), each one at a time; what phase 1 reads (its command
+   list, the bitstream) is read as it finishes, so memory changed while it
+   runs shows. Registers as they were when each started. */
+static uint32_t s1[NREG], s2[NREG];
+static int p1_busy, p1_left, p2_busy, p2_left, p2_rec;
 static fake_hevc_picture_fn picture_fn;
 /* The scaling factors (0x2000-0x2FDF): as on the Pi 4 (HEVCTest 0.1 and
    0.1.1), the block uses them for every picture and keeps them from one
@@ -71,6 +87,8 @@ void fake_hevc_reset(void)
     memset(regs, 0, sizeof regs);
     ictrl = 0x44;                        /* (reset value: both enables set) */
     npend = 0; opened = 0; nframepoc = 0; have_hash = 0; nrefs = 0;
+    memset(recs, 0, sizeof recs);
+    p1_busy = p2_busy = 0;
     memset(&fake_hevc, 0, sizeof fake_hevc);
 }
 
@@ -102,11 +120,11 @@ uint32_t fake_hevc_hash(const uint8_t *p, size_t n)
 
 /* ---- phase 1: the command list ---- */
 
-static void phase1(void)
+static void phase1_done(void)
 {
     const uint32_t *cmd;
-    uint32_t n = regs[0x70 / 4];                         /* CFNUM */
-    uint64_t base = (uint64_t)regs[0x6C / 4] << 6;       /* CFBASE */
+    uint32_t n = s1[0x70 / 4];                         /* CFNUM */
+    uint64_t base = (uint64_t)s1[0x6C / 4] << 6;       /* CFBASE */
     uint32_t bfbase = 0, bfnum = 0, slicecmds = 0, nmsg = 0, nfactors = 0;
     uint32_t msgs[512];
     fake_hevc.phase1s++;
@@ -114,7 +132,7 @@ static void phase1(void)
     nrefs = 0;
     CHECK(n > 0 && n < 1000000, "phase 1 with %u commands", (unsigned)n);
     if (!(cmd = mem(base, (size_t)n * 8, "the command list"))) return;
-    CHECK(regs[0x50 / 4] && regs[0x58 / 4] && regs[0x54 / 4] && regs[0x5C / 4], "phase 1 without PU/coeff buffers");
+    CHECK(s1[0x50 / 4] && s1[0x58 / 4] && s1[0x54 / 4] && s1[0x5C / 4], "phase 1 without PU/coeff buffers");
     for (uint32_t i = 0; i < n; i++) {
         uint32_t a = cmd[2 * i], v = cmd[2 * i + 1];
         int ok = a < 0x80 || (a >= 0x1000 && a < 0x10A0) || (a >= 0x2000 && a < 0x2FE0) || (a >= 0x4000 && a < 0x4800);
@@ -155,11 +173,34 @@ static void phase1(void)
         regs[0x74 / 4] = n - 1;
         regs[0x38 / 4] = 16;                             /* STATUS_PU_EXHAUSTED */
     } else {
+        int k;
         regs[0x74 / 4] = n;                              /* CFSTATUS = CFNUM: done */
         regs[0x38 / 4] = 0;
+        for (k = 0; k < NRECS && recs[k].used; k++) {}
+        CHECK(k < NRECS, "more than %d pictures between phase 1 and phase 2", NRECS);
+        if (k < NRECS) {                                 /* (kept for the picture's phase 2) */
+            recs[k].used = 1;
+            recs[k].pu = (uint64_t)s1[0x50 / 4] << 6;
+            recs[k].coeff = (uint64_t)s1[0x58 / 4] << 6;
+            recs[k].hash = pic_hash;
+            recs[k].have_hash = have_hash;
+            recs[k].nrefs = nrefs;
+            recs[k].factors_wrong = factors_wrong;
+            memcpy(recs[k].refs, refs, sizeof refs);
+        }
     }
-    if (fake_hevc.p1_hang) return;
     if (ictrl & (1u << 2)) ictrl |= 1u << 0;            /* ACTIVE1 */
+}
+
+static void phase1_start(void)
+{
+    CHECK(!p1_busy, "phase 1 started while phase 1 is running");
+    memcpy(s1, regs, sizeof regs);
+    for (int k = 0; k < NRECS; k++)
+        CHECK(!recs[k].used || (recs[k].pu != (uint64_t)s1[0x50 / 4] << 6 && recs[k].coeff != (uint64_t)s1[0x58 / 4] << 6),
+              "phase 1 writing PU/coefficient buffers (&%llx) whose phase 2 hasn't run", (unsigned long long)recs[k].pu);
+    p1_busy = 1;
+    p1_left = fake_hevc.p1_ticks > 0 ? fake_hevc.p1_ticks : 1;
 }
 
 /* ---- phase 2: the picture ---- */
@@ -172,28 +213,49 @@ static uint32_t poc_of(uint64_t addr, int *found)
     return 0;
 }
 
-static void phase2(void)
+static void phase2_start(void)
 {
-    uint64_t y = (uint64_t)regs[0x8018 / 4] << 6, c = (uint64_t)regs[0x8020 / 4] << 6;
-    uint32_t col = regs[0x801C / 4] << 6, size = regs[0x802C / 4], poc = regs[0x8040 / 4] & 0xFFFF;
+    int k;
+    CHECK(!p2_busy, "phase 2 started while phase 2 is running");
+    memcpy(s2, regs, sizeof regs);
+    for (k = 0; k < NRECS; k++)
+        if (recs[k].used && recs[k].pu == (uint64_t)s2[0x8000 / 4] << 6) break;
+    CHECK(k < NRECS && recs[k].coeff == (uint64_t)s2[0x8008 / 4] << 6,
+          "phase 2 reads PU/coefficient buffers (&%llx) no finished phase 1 wrote",
+          (unsigned long long)((uint64_t)s2[0x8000 / 4] << 6));
+    p2_rec = k < NRECS ? k : -1;
+    if (p2_rec >= 0)                                     /* each reference holds the right picture, now */
+        for (int i = 0; i < recs[k].nrefs; i++) {
+            int found;
+            uint64_t ra = (uint64_t)s2[(0x9000 + 16 * recs[k].refs[i].dpb) / 4] << 6;
+            uint32_t rp = poc_of(ra, &found);
+            if (!found || rp != recs[k].refs[i].poc) {
+                fake_hevc.ref_errors++;
+                CHECK(0, "reference DPB %u: frame &%llx holds poc %u%s, not %u", recs[k].refs[i].dpb,
+                      (unsigned long long)ra, (unsigned)rp, found ? "" : " (nothing)", (unsigned)recs[k].refs[i].poc);
+            }
+        }
+    p2_busy = 1;
+    p2_left = fake_hevc.p2_ticks > 0 ? fake_hevc.p2_ticks : 1;
+}
+
+static void phase2_done(void)
+{
+    uint64_t y = (uint64_t)s2[0x8018 / 4] << 6, c = (uint64_t)s2[0x8020 / 4] << 6;
+    uint32_t col = s2[0x801C / 4] << 6, size = s2[0x802C / 4], poc = s2[0x8040 / 4] & 0xFFFF;
     int w = (int)(size & 0xFFFF), h = (int)(size >> 16), pw = 0, ph = 0;
     const uint8_t *py = NULL, *pu = NULL, *pv = NULL;
     uint8_t *out;
     fake_hevc.phase2s++;
-    CHECK(regs[0x8000 / 4] == regs[0x50 / 4] && regs[0x8008 / 4] == regs[0x58 / 4],
-          "phase 2 reads other PU/coeff buffers than phase 1 wrote");
-    CHECK(regs[0x8024 / 4] == regs[0x801C / 4] && c > y && c - y < col, "output planes: Y &%llx, C &%llx, column %u",
-          (unsigned long long)y, (unsigned long long)c, (unsigned)col);
-    for (int i = 0; i < nrefs; i++) {                   /* each reference holds the right picture */
-        int found;
-        uint64_t ra = (uint64_t)regs[(0x9000 + 16 * refs[i].dpb) / 4] << 6;
-        uint32_t rp = poc_of(ra, &found);
-        if (!found || rp != refs[i].poc) {
-            fake_hevc.ref_errors++;
-            CHECK(0, "reference DPB %u: frame &%llx holds poc %u%s, not %u", refs[i].dpb, (unsigned long long)ra,
-                  (unsigned)rp, found ? "" : " (nothing)", (unsigned)refs[i].poc);
-        }
+    have_hash = 0; factors_wrong = 0;
+    if (p2_rec >= 0) {                                   /* (its phase 1's findings) */
+        pic_hash = recs[p2_rec].hash;
+        have_hash = recs[p2_rec].have_hash;
+        factors_wrong = recs[p2_rec].factors_wrong;
+        recs[p2_rec].used = 0;
     }
+    CHECK(s2[0x8024 / 4] == s2[0x801C / 4] && c > y && c - y < col, "output planes: Y &%llx, C &%llx, column %u",
+          (unsigned long long)y, (unsigned long long)c, (unsigned)col);
     if (!(out = mem(y, (size_t)col * (size_t)((w + 127) / 128), "the output frame"))) return;
     if (have_hash && picture_fn && picture_fn(pic_hash, &py, &pu, &pv, &pw, &ph) == 0) {
         int cw = (pw + 1) / 2, ch = (ph + 1) / 2;
@@ -229,7 +291,6 @@ static void phase2(void)
         }
     }
     evict_dirty();
-    if (fake_hevc.p2_hang) return;
     if (ictrl & (1u << 6)) ictrl |= 1u << 4;            /* ACTIVE2 */
 }
 
@@ -268,8 +329,8 @@ void hevcdec_hw_flush(void *hw)
         uint32_t o = pend[2 * i], v = pend[2 * i + 1];
         regs[o / 4] = v;
         fake_hevc.writes++;
-        if (o == 0x6C) phase1();                         /* CFBASE: phase 1 starts */
-        if (o == 0x8010) phase2();                       /* NUMROWS: phase 2 starts */
+        if (o == 0x6C) phase1_start();                   /* CFBASE: phase 1 starts */
+        if (o == 0x8010) phase2_start();                 /* NUMROWS: phase 2 starts */
     }
     npend = 0;
 }
@@ -280,7 +341,14 @@ uint32_t hevcdec_hw_read(void *hw, unsigned int offset)
     return regs[offset / 4];
 }
 
-uint32_t hevcdec_hw_ictrl(void *hw) { (void)hw; return ictrl; }
+uint32_t hevcdec_hw_ictrl(void *hw)              /* (time passes: the phases running get on) */
+{
+    (void)hw;
+    if (p1_busy && p2_busy) fake_hevc.overlaps++;
+    if (p2_busy && !fake_hevc.p2_hang && --p2_left <= 0) { p2_busy = 0; phase2_done(); }
+    if (p1_busy && !fake_hevc.p1_hang && --p1_left <= 0) { p1_busy = 0; phase1_done(); }
+    return ictrl;
+}
 
 void hevcdec_hw_ictrl_write(void *hw, uint32_t v)
 {

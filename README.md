@@ -58,7 +58,7 @@ showed on a Raspberry Pi 4.
   HEVC block answers, and its registers (30-bit, addresses in 64-byte
   units), contiguous memory and interrupt (GIC 130, device 34) all work
   from RISC OS.
-- **`hevcdec/`** (0.1.4): the HEVC decoder. A stateless
+- **`hevcdec/`** (0.1.5): the HEVC decoder. A stateless
   decoder, as Linux's: the caller parses the stream (FFmpeg's HEVC
   decoder) and gives each picture as the V4L2 stateless HEVC controls
   (`hevc_ctrls.h`) with its slices; hevcdec builds the block's commands
@@ -81,7 +81,9 @@ On a Pi 4 (HEVCTest 0.1.2) every picture of every clip comes out
 exactly as FFmpeg decodes it, 1080p at 230 pictures a second, now that
 the block's scaling factors are always loaded (hevcdec 0.1.2). 0.1.4
 makes the output frames cacheable and converts them with NEON (it took
-29 ms a 1080p picture from memory that isn't cacheable). Next: output
+29 ms a 1080p picture from memory that isn't cacheable). 0.1.5 overlaps
+the block's two phases and can decode while the program works
+(pipelined). Next: output
 frames that are quick to read (converting an uncached 1080p frame takes
 29 ms), 10-bit and 4K, and `hevc_hwdec` in FFmpeg and Reel.
 

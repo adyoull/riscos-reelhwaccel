@@ -76,6 +76,7 @@ typedef struct {
 
 static pic_t *pics;
 static int npics;
+static int shown;                         /* (wrong pictures described: the first ten) */
 
 /* the trace into pics[] (pointing into the loaded file) */
 static int read_trace(const char *name, uint8_t **file)
@@ -149,16 +150,51 @@ static int read_trace(const char *name, uint8_t **file)
     return 0;
 }
 
+/* a decoded picture converted (timed), saved (-d) and checked: 0 if it's
+   FFmpeg's */
+static int check_one(hevcdec *d, const pic_t *p, hevcdec_frame *f, uint8_t *const planes[3], const int strides[3],
+                     FILE *dump, int verbose, uint32_t *t_conv)
+{
+    int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2;
+    uint32_t t0 = now_cs(), a[3];
+    hevcdec_frame_to_i420(d, f, planes, strides, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
+    *t_conv += now_cs() - t0;
+    if (dump) {
+        for (int y = 0; y < (int)p->out_h; y++) fwrite(planes[0] + (size_t)y * strides[0], 1, p->out_w, dump);
+        for (int k = 1; k < 3; k++)
+            for (int y = 0; y < ch; y++) fwrite(planes[k] + (size_t)y * strides[k], 1, (size_t)cw, dump);
+    }
+    a[0] = adler(planes[0], (int)p->out_w, (int)p->out_h, strides[0]);
+    a[1] = adler(planes[1], cw, ch, strides[1]);
+    a[2] = adler(planes[2], cw, ch, strides[2]);
+    if (a[0] != p->crc[0] || a[1] != p->crc[1] || a[2] != p->crc[2]) {
+        if (++shown <= 10)
+            say("Picture %u (poc %d): Y %s, U %s, V %s (%08X %08X %08X, FFmpeg's %08X %08X %08X)\n",
+                (unsigned)p->number, (int)p->poc, a[0] == p->crc[0] ? "right" : "WRONG",
+                a[1] == p->crc[1] ? "right" : "WRONG", a[2] == p->crc[2] ? "right" : "WRONG", (unsigned)a[0],
+                (unsigned)a[1], (unsigned)a[2], (unsigned)p->crc[0], (unsigned)p->crc[1], (unsigned)p->crc[2]);
+        return 1;
+    }
+    if (verbose) say("Picture %u (poc %d): right\n", (unsigned)p->number, (int)p->poc);
+    return 0;
+}
+
 int probe_main(int argc, char **argv)
 {
     const char *name = NULL;
     int verbose = 0, keep_going = 0, timing = 0, count = 0, nframes = 17, r, i, wrong = 0, done = 0, fatal = 0;
     int flat = 0;                          /* -s: flat scaling lists given where the stream has none */
-    int overran = 0;
-    int uncached = 0;
-    int quick = 0;                         /* -q: start, write a line, stop (no decoding: the hardware untouched) */                      /* -u: output frames not cacheable (as before 0.1.4) */
+    int overran = 0;                       /* the block wrote past a buffer's end */
+    int uncached = 0;                      /* -u: output frames not cacheable (as before 0.1.4) */
+    int quick = 0;                         /* -q: start, write a line, stop (no decoding: the hardware untouched) */
+    int pipelined = 0;                     /* -p: pictures given to the block without waiting; each checked
+                                              while the block decodes the next */
+    int lag = 1;                           /* -P n: n pictures given and not yet checked (-p: 1) */
+    int pend[MAX_FRAMES], pend_slot[MAX_FRAMES], npend = 0;
+    uint32_t t_all = 0;                    /* the whole run, decoding and checking */
     FILE *dump = NULL;                     /* -d: every picture decoded, 8-bit 4:2:0, in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
+    int no_wait = 0;                       /* (host tests: -w, the picture converted without waiting first) */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
     int strides[3];
     hevcdec *d = NULL;
@@ -168,7 +204,7 @@ int probe_main(int argc, char **argv)
     uint32_t t0, t_dec = 0, t_conv = 0;
     hevcdec_stats st;
 
-    out2 = NULL; pics = NULL; npics = 0;
+    out2 = NULL; pics = NULL; npics = 0; shown = 0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) out2 = fopen(argv[++i], "a");
         else if (!strcmp(argv[i], "-v")) verbose = 1;
@@ -179,11 +215,14 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-s")) flat = 1;
         else if (!strcmp(argv[i], "-u")) uncached = 1;
         else if (!strcmp(argv[i], "-q")) quick = 1;
+        else if (!strcmp(argv[i], "-p")) pipelined = 1;
+        else if (!strcmp(argv[i], "-P") && i + 1 < argc) pipelined = 1, lag = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
             if (!(dump = fopen(argv[++i], "wb"))) { printf("Can't write %s\n", argv[i]); return 1; }
         }
 #ifdef PROBE_TEST
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) spoil = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-w")) no_wait = 1;   /* (host tests: converting waits by itself) */
         else if (!strcmp(argv[i], "-z")) flat = 2;   /* (host tests: the flag without the lists) */
 #endif
         else if (!name) name = argv[i];
@@ -195,8 +234,8 @@ int probe_main(int argc, char **argv)
         if (dump) fclose(dump);
         return 0;
     }
-    if (!name || nframes < 2 || nframes > MAX_FRAMES || count < 0) {
-        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-u] [-q] [-d file] [-c count] [-f frames] trace\n");
+    if (!name || nframes < 2 || nframes > MAX_FRAMES || count < 0 || lag < 1 || lag >= nframes) {
+        printf("Usage: hevctest [-o file] [-v] [-n] [-t] [-s] [-u] [-p | -P n] [-q] [-d file] [-c count] [-f frames] trace\n");
         if (dump) fclose(dump);
         return 1;
     }
@@ -227,6 +266,7 @@ int probe_main(int argc, char **argv)
     }
     c.bit_depth = (int)pics[0].depth;
     if (uncached) c.cached_frames = 0;
+    c.pipelined = pipelined;
     if (verbose) c.log = log_line;
     t0 = now_cs();
     if ((r = hevcdec_open(&d, &c)) != HEVCDEC_OK) {
@@ -248,62 +288,75 @@ int probe_main(int argc, char **argv)
     planes[2] = malloc((size_t)strides[2] * ((c.height + 1) / 2));
     if (!planes[0] || !planes[1] || !planes[2]) { say("Out of memory\n"); goto out; }
 
-    for (i = 0; i < npics && !fatal; i++) {
-        pic_t *p = &pics[i];
-        hevcdec_picture hp;
-        int k, slot = -1;
-        /* a frame no reference of this picture is in */
-        for (k = 0; k < nframes && slot < 0; k++) {
-            int in_dpb = 0;
-            for (int e = 0; e < p->dec.num_active_dpb_entries; e++) in_dpb |= p->dec.dpb[e].timestamp == holds[k];
-            if (!in_dpb || !holds[k]) slot = k;
-        }
-        if (slot < 0) { say("Picture %u: no free frame (%d in use)\n", (unsigned)p->number, nframes); fatal = 1; break; }
-        hp.sps = &p->sps; hp.pps = &p->pps; hp.dec = &p->dec; hp.scaling = p->has_scaling ? &p->scaling : NULL;
-        hp.nslices = p->nslices; hp.slices = p->slices;
-        t0 = now_cs();
-        r = hevcdec_decode(d, &hp, frames[slot], p->number);
-        t_dec += now_cs() - t0;
-        holds[slot] = p->number;
-        if (r != HEVCDEC_OK) {
-            say("Picture %u (poc %d, %u slices): %s\n", (unsigned)p->number, (int)p->poc, (unsigned)p->nslices,
-                hevcdec_error(d));
-            wrong++;
-            if (!keep_going) fatal = 1;
-            continue;
-        }
-        done++;
-        if (timing) continue;
-        t0 = now_cs();
-        hevcdec_frame_to_i420(d, frames[slot], planes, strides, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
-        t_conv += now_cs() - t0;
-        if (dump) {
-            int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2, y;
-            for (y = 0; y < (int)p->out_h; y++) fwrite(planes[0] + (size_t)y * strides[0], 1, p->out_w, dump);
-            for (k = 1; k < 3; k++)
-                for (y = 0; y < ch; y++) fwrite(planes[k] + (size_t)y * strides[k], 1, (size_t)cw, dump);
-        }
-        {
-            int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2;
-            uint32_t a[3] = { adler(planes[0], (int)p->out_w, (int)p->out_h, strides[0]),
-                              adler(planes[1], cw, ch, strides[1]), adler(planes[2], cw, ch, strides[2]) };
-            if (a[0] != p->crc[0] || a[1] != p->crc[1] || a[2] != p->crc[2]) {
-                if (++wrong <= 10)
-                    say("Picture %u (poc %d): Y %s, U %s, V %s (%08X %08X %08X, FFmpeg's %08X %08X %08X)\n",
-                        (unsigned)p->number, (int)p->poc, a[0] == p->crc[0] ? "right" : "WRONG",
-                        a[1] == p->crc[1] ? "right" : "WRONG", a[2] == p->crc[2] ? "right" : "WRONG", (unsigned)a[0],
-                        (unsigned)a[1], (unsigned)a[2], (unsigned)p->crc[0], (unsigned)p->crc[1], (unsigned)p->crc[2]);
+    t_all = now_cs();
+    for (i = 0; i <= npics && !fatal; i++) {
+        int given = -1;                    /* this picture's frame, if it was given to the block */
+        if (i < npics) {
+            pic_t *p = &pics[i];
+            hevcdec_picture hp;
+            int k, slot = -1;
+            /* a frame no reference of this picture is in (nor the picture
+               given last, still to be checked: -p) */
+            for (k = 0; k < nframes && slot < 0; k++) {
+                int in_dpb = 0;
+                for (int e = 0; e < p->dec.num_active_dpb_entries; e++) in_dpb |= p->dec.dpb[e].timestamp == holds[k];
+                int pending = 0;
+                for (int q = 0; q < npend; q++) pending |= pend_slot[q] == k;
+                if ((!in_dpb || !holds[k]) && !pending) slot = k;
+            }
+            if (slot < 0) { say("Picture %u: no free frame (%d in use)\n", (unsigned)p->number, nframes); fatal = 1; break; }
+            hp.sps = &p->sps; hp.pps = &p->pps; hp.dec = &p->dec; hp.scaling = p->has_scaling ? &p->scaling : NULL;
+            hp.nslices = p->nslices; hp.slices = p->slices;
+            t0 = now_cs();
+            r = hevcdec_decode(d, &hp, frames[slot], p->number);
+            t_dec += now_cs() - t0;
+            holds[slot] = p->number;
+            if (r != HEVCDEC_OK) {
+                say("Picture %u (poc %d, %u slices): %s\n", (unsigned)p->number, (int)p->poc, (unsigned)p->nslices,
+                    hevcdec_error(d));
+                wrong++;
                 if (!keep_going) fatal = 1;
-            } else if (verbose) {
-                say("Picture %u (poc %d): right\n", (unsigned)p->number, (int)p->poc);
+            } else if (!pipelined) {
+                done++;
+                if (!timing && check_one(d, p, frames[slot], planes, strides, dump, verbose, &t_conv)) {
+                    wrong++;
+                    if (!keep_going) fatal = 1;
+                }
+            } else {
+                given = slot;
+            }
+        }
+        if (given >= 0) { pend[npend] = i; pend_slot[npend] = given; npend++; }
+        while (npend > (i < npics ? lag : 0)) {   /* the oldest picture given, waited for and checked */
+            pic_t *p = &pics[pend[0]];
+            int fs = pend_slot[0];
+            for (int q = 1; q < npend; q++) { pend[q - 1] = pend[q]; pend_slot[q - 1] = pend_slot[q]; }
+            npend--;
+            t0 = now_cs();
+            r = no_wait ? HEVCDEC_OK : hevcdec_frame_wait(d, frames[fs]);
+            t_dec += now_cs() - t0;
+            if (r != HEVCDEC_OK) {
+                say("Picture %u (poc %d, %u slices): %s\n", (unsigned)p->number, (int)p->poc, (unsigned)p->nslices,
+                    hevcdec_error(d));
+                wrong++;
+                if (!keep_going) fatal = 1;
+            } else {
+                done++;
+                if (!timing && check_one(d, p, frames[fs], planes, strides, dump, verbose, &t_conv)) {
+                    wrong++;
+                    if (!keep_going) fatal = 1;
+                }
             }
         }
     }
+    t_all = now_cs() - t_all;
     hevcdec_get_stats(d, &st);
     say("\n%d of %d pictures decoded in %u.%02u s (%u.%u a second); converting them %u cs\n", done, npics,
         (unsigned)(t_dec / 100), (unsigned)(t_dec % 100), t_dec ? (unsigned)(done * 100 / t_dec) : 0,
         t_dec ? (unsigned)(done * 1000 / t_dec % 10) : 0, (unsigned)t_conv);
-    say("hevcdec: phase 1 waited %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
+    say("In all %u.%02u s%s; the program waited for the block %u cs\n", (unsigned)(t_all / 100), (unsigned)(t_all % 100),
+        pipelined ? " (pipelined: -p)" : "", st.cs_wait);
+    say("hevcdec: phase 1 ran %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
         st.cs_phase2, st.phase1_retries);
     say("hevcdec: output frames %s%s", st.cached_frames ? "cacheable" : "not cacheable",
         st.cached_frames ? "" : uncached ? " (-u)\n" : " (no cache maintenance)\n");

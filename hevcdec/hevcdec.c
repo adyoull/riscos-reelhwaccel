@@ -31,6 +31,8 @@ struct hevcdec_frame {
     struct vb2_v4l2_buffer vb;           /* (first: rpivid_h265.c sees this) */
     int used;
     int cached;                          /* cacheable: invalidated before it's read */
+    int submitted;                       /* given to the block: decoded when vb.state is set */
+    char err[160];                       /* why the block failed it */
 };
 
 struct hevcdec {
@@ -58,13 +60,17 @@ struct hevcdec {
     struct v4l2_ctrl_hevc_scaling_matrix flat;
     char err[256];
     hevcdec_frame *frames[MAX_FRAMES];
-    struct vb2_v4l2_buffer src;          /* the slice being sent (a contiguous copy) */
-    size_t src_cap;
+    /* the slices sent, contiguous copies: a picture's last slice is read by
+       phase 1 from here, so a ring (as rpivid's bitstream copies), one a
+       picture, each free again once that picture's phase 1 is done */
+    struct vb2_v4l2_buffer srcs[RPIVID_P1BUF_COUNT];
+    size_t src_caps[RPIVID_P1BUF_COUNT];
+    unsigned src_next;
     struct vb2_v4l2_buffer *cur_src, *cur_dst;
     int job_state;                       /* trigger's verdict on the last slice sent */
-    void *cmd;                           /* phase 1's command list, copied for the block */
-    uint64_t cmd_bus;
-    size_t cmd_cap;
+    /* phase 1's command lists, each picture's copied for the block and kept
+       until rpivid unmaps it (its decode environment gone: phase 1 done) */
+    struct { void *p; uint64_t bus; size_t cap; int mapped; } cmds[RPIVID_DEC_ENV_COUNT];
     hevcdec_stats stats;
 };
 
@@ -169,16 +175,26 @@ void hevcdec_dma_free(void *ptr)
 dma_addr_t hevcdec_dma_map(const void *ptr, size_t size)
 {
     hevcdec *d = cur;
+    int k;
     if (!d) return 0;
-    if (size > d->cmd_cap) {
+    for (k = 0; k < RPIVID_DEC_ENV_COUNT && d->cmds[k].mapped; k++) {}
+    if (k == RPIVID_DEC_ENV_COUNT) { hevcdec_klog(0, "No command list free (%d mapped)", k); return 0; }
+    if (size > d->cmds[k].cap) {
         size_t cap = size < 65536 ? 65536 : size * 2;
-        if (d->cmd) dma_put(d, d->cmd);
-        d->cmd_cap = 0;
-        if (!(d->cmd = dma_get(d, cap, &d->cmd_bus, "phase 1's command list", 0))) return 0;
-        d->cmd_cap = cap;
+        if (d->cmds[k].p) dma_put(d, d->cmds[k].p);
+        d->cmds[k].cap = 0;
+        if (!(d->cmds[k].p = dma_get(d, cap, &d->cmds[k].bus, "a phase 1 command list", 0))) return 0;
+        d->cmds[k].cap = cap;
     }
-    memcpy(d->cmd, ptr, size);
-    return d->cmd_bus;
+    memcpy(d->cmds[k].p, ptr, size);
+    d->cmds[k].mapped = 1;
+    return d->cmds[k].bus;
+}
+
+void hevcdec_dma_unmap(dma_addr_t a)
+{
+    for (int k = 0; cur && k < RPIVID_DEC_ENV_COUNT; k++)
+        if (cur->cmds[k].mapped && cur->cmds[k].bus == a) { cur->cmds[k].mapped = 0; return; }
 }
 
 /* ---- kshim's videobuf2 / mem2mem: the picture being decoded ---- */
@@ -196,7 +212,16 @@ struct vb2_buffer *hevcdec_find_buffer(struct vb2_queue *q, uint64_t timestamp)
     return NULL;
 }
 
-void hevcdec_buf_done(struct vb2_v4l2_buffer *vb, enum vb2_buffer_state state) { if (vb) vb->state = (int)state; }
+void hevcdec_buf_done(struct vb2_v4l2_buffer *vb, enum vb2_buffer_state state)
+{
+    if (!vb) return;
+    vb->state = (int)state;
+    if (state == VB2_BUF_STATE_ERROR && cur)               /* (a frame: why, kept with it) */
+        for (int i = 0; i < MAX_FRAMES; i++)
+            if (cur->frames[i] && &cur->frames[i]->vb == vb)
+                snprintf(cur->frames[i]->err, sizeof cur->frames[i]->err, "%.150s",
+                         cur->err[0] ? cur->err : "The block failed the picture");
+}
 void hevcdec_job_done(struct v4l2_m2m_ctx *m2m, enum vb2_buffer_state state) { (void)m2m; if (cur) cur->job_state = (int)state; }
 struct vb2_v4l2_buffer *hevcdec_src_remove(struct v4l2_m2m_ctx *m2m) { (void)m2m; return cur ? cur->cur_src : NULL; }
 struct vb2_v4l2_buffer *hevcdec_dst_remove(struct v4l2_m2m_ctx *m2m) { (void)m2m; return cur ? cur->cur_dst : NULL; }
@@ -245,6 +270,7 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
     cur = d;
     d->dev.hw = d->hw;
     d->dev.cache_align = 64;
+    d->dev.enable1 = RPIVID_P2BUF_COUNT;     /* (phase 1 ahead of phase 2 by as many PU/coefficient buffer sets) */
     d->ctx.dev = &d->dev;
     d->ctx.fh.m2m_ctx = &d->m2m;
     /* the output: NV12 in 128-byte columns (V4L2_PIX_FMT_NV12_COL128): width
@@ -294,52 +320,121 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
     return fr;
 }
 
-/* runs the block until the frame is done (or the job failed): the two
-   phases' bits in the interrupt control register, phase 2's first */
-static int wait_done(hevcdec *d, hevcdec_frame *f)
+/* ---- the two phases: claims, completions (polled), waiting ---- */
+
+static void kick(struct rpivid_dev *dev, int ph)
 {
-    uint32_t t0 = hevcdec_hw_now_cs(), phase_t0 = t0;
-    while (!f->vb.state) {
-        uint32_t ictrl = hevcdec_hw_ictrl(d->hw);
-        int any = 0;
-        if (ictrl & (ARG_IC_ICTRL_ACTIVE1_INT_SET | ARG_IC_ICTRL_ACTIVE2_INT_SET))
-            hevcdec_hw_ictrl_write(d->hw, ictrl & ~ARG_IC_ICTRL_SET_ZERO_MASK);   /* (the latched bits cleared) */
-        if ((ictrl & ARG_IC_ICTRL_ACTIVE2_INT_SET) && d->dev.p2_cb) {
-            rpivid_irq_callback cb = d->dev.p2_cb;
-            d->dev.p2_cb = NULL;
-            d->stats.cs_phase2 += hevcdec_hw_now_cs() - phase_t0;
-            phase_t0 = hevcdec_hw_now_cs();
-            cb(&d->dev, d->dev.p2_v);
-            any = 1;
-        }
-        if ((ictrl & ARG_IC_ICTRL_ACTIVE1_INT_SET) && d->dev.p1_cb) {
-            rpivid_irq_callback cb = d->dev.p1_cb;
-            int before = (int)d->ctx.p2idx;
-            d->dev.p1_cb = NULL;
-            d->stats.cs_phase1 += hevcdec_hw_now_cs() - phase_t0;
-            phase_t0 = hevcdec_hw_now_cs();
-            cb(&d->dev, d->dev.p1_v);
-            if ((int)d->ctx.p2idx == before && d->dev.p1_cb) d->stats.phase1_retries++;   /* (buffers grown, phase 1 again) */
-            any = 1;
-        }
-        if (!any && !d->dev.p1_cb && !d->dev.p2_cb && !f->vb.state)
-            return fail(d, "The decode stopped: no phase running");
-        if (!any && hevcdec_hw_now_cs() - phase_t0 > WAIT_CS) {
-            /* the block may still be working (and writing to memory): nothing
-               more is given to it, and nothing it was given is freed */
-            int p1 = d->dev.p1_cb != NULL;
-            d->dead = 1;
-            d->dev.p1_cb = d->dev.p2_cb = NULL;
-            return fail(d, "Phase %d didn't finish in %d cs (ictrl &%08X, status &%08X): restart the machine before "
-                        "decoding again", p1 ? 1 : 2, WAIT_CS, (unsigned)ictrl,
-                        (unsigned)hevcdec_hw_read(d->hw, p1 ? RPI_STATUS : RPI_STATUS2));
-        }
+    for (;;) {
+        struct rpivid_hw_irq_ent **q = ph == 1 ? &dev->q1 : &dev->q2, *e = *q;
+        int *busy = ph == 1 ? &dev->busy1 : &dev->busy2;
+        if (*busy || !e || (ph == 1 && dev->enable1 <= 0)) return;
+        *q = e->next;
+        *busy = 1;
+        if (ph == 1) dev->enable1--;
+        if (ph == 1) { dev->p1_cb = NULL; dev->t1 = hevcdec_hw_now_cs(); }
+        else { dev->p2_cb = NULL; dev->t2 = hevcdec_hw_now_cs(); }
+        e->cb(dev, e->v);                                /* (starts the phase, arming its callback) */
+        if (!(ph == 1 ? dev->p1_cb : dev->p2_cb)) *busy = 0;   /* (didn't start: let go of) */
     }
-    return f->vb.state == VB2_BUF_STATE_DONE ? HEVCDEC_OK : fail(d, "%s", d->err[0] ? d->err : "The block failed the picture");
+}
+
+void hevcdec_claim(struct rpivid_dev *dev, int phase, struct rpivid_hw_irq_ent *ient, rpivid_irq_callback cb, void *v)
+{
+    struct rpivid_hw_irq_ent **q = phase == 1 ? &dev->q1 : &dev->q2;
+    ient->cb = cb;
+    ient->v = v;
+    ient->next = NULL;
+    while (*q) q = &(*q)->next;
+    *q = ient;
+    kick(dev, phase);
+}
+
+void hevcdec_enable1(struct rpivid_dev *dev, int n)
+{
+    dev->enable1 += n;
+    kick(dev, 1);
+}
+
+/* a phase seen finished: its callback (which may start it again: phase 1
+   with bigger buffers), then the next claim */
+static void finished(hevcdec *d, int ph)
+{
+    struct rpivid_dev *dev = &d->dev;
+    rpivid_irq_callback cb = ph == 1 ? dev->p1_cb : dev->p2_cb;
+    void *v = ph == 1 ? dev->p1_v : dev->p2_v;
+    uint32_t now = hevcdec_hw_now_cs();
+    if (ph == 1) { dev->p1_cb = NULL; d->stats.cs_phase1 += now - dev->t1; }
+    else { dev->p2_cb = NULL; d->stats.cs_phase2 += now - dev->t2; }
+    cb(dev, v);
+    if (ph == 1 && dev->p1_cb) { d->stats.phase1_retries++; dev->t1 = hevcdec_hw_now_cs(); return; }
+    if (ph == 2 && dev->p2_cb) { dev->t2 = hevcdec_hw_now_cs(); return; }
+    if (ph == 1) dev->busy1 = 0; else dev->busy2 = 0;
+    kick(dev, ph);
+}
+
+/* what's finished, done with; 0, or -1 if a phase has run too long (the
+   decoder is then dead: the block may still be at work, and writing to
+   memory, so nothing more is given to it and nothing it has is freed) */
+static int poll_phases(hevcdec *d)
+{
+    struct rpivid_dev *dev = &d->dev;
+    uint32_t ictrl = hevcdec_hw_ictrl(d->hw), now;
+    if (ictrl & (ARG_IC_ICTRL_ACTIVE1_INT_SET | ARG_IC_ICTRL_ACTIVE2_INT_SET))
+        hevcdec_hw_ictrl_write(d->hw, ictrl & ~ARG_IC_ICTRL_SET_ZERO_MASK);   /* (the latched bits cleared) */
+    if ((ictrl & ARG_IC_ICTRL_ACTIVE2_INT_SET) && dev->p2_cb) finished(d, 2);
+    if ((ictrl & ARG_IC_ICTRL_ACTIVE1_INT_SET) && dev->p1_cb) finished(d, 1);
+    now = hevcdec_hw_now_cs();
+    if ((dev->p1_cb && now - dev->t1 > WAIT_CS) || (dev->p2_cb && now - dev->t2 > WAIT_CS)) {
+        int p1 = dev->p1_cb && now - dev->t1 > WAIT_CS;
+        d->dead = 1;
+        dev->p1_cb = dev->p2_cb = NULL;
+        fail(d, "Phase %d didn't finish in %d cs (ictrl &%08X, status &%08X): restart the machine before "
+             "decoding again", p1 ? 1 : 2, WAIT_CS, (unsigned)ictrl,
+             (unsigned)hevcdec_hw_read(d->hw, p1 ? RPI_STATUS : RPI_STATUS2));
+        return -1;
+    }
+    return 0;
+}
+
+static int idle(const hevcdec *d)
+{
+    return !d->dev.busy1 && !d->dev.busy2 && !d->dev.q1 && !d->dev.q2;
+}
+
+/* polls until done(d, arg); HEVCDEC_OK, or HEVCDEC_ERROR (d->err) */
+static int wait_for(hevcdec *d, int (*done)(hevcdec *, void *), void *arg)
+{
+    uint32_t t0 = hevcdec_hw_now_cs();
+    int r = HEVCDEC_OK;
+    while (!done(d, arg)) {
+        if (d->dead || poll_phases(d)) { r = HEVCDEC_ERROR; break; }
+        if (!done(d, arg) && idle(d)) { r = fail(d, "The decode stopped: no phase running"); break; }
+    }
+    d->stats.cs_wait += hevcdec_hw_now_cs() - t0;
+    return r;
+}
+
+static int frame_finished(hevcdec *d, void *f) { (void)d; return !((hevcdec_frame *)f)->submitted || ((hevcdec_frame *)f)->vb.state; }
+static int room_for_one(hevcdec *d, void *a) { (void)a; return atomic_read(&d->ctx.p1out) < RPIVID_P1BUF_COUNT; }
+static int all_done(hevcdec *d, void *a) { (void)a; return idle(d); }
+
+int hevcdec_frame_wait(hevcdec *d, hevcdec_frame *f)
+{
+    if (wait_for(d, frame_finished, f) != HEVCDEC_OK) return HEVCDEC_ERROR;
+    if (!f->submitted) return HEVCDEC_OK;
+    if (f->vb.state != VB2_BUF_STATE_DONE) return fail(d, "%s", f->err[0] ? f->err : "The block failed the picture");
+    return HEVCDEC_OK;
+}
+
+int hevcdec_finish(hevcdec *d)
+{
+    return wait_for(d, all_done, NULL);
 }
 
 int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uint64_t number)
 {
+    struct vb2_v4l2_buffer *src;
+    size_t *cap_p;
     const struct v4l2_ctrl_hevc_sps *sps = pic->sps;
     const struct v4l2_ctrl_hevc_scaling_matrix *scaling = pic->scaling;
     if (d->dead) return fail(d, "The block didn't finish a picture: restart the machine before decoding again");
@@ -359,27 +454,39 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         sps = &d->sps_flat;
         scaling = &d->flat;
     }
+    /* the frame finished with (if it was being decoded), and room for one
+       more picture (as Linux's driver: each of rpivid's bitstream copies,
+       and so each of our slice buffers, free again) */
+    if (hevcdec_frame_wait(d, f) != HEVCDEC_OK && d->dead) return HEVCDEC_ERROR;
+    if (wait_for(d, room_for_one, NULL) != HEVCDEC_OK) return HEVCDEC_ERROR;
+    d->err[0] = 0;
+    src = &d->srcs[d->src_next];
+    cap_p = &d->src_caps[d->src_next];
+    d->src_next = (d->src_next + 1) % RPIVID_P1BUF_COUNT;
     f->used = 1;
+    f->submitted = 0;
+    f->err[0] = 0;
     f->vb.timestamp = number;
     f->vb.state = 0;
     for (unsigned i = 0; i < pic->nslices; i++) {
         const hevcdec_slice *sl = &pic->slices[i];
         struct rpivid_run run;
-        if (sl->size > d->src_cap) {
+        if (sl->size > *cap_p) {
             size_t cap = sl->size < 65536 ? 65536 : sl->size * 2;
-            if (d->src.vaddr) dma_put(d, d->src.vaddr);
-            d->src_cap = 0;
-            if (!(d->src.vaddr = dma_get(d, cap, &d->src.addr, "the slice buffer", 0)))
+            if (src->vaddr) dma_put(d, src->vaddr);
+            *cap_p = 0;
+            if (!(src->vaddr = dma_get(d, cap, &src->addr, "a slice buffer", 0)))
                 return fail(d, "No contiguous memory for a %u byte slice", (unsigned)sl->size);
-            d->src_cap = cap;
+            *cap_p = cap;
         }
-        memcpy(d->src.vaddr, sl->data, sl->size);
-        d->src.vb2_buf.num_planes = 1;
-        d->src.planes[0].length = (unsigned)d->src_cap;
-        d->src.planes[0].bytesused = (unsigned)sl->size;
-        d->src.flags = i + 1 < pic->nslices ? V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF : 0;
+        memcpy(src->vaddr, sl->data, sl->size);
+        src->vb2_buf.num_planes = 1;
+        src->planes[0].length = (unsigned)*cap_p;
+        src->planes[0].bytesused = (unsigned)sl->size;
+        src->flags = i + 1 < pic->nslices ? V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF : 0;
+        src->state = 0;
         memset(&run, 0, sizeof run);
-        run.src = &d->src;
+        run.src = src;
         run.dst = &f->vb;
         run.h265.slice_ents = 1;
         run.h265.sps = sps;
@@ -387,7 +494,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         run.h265.dec = pic->dec;
         run.h265.slice_params = sl->params;
         run.h265.scaling_matrix = scaling;
-        d->cur_src = &d->src;
+        d->cur_src = src;
         d->cur_dst = &f->vb;
         d->job_state = 0;
         rpivid_dec_ops_h265.setup(&d->ctx, &run);
@@ -395,21 +502,18 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         if (d->job_state == VB2_BUF_STATE_ERROR || f->vb.state == VB2_BUF_STATE_ERROR) {
             char why[256];
             snprintf(why, sizeof why, "%s", d->err[0] ? d->err : "refused");
-            if (d->src.flags) {                 /* (a slice before the last: the picture ended, so its */
-                d->src.flags = 0;               /* decode environment is let go of, not left for the next) */
+            if (src->flags) {                   /* (a slice before the last: the picture ended, so its */
+                src->flags = 0;                 /* decode environment is let go of, not left for the next) */
                 rpivid_dec_ops_h265.setup(&d->ctx, &run);
                 rpivid_dec_ops_h265.trigger(&d->ctx);
             }
-            d->dev.p1_cb = d->dev.p2_cb = NULL;
             return fail(d, "Slice %u: %s", i, why);
         }
     }
-    if (wait_done(d, f) != HEVCDEC_OK) {
-        d->dev.p1_cb = d->dev.p2_cb = NULL;
-        return HEVCDEC_ERROR;
-    }
+    f->submitted = 1;
     d->stats.pictures++;
-    return HEVCDEC_OK;
+    if (d->cfg.pipelined) return poll_phases(d) ? HEVCDEC_ERROR : HEVCDEC_OK;
+    return hevcdec_frame_wait(d, f);
 }
 
 /* (NV12 in 128-byte columns: column k holds x 128k..128k+127; its luma
@@ -423,6 +527,7 @@ void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const pl
 {
     const uint8_t *b = f->vb.vaddr;
     const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
+    if (f->submitted && !f->vb.state) hevcdec_frame_wait(d, (hevcdec_frame *)f);   /* (still being decoded) */
     if (f->cached) {
         uint32_t t0 = hevcdec_hw_now_cs();
         hevcdec_hw_cache_clean_inv(d->hw, b, f->vb.planes[0].length);
@@ -434,6 +539,7 @@ void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const pl
 void hevcdec_close(hevcdec *d)
 {
     if (!d) return;
+    if (!d->dead && !idle(d)) hevcdec_finish(d);   /* (pictures still being decoded: finished first) */
     if (d->dead) {                           /* (the block may still write to its buffers: they stay) */
         logf_(d, "Closed after a phase didn't finish: the block's memory is left (restart the machine)");
         hevcdec_hw_close(d->hw, 1);
@@ -452,8 +558,8 @@ void hevcdec_close(hevcdec *d)
             dma_put(d, d->frames[i]->vb.vaddr);
             free(d->frames[i]);
         }
-    if (d->src.vaddr) dma_put(d, d->src.vaddr);
-    if (d->cmd) dma_put(d, d->cmd);
+    for (int i = 0; i < RPIVID_P1BUF_COUNT; i++) if (d->srcs[i].vaddr) dma_put(d, d->srcs[i].vaddr);
+    for (int k = 0; k < RPIVID_DEC_ENV_COUNT; k++) if (d->cmds[k].p) dma_put(d, d->cmds[k].p);
     hevcdec_hw_close(d->hw, 0);
     if (cur == d) cur = NULL;
     free(d);

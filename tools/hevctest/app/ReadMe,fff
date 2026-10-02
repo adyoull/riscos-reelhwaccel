@@ -22,12 +22,16 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   odd     426x240, 8 pictures (coded 432 wide, cropped)
   hd      1920x1080, 60 pictures, B frames, WPP
 
-Running it (please send back the Result files, and a photo of any EMT trap):
+Running it (please send back Result, ResultT and ResultP):
   Test     Every clip, every picture checked. Writes Result.
   Speed    The 1080p clip without checks: pictures a second. Writes
            ResultT.
   Verbose  The first three pictures of the small clip with the
            decoder's log, if Test fails. Writes ResultV.
+  Pipelined Every clip with each picture given to the block without
+           waiting (checked while it decodes the next), then the 1080p
+           clip timed that way and with four pictures ahead. Writes
+           ResultP: compare its pictures a second with Speed's.
   Uncached The 1080p clip with the output frames not cacheable, as
            before 0.1.4, to compare. Writes ResultU.
   NoHW     hevctest starts and stops without touching the HEVC block
@@ -66,6 +70,15 @@ please try, starting each straight after the one before finishes:
   3  Speed, then Speed
 and photograph the screen if it stops: 0.1.5 now prints RISC OS's own
 error and address first ("hevctest: signal ...").
+
+That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
+touches the HEVC block, does it too), so it's reported to them. Until
+it's fixed, wait a moment before starting the next Obey file.
+
+0.1.6 (hevcdec 0.1.5): the block's two phases overlap. Phase 1 (reading
+the bitstream) of the next picture runs while phase 2 (making the
+picture) of the last does, and the program can carry on while the block
+works, as a player would.
 If a run says a phase "didn't finish", restart before running anything
 else; if the machine locks up, switch it off and on again.
 
