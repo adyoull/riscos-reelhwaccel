@@ -1,0 +1,9 @@
+| Speed: the 1080p clip decoded without checks (-t). Reports to ResultT.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 32768K -max 32768K
+Remove <Obey$Dir>.ResultT
+Run <Obey$Dir>.hevctest -t -o <Obey$Dir>.ResultT <Obey$Dir>.clips.hd.trace

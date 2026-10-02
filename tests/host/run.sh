@@ -57,6 +57,9 @@ grep "FAIL\|vcdec_test:" "$O/vcdec_test.out"
 # ffmpeg/: the h264_vchiq decoder built into FFmpeg 5.1.10 (FFMPEG_TARBALL; skipped without it)
 "$HERE/ffmpeg/run.sh" "$O" || bad=1
 
+# hevcdec/ and tools/hevctest: against a fake HEVC block, on traces from tools/hevctrace
+"$HERE/hevc/run.sh" "$O" || bad=1
+
 # hevchw/module: the HEVCHW module (its C, and header.s's veneers and IRQ handler) on a fake RISC OS
 arm-linux-gnueabihf-gcc -c -o "$O/hevchw_header.o" "$TOP/hevchw/module/header.s" &&
   arm-linux-gnueabihf-objcopy --weaken-symbol=hw_swi "$O/hevchw_header.o" &&
@@ -67,7 +70,7 @@ echo "== hevchw_test (the HEVCHW module: maps, register test, the interrupt foun
 "$TOP/hevchw/module/build.sh" "$O/hevchw" | tail -1 || bad=1
 
 # UnixLib's sscanf doesn't fill a long long (%lld: only the low word; MMALDecode 0.13 on the Pi)
-if grep -n 'scanf[^;]*%ll' "$TOP"/tools/*/*.c "$TOP"/hevchw/*/*.c "$TOP"/vcdec/*.c; then
+if grep -n 'scanf[^;]*%ll' "$TOP"/tools/*/*.c "$TOP"/hevchw/*/*.c "$TOP"/vcdec/*.c "$TOP"/hevcdec/*.c; then
   echo "FAIL: scanf with %ll (UnixLib fills only the low word)"; bad=1
 fi
 [ $bad = 0 ] && echo "all host tests passed" || echo "SOME HOST TESTS FAILED"

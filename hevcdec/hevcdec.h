@@ -1,0 +1,89 @@
+/*
+ * hevcdec - HEVC (H.265) decoded by the Raspberry Pi 4's own HEVC block,
+ * from RISC OS. A stateless decoder: the caller parses the stream (as
+ * FFmpeg's HEVC decoder does) and gives each picture's parameters as the
+ * V4L2 stateless HEVC controls (hevc_ctrls.h), its slices, and a frame to
+ * decode into; hevcdec builds the block's commands (Raspberry Pi's
+ * rpivid_h265.c, unchanged) and runs its two phases.
+ *
+ *   hevcdec_config c; hevcdec_config_init(&c); c.width = 1920; c.height = 1080;
+ *   hevcdec_open(&d, &c);
+ *   f = hevcdec_frame_new(d);                      (as many as the DPB needs + 1)
+ *   for each picture in decoding order:
+ *     hevcdec_decode(d, &pic, f, number);         (number: how later pictures'
+ *                                                  DPB entries name this one)
+ *     hevcdec_frame_to_i420(d, f, planes, strides)
+ *   hevcdec_close(d);
+ *
+ * 0.1 is the first test: 8-bit 4:2:0 only, one picture at a time (each
+ * hevcdec_decode waits for both phases), output frames uncached.
+ *
+ * Part of riscos-reelhwaccel. GPL version 2 or later (see COPYING).
+ */
+#ifndef HEVCDEC_H
+#define HEVCDEC_H
+
+#include <stddef.h>
+#include <stdint.h>
+#include "hevc_ctrls.h"
+
+#define HEVCDEC_VERSION "0.1"
+
+#define HEVCDEC_OK           0
+#define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
+#define HEVCDEC_UNSUPPORTED -2   /* not for the block (size, depth, chroma format) */
+
+typedef struct hevcdec hevcdec;
+typedef struct hevcdec_frame hevcdec_frame;
+
+typedef struct {
+    int width, height;          /* the largest picture to come (frames are made this size) */
+    int bit_depth;              /* 8 */
+    void (*log)(void *handle, const char *text);
+    void *log_handle;
+} hevcdec_config;
+
+typedef struct {
+    const struct v4l2_ctrl_hevc_slice_params *params;
+    const uint8_t *data;        /* the slice's NAL unit, emulation prevention bytes kept */
+    size_t size;
+} hevcdec_slice;
+
+typedef struct {
+    const struct v4l2_ctrl_hevc_sps *sps;
+    const struct v4l2_ctrl_hevc_pps *pps;
+    const struct v4l2_ctrl_hevc_decode_params *dec;    /* dpb[].timestamp: the numbers given to hevcdec_decode */
+    const struct v4l2_ctrl_hevc_scaling_matrix *scaling;  /* or NULL */
+    unsigned int nslices;
+    const hevcdec_slice *slices;
+} hevcdec_picture;
+
+typedef struct {
+    unsigned pictures, phase1_retries;
+    unsigned cs_phase1, cs_phase2;      /* waiting for each phase, centiseconds in all */
+} hevcdec_stats;
+
+void hevcdec_config_init(hevcdec_config *c);
+int hevcdec_open(hevcdec **out, const hevcdec_config *c);
+const char *hevcdec_open_error(void);
+
+/* An output frame (NV12, 128-byte columns, as the block writes it); NULL
+   if there's no memory. Frames go with hevcdec_close. */
+hevcdec_frame *hevcdec_frame_new(hevcdec *d);
+
+/* Decodes one picture into f, waiting for the block. HEVCDEC_OK, or
+   HEVCDEC_ERROR (hevcdec_error; the decoder can carry on with the next
+   IRAP picture), or HEVCDEC_UNSUPPORTED. */
+int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uint64_t number);
+
+/* Part of the frame's picture as planar 8-bit 4:2:0: w x h from (x, y) in
+   luma samples (the SPS's output window; x and y even), U and V
+   (w+1)/2 x (h+1)/2 */
+void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x,
+                           int y, int w, int h);
+
+const char *hevcdec_error(const hevcdec *d);
+void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s);
+void hevcdec_close(hevcdec *d);
+
+#endif

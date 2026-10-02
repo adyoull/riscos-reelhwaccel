@@ -1,5 +1,38 @@
 # Changes
 
+## hevcdec 0.1 and HEVCTest 0.1: HEVC on the Pi 4's HEVC block (test zip, 2026-10-02)
+
+The first HEVC decoder, for the first test on a Pi 4.
+
+- hevcdec: a stateless HEVC decoder on the Pi 4's HEVC block. Each
+  picture comes as the V4L2 stateless HEVC controls and its slices;
+  Raspberry Pi's `rpivid_h265.c` (unchanged, GPL-2.0-or-later, under a
+  kernel shim) builds phase 1's command list and phase 2's registers;
+  hevcdec runs both, polling the interrupt status (phase 1 run again
+  with bigger PU/coefficient buffers when they run out). The block's
+  registers mapped with OS_Memory 13 and written in SVC; its clock on at
+  its maximum through the firmware (BCMSupport); its memory physically
+  contiguous, uncached, from Physical Memory Pools below &FC000000 (bus
+  address = physical address on the Pi 4). A phase that never finishes
+  is reported and the decoder refuses to go on, its memory left alone.
+  8-bit 4:2:0 only, one picture at a time, output NV12 in 128-byte
+  columns (hevcdec_frame_to_i420 converts any window of it).
+- tools/hevctrace: a patch for FFmpeg 5.1.10's HEVC decoder that writes,
+  with HEVC_TRACE=file, each picture's controls and slices (filled as
+  Raspberry Pi's FFmpeg fills them for Linux) and Adler-32s of its planes.
+  hvtdump.py prints and checks traces.
+- HEVCTest 0.1 (tools/hevctest): replays traces through hevcdec on the Pi
+  and checks every picture. Test (Result): five clips, 352x288 (WPP,
+  B-pictures), 416x240 in 4 slices, 416x240 without WPP and with the
+  default scaling lists, 426x240 (cropped), and 1080p 60 pictures.
+  Speed (ResultT): the 1080p clip timed without checks. Verbose
+  (ResultV): the first 3 pictures of the small clip with every step.
+- Host tests: a fake HEVC block that reads the command list (register
+  and table addresses, the bitstream, the slices' references), checks
+  each reference holds the right picture, and writes FFmpeg's picture in
+  128-byte columns; with phases that run out of buffer, never finish,
+  and a slice refused mid-picture.
+
 ## devkit 0.2.1: h264_vchiq zero-copy (2026-10-02)
 
 VCDecTest 0.3.1 on a Pi 4: every run OK. Every picture was right held in

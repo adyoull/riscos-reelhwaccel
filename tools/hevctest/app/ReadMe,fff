@@ -1,0 +1,41 @@
+HEVCTest - the Raspberry Pi 4's HEVC block, from RISC OS
+=======================================================
+
+The Pi 4 has an HEVC (H.265) decoder block of its own, separate from the
+VideoCore's H.264 decoder. Linux drives it with Raspberry Pi's "rpivid"
+driver. hevcdec is that driver's command builder (rpivid_h265.c, as it is)
+around a small RISC OS layer: the block's registers mapped and used in
+SVC mode, its clock at its maximum, contiguous memory from Physical
+Memory Pools, and the two phases' completion polled.
+
+The block is a stateless decoder: it's given each picture's parameters
+and slices, already parsed. For this test they were parsed on a Linux
+machine by FFmpeg's HEVC decoder and saved with the slices in each clip's
+"trace", with checksums of the picture FFmpeg decoded. HEVCTest gives
+the block every picture as the trace says and checks the block's picture
+against FFmpeg's.
+
+The clips (in clips; each has its MP4 file, mp4, and its trace):
+  small   352x288, 20 pictures, B frames, wavefront (WPP) entry points
+  slices  416x240, 12 pictures, four slices a picture
+  nowpp   416x240, 12 pictures, no WPP, scaling lists
+  odd     426x240, 8 pictures (coded 432 wide, cropped)
+  hd      1920x1080, 60 pictures, B frames, WPP
+
+Running it (please send back Result, and ResultT if Test is OK):
+  Test     Every clip, every picture checked. Writes Result.
+  Speed    The 1080p clip without checks: pictures a second. Writes
+           ResultT.
+  Verbose  The first three pictures of the small clip with the
+           decoder's log, if Test fails. Writes ResultV.
+
+This is the first time the block decodes anything from RISC OS. If a
+run says a phase "didn't finish", restart before running anything else;
+if the machine locks up, switch it off and on again.
+
+Needs: a Raspberry Pi 4 (or 400) with RISC OS 5.23 or later (Physical
+Memory Pools). 8-bit 4:2:0 only for now.
+Part of riscos-reelhwaccel; GPL version 2 or later. hevcdec includes
+Raspberry Pi's rpivid_h265.c (GPL version 2 or later; Copyright (C) 2020
+Raspberry Pi (Trading) Ltd, based on the Cedrus VPU driver). The clips
+are made from FFmpeg's testsrc2 pattern.
