@@ -292,7 +292,7 @@ static uint32_t handle, context = 1, stub, comp;
 static uint32_t in_port, out_port;         /* port handles */
 static port_info_t in_info, out_info;
 static uint32_t msg[128];
-#define MAXPEND 32
+#define MAXPEND 64                          /* (a flush returns up to 23 buffers at once) */
 static uint32_t pend[MAXPEND][128], pend_len[MAXPEND];
 static int npend;
 
@@ -672,7 +672,8 @@ static long table(const uint8_t *c, const uint8_t *ce, uint32_t skip, uint32_t w
 
 static int64_t to_us(int64_t t, uint32_t timescale)
 {
-    return t * 1000000 / (int64_t)timescale;
+    int64_t ts = (int64_t)timescale;        /* (in two parts: t * 1000000 could overflow) */
+    return t / ts * 1000000 + t % ts * 1000000 / ts;
 }
 
 static int parse_mp4(const uint8_t *f, uint32_t n)
@@ -680,14 +681,14 @@ static int parse_mp4(const uint8_t *f, uint32_t n)
     const uint8_t *me, *moov = box(f, f + n, "moov", &me), *p, *te, *trak;
     if (!moov) { say("No moov box: not an MP4 this can read\n"); return -1; }
     for (p = moov; (trak = box(p, me, "trak", &te)) != NULL; p = te) {
-        const uint8_t *de, *ne, *se, *xe, *ee, *ae, *mdia, *mdhd, *minf, *stbl, *stsd, *entry, *avcc, *edts, *elst;
+        const uint8_t *de, *ne, *se, *xe, *he, *ee, *ae, *mdia, *mdhd, *minf, *stbl, *stsd, *entry, *avcc, *edts, *elst;
         const uint8_t *e_stts, *e_ctts = NULL, *e_stss = NULL, *e_stsc, *e_co, *e_sz, *c;
         const uint8_t *ce;
         long n_stts, n_ctts = 0, n_stss = -1, n_stsc, n_co, n_sz;
         uint32_t timescale, fixed_size, i, k;
-        int co64 = 0, ctts_signed = 0;
+        int co64 = 0;
         int64_t media_time = 0, t;
-        if (!(mdia = box(trak, te, "mdia", &de)) || !(mdhd = box(mdia, de, "mdhd", &xe)) ||
+        if (!(mdia = box(trak, te, "mdia", &de)) || !(mdhd = box(mdia, de, "mdhd", &he)) ||
             !(minf = box(mdia, de, "minf", &ne)) || !(stbl = box(minf, ne, "stbl", &se)) ||
             !(stsd = box(stbl, se, "stsd", &xe)) || xe - stsd < 16)
             continue;
@@ -720,7 +721,7 @@ static int parse_mp4(const uint8_t *f, uint32_t n)
                 c += 2 + l;
             }
         }
-        if (mdhd + 24 > xe) { say("A broken mdhd box\n"); return -1; }
+        if (he - mdhd < (mdhd[0] == 1 ? 24 : 16)) { say("A broken mdhd box\n"); return -1; }
         timescale = mdhd[0] == 1 ? be32(mdhd + 20) : be32(mdhd + 12);
         if (!timescale) { say("No timescale\n"); return -1; }
         if ((edts = box(trak, te, "edts", &ee)) != NULL && (elst = box(edts, ee, "elst", &ee)) != NULL) {
@@ -732,7 +733,6 @@ static int parse_mp4(const uint8_t *f, uint32_t n)
         }
         if ((n_stts = table(box(stbl, se, "stts", &ce), ce, 0, 8, &e_stts)) < 0) { say("No stts box\n"); return -1; }
         if ((c = box(stbl, se, "ctts", &ce)) != NULL) {
-            ctts_signed = c[0] == 1;
             if ((n_ctts = table(c, ce, 0, 8, &e_ctts)) < 0) { say("A broken ctts box\n"); return -1; }
         }
         if ((c = box(stbl, se, "stss", &ce)) != NULL && (n_stss = table(c, ce, 0, 4, &e_stss)) < 0) {
@@ -745,6 +745,7 @@ static int parse_mp4(const uint8_t *f, uint32_t n)
         if (!(c = box(stbl, se, "stsz", &ce)) || ce - c < 12) { say("No stsz box\n"); return -1; }
         fixed_size = be32(c + 4);
         if ((n_sz = table(c, ce, 4, fixed_size ? 0 : 4, &e_sz)) < 1) { say("No samples\n"); return -1; }
+        if (fixed_size && (uint32_t)n_sz > n / fixed_size) { say("More samples than the file holds\n"); return -1; }
         free(samples);
         if (!(samples = calloc((size_t)n_sz, sizeof *samples))) { say("Out of memory\n"); return -1; }
         nsamples = (int)n_sz;
@@ -767,7 +768,7 @@ static int parse_mp4(const uint8_t *f, uint32_t n)
         for (k = 0, i = 0; i < (uint32_t)n_ctts; i++)
             for (uint32_t r = be32(e_ctts + 8 * i); r && k < (uint32_t)nsamples; r--, k++) {
                 uint32_t o = be32(e_ctts + 8 * i + 4);
-                samples[k].pts += ctts_signed ? (int64_t)(int32_t)o : (int64_t)o;
+                samples[k].pts += (int32_t)o;   /* (signed in version 0 too, as FFmpeg reads it) */
             }
         for (k = 0; k < (uint32_t)nsamples; k++) {
             samples[k].pts = to_us(samples[k].pts - media_time, timescale);
@@ -779,7 +780,7 @@ static int parse_mp4(const uint8_t *f, uint32_t n)
             uint32_t per = 0;
             for (long j = 0; j < n_stsc && be32(e_stsc + 12 * j) <= i + 1; j++) per = be32(e_stsc + 12 * j + 4);
             for (; per && k < (uint32_t)nsamples; per--, k++) {
-                if (off + samples[k].size > n) { say("Sample %u is outside the file\n", (unsigned)k); return -1; }
+                if (off > n || samples[k].size > n - off) { say("Sample %u is outside the file\n", (unsigned)k); return -1; }
                 samples[k].off = (uint32_t)off;
                 off += samples[k].size;
             }
@@ -1049,7 +1050,7 @@ static uint32_t vc_memory(void)
 /* ---- checking a picture ---- */
 
 static int mp4;                            /* the stream is an MP4 (else raw Annex B) */
-static int close_n, far_n, wrong, disorder, no_pts, dups, timing, keep_going;
+static int close_n, far_n, wrong, disorder, no_pts, dups, extra, timing, keep_going;
 static int next_j, have_last;              /* (FFmpeg's picture expected next, if there's no pts) */
 static int64_t last_pts, seek_pts;
 static int seeking, from_key;              /* -s: pictures from the keyframe on */
@@ -1082,7 +1083,10 @@ static int check_picture(int k, const buffer_msg_t *b)
         j = next_j;
     }
     next_j = j + 1;
-    if (j >= nwant) return 0;               /* (one too many: counted at the end) */
+    if (j >= nwant) {                       /* one too many */
+        if (++extra <= 5) say("Picture %d: one more than FFmpeg's %d\n", k, nwant);
+        return 0;
+    }
     if (seen[j]) {
         dups++;
         if (dups <= 5) say("Picture %d: FFmpeg's picture %d again\n", k, j);
@@ -1140,7 +1144,7 @@ int probe_main(int argc, char **argv)
     /* (a fresh start each time: the host tests call this more than once) */
     free(want); want = NULL; free(want_pts); want_pts = NULL; nwant = want_w = want_h = 0; npci = 0; pci_alloc_swi = 0; evbuf = NULL; evsize = 0; dump_dir = NULL; big_events = 0; nsig = 0; npend = 0; data_failed = 0; waiting = ""; out_size = 0; stub = 0; comp = 0;
     memset(in_busy, 0, sizeof in_busy); memset(out_busy, 0, sizeof out_busy); out2 = NULL; verbose = 0;
-    mp4 = 0; nsamples = 0; au_len = 0; close_n = far_n = wrong = disorder = no_pts = dups = timing = keep_going = 0;
+    mp4 = 0; nsamples = 0; au_len = 0; close_n = far_n = wrong = disorder = no_pts = dups = extra = timing = keep_going = 0;
     next_j = have_last = 0; seek_pts = 0; seeking = from_key = 0; free(seen); seen = NULL; rx_cs = rx_bytes = 0;
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) out2 = fopen(argv[++i], "a");   /* (added to: Test runs several) */
@@ -1405,6 +1409,12 @@ int probe_main(int argc, char **argv)
             if (seek_after && !seeked && frames == seek_after && !eos_seen && !fatal) {
                 char t[24];
                 uint32_t t0 = now_cs();
+                if (have_last && seek_pts <= last_pts) {
+                    say("\nAfter %d pictures the last keyframe (pts %s) has been passed: nothing to seek to\n", frames,
+                        us_text((uint64_t)seek_pts, t));
+                    fatal = 1;
+                    break;
+                }
                 say("\nAfter %d pictures: %s, then on from the last keyframe (sample %d, pts %s)\n", frames,
                     seek_disable ? "both ports disabled and enabled again" : "both ports flushed", seek_s,
                     us_text((uint64_t)seek_pts, t));
@@ -1424,6 +1434,16 @@ int probe_main(int argc, char **argv)
                     break;
                 }
                 say("  done in %u cs\n\n", (unsigned)(now_cs() - t0));
+                /* an EOS from before the flush (all the stream was sent)
+                   isn't the end any more: the stream goes again */
+                for (i = 0; i < npend; i++) {
+                    buffer_msg_t *pb = (buffer_msg_t *)((hdr_t *)pend[i] + 1);
+                    if (((hdr_t *)pend[i])->type == T_BUFFER_TO_HOST && pb->drvbuf.port_handle == out_port &&
+                        (pb->flags & FLAG_EOS)) {
+                        pb->flags &= ~FLAG_EOS;
+                        say("(an EOS from before the flush ignored)\n");
+                    }
+                }
                 seeked = 1;
                 cur_s = seek_s;
                 au_pos = au_len = 0;
@@ -1585,16 +1605,19 @@ done:
     if (stub) swi(OS_Module, 7, 0, stub, 0, NULL, NULL);
     pci_free_all();
     {
-        int complete = mp4 ? !missing : frames == nwant;
-        int ok = eos_seen && !fatal && !wrong && complete && !disorder && !dups;
+        int complete = mp4 ? !missing && !extra : frames == nwant;
+        int ok = eos_seen && !fatal && !wrong && complete && !disorder && !dups && (!seek_after || seeked);
+        if (seek_after && !seeked && eos_seen) say("The flush and seek never happened (the clip ended first)\n");
         if (nsig && !timing) say("Not bit-exact but close to FFmpeg's (block means within 1): %d; not close: %d\n", close_n, far_n);
-        say("\nResult: %s\n", ok && timing ? "OK - timed (the pictures weren't checked)" :
+        say("\nResult: %s\n", ok && no_pts ? "OK - the pictures are right, but they came back without their pts" :
+                              ok && timing ? "OK - timed (the pictures weren't checked)" :
                               ok && !close_n ? "OK - the VideoCore decoded every picture exactly as FFmpeg does" :
                               ok ? "OK - every picture matches FFmpeg's, some within rounding (see above)" :
                               wrong ? "pictures differ from FFmpeg's" :
                               eos_seen && disorder ? "pictures came back out of display order" :
                               eos_seen && !complete ? "the decoder finished, but with a different number of pictures" :
-                              eos_seen && dups ? "a picture came back twice" : "the decode didn't finish (see above)");
+                              eos_seen && dups ? "a picture came back twice" :
+                              eos_seen && seek_after && !seeked ? "the seek wasn't tried" : "the decode didn't finish (see above)");
         if (out2) fclose(out2);
         (void)events;
         return ok ? 0 : 1;

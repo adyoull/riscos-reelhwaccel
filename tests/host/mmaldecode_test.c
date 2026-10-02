@@ -872,7 +872,8 @@ int main(int argc, char **argv)
 
     no_pts_back = 1;                          /* no pts back: matched in order, and said so */
     o = run_mp4(&ret, NULL, NULL, NULL);
-    CHECK(ret == 0 && strstr(o, "12 pictures came back without a pts") && !strstr(o, "pts: every picture"),
+    CHECK(ret == 0 && strstr(o, "12 pictures came back without a pts") && !strstr(o, "pts: every picture") &&
+          strstr(o, "came back without their pts"),
           "no pts back (%d):\n%s", ret, o);
     cleaned("no pts");
     no_pts_back = 0;
@@ -894,6 +895,14 @@ int main(int argc, char **argv)
     CHECK(ret == 0 && strstr(o, "all of them") && strstr(o, "Result: OK"), "EFCH after flush (%d):\n%s", ret, o);
     cleaned("seek EFCH");
     efch_after_flush = 0;
+
+    o = run_mp4(&ret, "-s", "50", NULL);      /* a seek that never comes: not OK */
+    CHECK(ret == 1 && strstr(o, "never happened") && strstr(o, "the seek wasn't tried"), "seek never tried (%d):\n%s", ret, o);
+    cleaned("no seek");
+
+    o = run_mp4(&ret, "-s", "9", NULL);       /* the keyframe already passed: refused, not counted twice */
+    CHECK(ret == 1 && strstr(o, "has been passed") && !flushes, "keyframe passed (%d):\n%s", ret, o);
+    cleaned("passed");
 
     corrupt_at = 3;                           /* -t: timed, not checked */
     o = run_mp4(&ret, "-t", NULL, NULL);
