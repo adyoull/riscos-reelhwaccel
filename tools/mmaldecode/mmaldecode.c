@@ -17,7 +17,9 @@
  *      sample over 64 KB goes in several buffers, the pts on the first).
  *      Each buffer is a BUFFER_FROM_HOST message, its data after it by
  *      VCHIQ bulk transfer, a whole number of words (an access unit is
- *      padded with zero bytes, as Annex B allows). The last carries EOS;
+ *      padded with zero bytes, as Annex B allows). EOS goes on the raw
+ *      stream's last piece, or on an empty buffer after an MP4's last
+ *      access unit;
  *   4. empty output buffers (numbered from 1: see CTX_BASE) are handed
  *      over once the decoder has said what it will make (its first
  *      FORMAT_CHANGED event; after 200 cs without one, anyway);
@@ -44,7 +46,7 @@
  *   8. -t: no checksums, only the pts; the time spent receiving and in
  *      the one copy of each picture (out of the PCI memory) is reported.
  *
- *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] stream expected.crc [expected.sig]
+ *   mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] [-e] stream expected.crc [expected.sig]
  *      stream    raw H.264 (Annex B), or MP4 (H.264 in avc1/avc3)
  *      -o file   also add the report to file
  *      -n        don't stop at the first wrong picture
@@ -53,6 +55,8 @@
  *      -s N      flush after N pictures, then seek to the last keyframe (MP4)
  *      -F        with -s: disable and enable the ports instead of FLUSH
  *      -t        time, don't check the pictures
+ *      -e        (MP4) EOS on the last access unit's buffer, not on an empty
+ *                one after it (0.13-0.14's way: loses pictures after a flush)
  *   mmaldecode -x out stream.mp4   (host check) the Annex B stream as it
  *      would be sent, to out, and each sample's pts, dts and key flag to
  *      out.pts
@@ -1195,6 +1199,7 @@ int probe_main(int argc, char **argv)
     int connected = 0, opened = 0, created = 0, enabled = 0, in_on = 0, out_on = 0;
     uint32_t vcmem = 0, copy_cs = 0, au_pos = 0;
     int frames = 0, eos_sent = 0, eos_seen = 0, fatal = 0, i, format_changes = 0, events = 0, outputs_given = 0;
+    int eos_on_data = 0;
     int cur_s = 0, seek_s = -1, seek_after = 0, seek_disable = 0, seeked = 0, before_flush = 0, missing = 0, checked = 0;
     _kernel_oserror *e;
     static const uint32_t code[9] = { 0xe3510004u, 0x05903000u, 0x02833001u, 0x05803000u, 0xe3510012u,
@@ -1208,6 +1213,7 @@ int probe_main(int argc, char **argv)
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) out2 = fopen(argv[++i], "a");   /* (added to: Test runs several) */
         else if (!strcmp(argv[i], "-n")) keep_going = 1;
+        else if (!strcmp(argv[i], "-e")) eos_on_data = 1;
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) dump_dir = argv[++i];
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
@@ -1221,7 +1227,7 @@ int probe_main(int argc, char **argv)
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0) {
-        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] stream expected.crc [expected.sig]\n");
+        printf("Usage: mmaldecode [-o file] [-n] [-v] [-d dir] [-s N [-F]] [-t] [-e] stream expected.crc [expected.sig]\n");
         return 1;
     }
     say("mmaldecode: %s on the VideoCore, through VCHIQ and MMAL\n", stream_name);
@@ -1360,7 +1366,7 @@ int probe_main(int argc, char **argv)
                     if (!au_len) cur_s++;   /* (an empty sample) */
                 }
                 if (fatal) break;
-                if (cur_s == nsamples) {    /* (only empty samples were left) */
+                if (cur_s == nsamples) {    /* EOS, empty (or only empty samples were left) */
                     n = 0;
                     flags = FLAG_EOS;
                     eos_sent = 1;
@@ -1377,7 +1383,12 @@ int probe_main(int argc, char **argv)
                     if (au_pos == au_len) {
                         flags |= FLAG_FRAME_END;
                         au_pos = au_len = 0;
-                        if (++cur_s == nsamples) { flags |= FLAG_EOS; eos_sent = 1; }
+                        /* the end: EOS on its own empty buffer next (as FFmpeg's
+                           mmaldec), or with -e on this one. 0.14 on the Pi: after
+                           a flush, EOS on the last access unit's buffer came back
+                           at once with that unit's pts, and the two pictures
+                           still waiting to be shown were lost */
+                        if (++cur_s == nsamples && eos_on_data) { flags |= FLAG_EOS; eos_sent = 1; }
                     }
                 }
             } else {
@@ -1451,7 +1462,7 @@ int probe_main(int argc, char **argv)
                 if (b.length) {
                     uint32_t t0 = now_cs();
                     if (!b.payload_in_message)     /* (received as it arrived: take_data) */
-                        probe_svc_copy(frame, out_buf[k], (b.length + 3) & ~3u);
+                        probe_svc_copy_ldm(frame, out_buf[k], (b.length + 3) & ~3u);   /* (0.14: 4x the word copy) */
                     else
                         memcpy(frame, b.short_data, b.payload_in_message);
                     copy_cs += now_cs() - t0;

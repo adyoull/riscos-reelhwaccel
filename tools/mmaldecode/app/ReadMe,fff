@@ -3,9 +3,9 @@ MMALDecode - H.264 decoded by the VideoCore, from RISC OS
 
 Hardware H.264 decoding for Reel on the Raspberry Pi: the firmware's
 video decoder, driven through RISC OS's VCHIQ module. 0.12 decoded
-whole clips correctly (1080p with gpu_mem=128). 0.13 and 0.14 try what
-a player needs on top of that (0.14 fixes 0.13's reading of FFmpeg's
-times, which failed every MP4 check though the decoder was right):
+whole clips correctly (1080p with gpu_mem=128). 0.13 to 0.15 try what
+a player needs on top of that (0.15 sends the end of the stream on its
+own, after 0.14's seeks lost the last two pictures):
 
   - MP4 input: each picture's data goes to the decoder on its own, with
     its time (pts), as FFmpeg and Reel will send it;
@@ -40,6 +40,10 @@ Running it (please send back every Result file):
   SeekD      As Seek, but it switches the decoder's ports off and on
              again instead of flushing. Writes ResultSD. Run it even if
              Seek works: they're two ways Reel could seek.
+  SeekE      As Seek, but EOS is sent the old way (0.13 and 0.14), on
+             the last picture's own data. Expected to lose the last two
+             pictures; it shows whether that was the cause. Writes
+             ResultSE.
   Speed      The three MP4s without checks: pictures a second, and the
              copying time, two ways (word by word, and in blocks).
              Writes ResultT.

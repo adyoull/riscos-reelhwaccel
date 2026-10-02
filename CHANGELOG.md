@@ -1,5 +1,21 @@
 # Changes
 
+## MMALDecode 0.15 (test zip, 2026-10-02)
+
+0.14 on a Pi 4: every MP4 check OK (pts back with each picture, in
+display order; 1080p 22.3 pictures a second with checksums). The
+LDM/STM copy out of PCI memory runs at 506-559 MB/s, 4x the word copy
+(1080p: 6.2 ms a picture, not 23.8). Seek and SeekD lost the last two
+pictures: after a flush, EOS on the last access unit's buffer came back
+at once, with that unit's pts.
+
+- MP4: EOS goes on its own empty buffer after the last access unit, as
+  FFmpeg's mmaldec sends it; -e keeps 0.14's way (new Obey file SeekE,
+  to confirm the cause).
+- Each picture is copied out of PCI memory by LDM/STM.
+- The fake decoder loses the pictures still waiting when EOS comes on an
+  access unit's buffer after a flush, as the Pi: 0.14 fails against it.
+
 ## MMALDecode 0.14 (test zip, 2026-10-02)
 
 0.13 on a Pi 4 (gpu_mem=128): every picture came back with its own pts,
