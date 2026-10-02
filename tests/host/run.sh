@@ -6,8 +6,8 @@
 #
 # Needs: arm-linux-gnueabihf-gcc and libc6-dev-armhf-cross, and qemu-arm
 # with tests/qemu/qemu-8.2.2-align-trap.patch (tests/qemu/build-qemu.sh;
-# QEMU=path if it isn't the qemu-arm on PATH). GCCSDK's cross compiler
-# (CROSS=...) for the HEVCHW module's build check.
+# QEMU=path if it isn't the qemu-arm on PATH). The HEVCHW module's build
+# check uses arm-linux-gnueabihf-gcc too (MODULE_CROSS=... to change it).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)

@@ -8,8 +8,9 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=${1:-$HERE/out}
 # (the Linux ARM compiler: GCCSDK's reaches even its own strings through a
-# GOT when position independent; this code uses no library either way)
-CROSS=${CROSS:-arm-linux-gnueabihf-}
+# GOT when position independent; this code uses no library either way).
+# MODULE_CROSS, not CROSS: CROSS is GCCSDK's, for the test tools.
+CROSS=${MODULE_CROSS:-arm-linux-gnueabihf-}
 mkdir -p "$OUT"
 CFLAGS="-O2 -marm -march=armv7-a -mfloat-abi=hard -mfpu=vfpv3 -mgeneral-regs-only
   -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fPIE -fvisibility=hidden
