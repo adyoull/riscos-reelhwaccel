@@ -7,7 +7,7 @@ where it started). It has three parts:
 | Part | What it drives | Codecs | Boards |
 |---|---|---|---|
 | `vcdec` | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264, Motion JPEG (and MPEG-2 / VC-1 with the licences on a Pi 1-3) | Pi 2, 3, 4 (and 1/Zero, though Reel and FFmpeg need ARMv7) |
-| `hevcdec` | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by Raspberry Pi's `rpivid_h265.c` | HEVC (H.265), 8-bit so far (10-bit to come) | Pi 4, 400, CM4 |
+| `hevcdec` | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by Raspberry Pi's `rpivid_h265.c` | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 |
 | `hwdec` | one small interface over both: can this codec and size be decoded in hardware, and do it | - | - |
 
 Reel and FFmpeg will only use `hwdec` (`libhwdec`, `hwdec.h`), from this
@@ -88,8 +88,10 @@ the block's scaling factors are always loaded (hevcdec 0.1.2). 0.1.4
 makes the output frames cacheable and converts them with NEON (it took
 29 ms a 1080p picture from memory that isn't cacheable). 0.1.5 overlaps
 the block's two phases and can decode while the program works
-(pipelined): 1080p at 353 pictures a second (HEVCTest 0.1.6). Next:
-`hevc_hwdec` in riscos-ffmpeg and Reel (devkit 0.2.3), then 10-bit and 4K.
+(pipelined): 1080p at 353 pictures a second (HEVCTest 0.1.6). 0.1.7
+adds 10-bit (the block's frames hold three samples a 32-bit word; out as
+16-bit samples, or 8-bit) and tests 4K (HEVCTest 0.1.8); `hevc_hwdec`
+gives YUV420P10 for 10-bit streams (devkit 0.2.5).
 
 Both libraries' contiguous memory (`common/contig.h`) avoids the running
 program's page at &8000: taking it moves the program to another page,

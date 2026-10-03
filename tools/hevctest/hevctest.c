@@ -155,23 +155,49 @@ static int read_trace(const char *name, uint8_t **file)
     return 0;
 }
 
+static uint8_t *planes8[3];                /* 10-bit: the 8-bit conversion, checked against the 16-bit one */
+static int strides8[3];
+
 /* a decoded picture converted (timed), saved (-d) and checked: 0 if it's
-   FFmpeg's */
+   FFmpeg's. 10-bit: as 16-bit samples (checked against FFmpeg's), and as
+   8-bit (each sample the 16-bit one's top 8 bits) */
 static int check_one(hevcdec *d, const pic_t *p, hevcdec_frame *f, uint8_t *const planes[3], const int strides[3],
                      FILE *dump, int verbose, uint32_t *t_conv)
 {
-    int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2;
+    int cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2, bps = p->depth > 8 ? 2 : 1;
     uint32_t t0 = now_cs(), a[3];
-    hevcdec_frame_to_i420(d, f, planes, strides, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
-    *t_conv += now_cs() - t0;
-    if (dump) {
-        for (int y = 0; y < (int)p->out_h; y++) fwrite(planes[0] + (size_t)y * strides[0], 1, p->out_w, dump);
-        for (int k = 1; k < 3; k++)
-            for (int y = 0; y < ch; y++) fwrite(planes[k] + (size_t)y * strides[k], 1, (size_t)cw, dump);
+    if (bps == 2) {
+        uint16_t *p16[3] = { (uint16_t *)(void *)planes[0], (uint16_t *)(void *)planes[1], (uint16_t *)(void *)planes[2] };
+        hevcdec_frame_to_i420_16(d, f, p16, strides, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
+    } else {
+        hevcdec_frame_to_i420(d, f, planes, strides, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
     }
-    a[0] = adler(planes[0], (int)p->out_w, (int)p->out_h, strides[0]);
-    a[1] = adler(planes[1], cw, ch, strides[1]);
-    a[2] = adler(planes[2], cw, ch, strides[2]);
+    *t_conv += now_cs() - t0;
+    if (bps == 2) {                            /* (the 8-bit conversion of the same frame: the top 8 bits) */
+        int bad8 = 0;
+        hevcdec_frame_to_i420(d, f, planes8, strides8, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h);
+        for (int k = 0; k < 3 && !bad8; k++) {
+            int pw = k ? cw : (int)p->out_w, ph = k ? ch : (int)p->out_h;
+            for (int y = 0; y < ph && !bad8; y++) {
+                const uint16_t *r16 = (const uint16_t *)(const void *)(planes[k] + (size_t)y * strides[k]);
+                const uint8_t *r8 = planes8[k] + (size_t)y * strides8[k];
+                for (int x = 0; x < pw; x++) if (r8[x] != (uint8_t)(r16[x] >> 2)) { bad8 = 1; break; }
+            }
+        }
+        if (bad8) {
+            if (++shown <= 10) say("Picture %u (poc %d): the 8-bit conversion WRONG (not the 10-bit one's top bits)\n",
+                                   (unsigned)p->number, (int)p->poc);
+            return 1;
+        }
+    }
+    if (dump) {
+        for (int y = 0; y < (int)p->out_h; y++) fwrite(planes[0] + (size_t)y * strides[0], 1, (size_t)p->out_w * bps, dump);
+        for (int k = 1; k < 3; k++)
+            for (int y = 0; y < ch; y++) fwrite(planes[k] + (size_t)y * strides[k], 1, (size_t)cw * bps, dump);
+    }
+    a[0] = adler(planes[0], (int)p->out_w * bps, (int)p->out_h, strides[0]);
+    a[1] = adler(planes[1], cw * bps, ch, strides[1]);
+    a[2] = adler(planes[2], cw * bps, ch, strides[2]);
     if (a[0] != p->crc[0] || a[1] != p->crc[1] || a[2] != p->crc[2]) {
         if (++shown <= 10)
             say("Picture %u (poc %d): Y %s, U %s, V %s (%08X %08X %08X, FFmpeg's %08X %08X %08X)\n",
@@ -197,9 +223,10 @@ int probe_main(int argc, char **argv)
     int lag = 1;                           /* -P n: n pictures given and not yet checked (-p: 1) */
     int pend[MAX_FRAMES], pend_slot[MAX_FRAMES], npend = 0;
     uint32_t t_all = 0;                    /* the whole run, decoding and checking */
-    FILE *dump = NULL;                     /* -d: every picture decoded, 8-bit 4:2:0, in decoding order */
+    FILE *dump = NULL;                     /* -d: every picture decoded, 4:2:0 (10-bit: 16-bit LE), in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     int no_wait = 0;                       /* (host tests: -w, the picture converted without waiting first) */
+    int force_depth = 0;                   /* (host tests: -D n, a decoder for n-bit whatever the trace) */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
     int strides[3];
     hevcdec *d = NULL;
@@ -231,6 +258,7 @@ int probe_main(int argc, char **argv)
         }
 #ifdef PROBE_TEST
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) spoil = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-D") && i + 1 < argc) force_depth = atoi(argv[++i]);   /* (host tests: the decoder's depth) */
         else if (!strcmp(argv[i], "-w")) no_wait = 1;   /* (host tests: converting waits by itself) */
         else if (!strcmp(argv[i], "-z")) flat = 2;   /* (host tests: the flag without the lists) */
 #endif
@@ -273,7 +301,7 @@ int probe_main(int argc, char **argv)
         if ((int)pics[i].width > c.width) c.width = (int)pics[i].width;
         if ((int)pics[i].height > c.height) c.height = (int)pics[i].height;
     }
-    c.bit_depth = (int)pics[0].depth;
+    c.bit_depth = force_depth ? force_depth : (int)pics[0].depth;
     if (uncached) c.cached_frames = 0;
     c.pipelined = pipelined;
     if (verbose) c.log = log_line;
@@ -293,12 +321,23 @@ int probe_main(int argc, char **argv)
         }
         holds[i] = 0;
     }
-    strides[0] = c.width;
-    strides[1] = strides[2] = (c.width + 1) / 2;
-    planes[0] = malloc((size_t)c.width * c.height);
-    planes[1] = malloc((size_t)strides[1] * ((c.height + 1) / 2));
-    planes[2] = malloc((size_t)strides[2] * ((c.height + 1) / 2));
-    if (!planes[0] || !planes[1] || !planes[2]) { say("Out of memory\n"); goto out; }
+    {
+        int bps = c.bit_depth > 8 ? 2 : 1;
+        strides[0] = c.width * bps;
+        strides[1] = strides[2] = (c.width + 1) / 2 * bps;
+        planes[0] = malloc((size_t)strides[0] * c.height);
+        planes[1] = malloc((size_t)strides[1] * ((c.height + 1) / 2));
+        planes[2] = malloc((size_t)strides[2] * ((c.height + 1) / 2));
+        if (!planes[0] || !planes[1] || !planes[2]) { say("Out of memory\n"); goto out; }
+        if (bps == 2) {
+            strides8[0] = c.width;
+            strides8[1] = strides8[2] = (c.width + 1) / 2;
+            planes8[0] = malloc((size_t)c.width * c.height);
+            planes8[1] = malloc((size_t)strides8[1] * ((c.height + 1) / 2));
+            planes8[2] = malloc((size_t)strides8[2] * ((c.height + 1) / 2));
+            if (!planes8[0] || !planes8[1] || !planes8[2]) { say("Out of memory\n"); goto out; }
+        }
+    }
 
     t_all = now_cs();
     for (i = 0; i <= npics && !fatal; i++) {
@@ -406,6 +445,8 @@ out:
         free(pics);
         free(file);
         free(planes[0]); free(planes[1]); free(planes[2]);
+        free(planes8[0]); free(planes8[1]); free(planes8[2]);
+        planes8[0] = planes8[1] = planes8[2] = NULL;
         if (out2) fclose(out2);
         if (dump) fclose(dump);
         return ok ? 0 : 1;

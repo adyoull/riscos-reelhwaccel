@@ -11,7 +11,9 @@
  * Phase 2 (the write to NUMROWS) checks each reference's frame holds the
  * picture with that POC, then "decodes": it writes the picture the test
  * gives for the hash (FFmpeg's decode) into the output frame as the block
- * would - NV12 in 128-byte columns - records its POC, and ACTIVE2 latches.
+ * would - NV12 in 128-byte columns, or for 10-bit (CONFIG2 bit 8) three
+ * samples a 32-bit word, 96 a column's row - records its POC, and ACTIVE2
+ * latches.
  *
  * Switches: p1_exhaust (phase 1 says the PU buffer ran out, once),
  * p1_hang / p2_hang (the phase never finishes).
@@ -247,8 +249,11 @@ static void phase2_done(void)
 {
     uint64_t y = (uint64_t)s2[0x8018 / 4] << 6, c = (uint64_t)s2[0x8020 / 4] << 6;
     uint32_t col = s2[0x801C / 4] << 6, size = s2[0x802C / 4], poc = s2[0x8040 / 4] & 0xFFFF;
-    int w = (int)(size & 0xFFFF), h = (int)(size >> 16), pw = 0, ph = 0;
-    const uint8_t *py = NULL, *pu = NULL, *pv = NULL;
+    int w = (int)(size & 0xFFFF), h = (int)(size >> 16), pw = 0, ph = 0, bytes = 0;
+    int ten = (s2[0x8014 / 4] >> 8) & 1;               /* CONFIG2: 10-bit luma */
+    int per_col = ten ? 96 : 128;                      /* samples a column's row */
+    size_t fsize = (size_t)col * (size_t)((w + per_col - 1) / per_col);
+    const void *py = NULL, *pu = NULL, *pv = NULL;
     uint8_t *out;
     fake_hevc.phase2s++;
     have_hash = 0; factors_wrong = 0;
@@ -260,30 +265,60 @@ static void phase2_done(void)
     }
     CHECK(s2[0x8024 / 4] == s2[0x801C / 4] && c > y && c - y < col, "output planes: Y &%llx, C &%llx, column %u",
           (unsigned long long)y, (unsigned long long)c, (unsigned)col);
-    if (!(out = mem(y, (size_t)col * (size_t)((w + 127) / 128), "the output frame"))) return;
-    if (have_hash && picture_fn && picture_fn(pic_hash, &py, &pu, &pv, &pw, &ph) == 0) {
+    CHECK(((s2[0x8014 / 4] >> 9) & 1) == ten && (s2[0x8014 / 4] & 0xFF) == (ten ? 0xAA : 0x88),
+          "CONFIG2 &%08X: luma and chroma depths differ", (unsigned)s2[0x8014 / 4]);
+    if (!(out = mem(y, fsize, "the output frame"))) return;
+    if (have_hash && picture_fn && picture_fn(pic_hash, &py, &pu, &pv, &pw, &ph, &bytes) == 0 && bytes == (ten ? 2 : 1)) {
         int cw = (pw + 1) / 2, ch = (ph + 1) / 2;
         CHECK(pw <= w && ph <= h, "a %dx%d picture in a %dx%d frame", pw, ph, w, h);
-        memset(out, 0x80, (size_t)col * (size_t)((w + 127) / 128));      /* (outside the window: something) */
+        memset(out, 0x80, fsize);                        /* (outside the window: something) */
         if (factors_wrong) fake_hevc.factors_wrong++;
+        if (ten) {                                       /* three samples a word, 96 a column's row */
+            const uint16_t *sy = py, *su = pu, *sv = pv;
+            for (int x0 = 0; x0 < pw; x0 += 96) {
+                uint32_t *cy = (uint32_t *)(void *)(out + (size_t)(x0 / 96) * col);
+                uint32_t *cc = (uint32_t *)(uintptr_t)(c + (size_t)(x0 / 96) * col);
+                for (int r = 0; r < ph; r++)
+                    for (int k = 0; k < 32; k++) {
+                        uint32_t wd = 0;
+                        for (int j = 0; j < 3; j++) {
+                            int x = x0 + 3 * k + j;
+                            wd |= (uint32_t)(x < pw ? sy[(size_t)r * pw + x] & 0x3FF : 0) << (10 * j);
+                        }
+                        cy[(size_t)r * 32 + k] = wd;
+                    }
+                if (factors_wrong) cy[0] ^= 1;
+                for (int r = 0; r < ch; r++)
+                    for (int k = 0; k < 32; k++) {
+                        uint32_t wd = 0;
+                        for (int j = 0; j < 3; j++) {
+                            int i = 3 * k + j, x = x0 / 2 + i / 2;       /* (U V U V ...) */
+                            const uint16_t *pl = i & 1 ? sv : su;
+                            wd |= (uint32_t)(x < cw ? pl[(size_t)r * cw + x] & 0x3FF : 0) << (10 * j);
+                        }
+                        cc[(size_t)r * 32 + k] = wd;
+                    }
+            }
+        } else
         for (int x0 = 0; x0 < pw; x0 += 128) {
             uint8_t *cy = out + (size_t)(x0 / 128) * col, *cc = (uint8_t *)(uintptr_t)c + (size_t)(x0 / 128) * col;
             int n = pw - x0 < 128 ? pw - x0 : 128, nc = cw - x0 / 2 < 64 ? cw - x0 / 2 : 64;
-            for (int r = 0; r < ph; r++) memcpy(cy + (size_t)r * 128, py + (size_t)r * pw + x0, (size_t)n);
+            for (int r = 0; r < ph; r++) memcpy(cy + (size_t)r * 128, (const uint8_t *)py + (size_t)r * pw + x0, (size_t)n);
             if (factors_wrong) cy[0] ^= 1;                /* (dequantised wrongly: some samples off) */
             for (int r = 0; r < ch; r++)
                 for (int x = 0; x < nc; x++) {
-                    cc[(size_t)r * 128 + 2 * x] = pu[(size_t)r * cw + x0 / 2 + x];
-                    cc[(size_t)r * 128 + 2 * x + 1] = pv[(size_t)r * cw + x0 / 2 + x];
+                    cc[(size_t)r * 128 + 2 * x] = ((const uint8_t *)pu)[(size_t)r * cw + x0 / 2 + x];
+                    cc[(size_t)r * 128 + 2 * x + 1] = ((const uint8_t *)pv)[(size_t)r * cw + x0 / 2 + x];
                 }
         }
     } else {
         fake_hevc.unknown_pictures++;
-        memset(out, 0x10, (size_t)col * (size_t)((w + 127) / 128));
+        CHECK(!bytes || bytes == (ten ? 2 : 1), "a %d-bit frame for a picture of %d bytes a sample", ten ? 10 : 8, bytes);
+        memset(out, 0x10, fsize);
     }
     if (fake_hevc.overrun) {                             /* (a block writing past the frame's end) */
-        uint8_t *past = mem(y, (size_t)col * (size_t)((w + 127) / 128) + (size_t)fake_hevc.overrun, "past the frame");
-        if (past) memset(past + (size_t)col * (size_t)((w + 127) / 128), 0x55, (size_t)fake_hevc.overrun);
+        uint8_t *past = mem(y, fsize + (size_t)fake_hevc.overrun, "past the frame");
+        if (past) memset(past + fsize, 0x55, (size_t)fake_hevc.overrun);
     }
     {
         int found;

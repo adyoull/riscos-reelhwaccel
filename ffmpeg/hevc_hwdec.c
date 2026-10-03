@@ -12,13 +12,14 @@
  *
  *  - the decoder hevc_hwdec, for programs (Reel): FFmpeg's HEVC decoder
  *    with that hwaccel run inside it, its pictures given out as ordinary
- *    YUV420P frames (converted, waiting for the block only if it hasn't
- *    finished the picture yet).
+ *    YUV420P frames, or YUV420P10 for 10-bit streams (YUV420P with the
+ *    option output_8bit), converted, waiting for the block only if it
+ *    hasn't finished the picture yet.
  *
  * It refuses (AVERROR(ENOSYS), so the caller can use the hevc decoder
- * instead) streams the block can't decode here: other than 8-bit 4:2:0
- * (10-bit is still to come), over 4096x4096, a picture size that grows
- * part way, and machines without the block (not a Pi 4). Streams with
+ * instead) streams the block can't decode here: other than 8-bit or
+ * 10-bit 4:2:0, over 4096x4096, a picture size that grows or a depth that
+ * changes part way, and machines without the block (not a Pi 4). Streams with
  * their parameter sets in the extradata (MP4) are refused at open, others
  * at their first picture.
  *
@@ -83,7 +84,7 @@ typedef struct HWDecContext {
     int eof_sent;
     int refused;                /* not for the block: AVERROR(ENOSYS) */
     hevcdec *d;
-    int d_w, d_h;
+    int d_w, d_h, d_depth;
     PoolEntry pool[MAX_POOL];
     int npool;
     uint64_t number;            /* pictures given so far */
@@ -97,6 +98,7 @@ typedef struct HWDecContext {
     /* options */
     int pipelined;
     int cached_frames;
+    int output_8bit;            /* 10-bit streams given out as YUV420P (each sample's top 8 bits) */
 } HWDecContext;
 
 typedef struct HWDecPicture {
@@ -114,8 +116,9 @@ static void hevcdec_log(void *handle, const char *text)
     av_log(handle, AV_LOG_DEBUG, "%s\n", text);
 }
 
-/* hevcdec open, with frames this big at least: 0, or AVERROR(ENOSYS) */
-static int ensure_open(HWDecContext *w, int width, int height)
+/* hevcdec open, with frames this big at least, for this depth: 0, or
+   AVERROR(ENOSYS) */
+static int ensure_open(HWDecContext *w, int width, int height, int depth)
 {
     hevcdec_config c;
     int r;
@@ -123,12 +126,17 @@ static int ensure_open(HWDecContext *w, int width, int height)
         av_log(w->avctx, AV_LOG_ERROR, "%dx%d is too big for the HEVC block (4096x4096)\n", width, height);
         return AVERROR(ENOSYS);
     }
-    if (w->d && width <= w->d_w && height <= w->d_h) return 0;
+    if (depth != 8 && depth != 10) {
+        av_log(w->avctx, AV_LOG_ERROR, "Not for the HEVC block: %d-bit (8-bit or 10-bit only)\n", depth);
+        return AVERROR(ENOSYS);
+    }
+    if (w->d && width <= w->d_w && height <= w->d_h && depth == w->d_depth) return 0;
     if (w->d) {
         for (int i = 0; i < w->npool; i++)
             if (w->pool[i].in_use) {
-                av_log(w->avctx, AV_LOG_ERROR, "The picture size grew (%dx%d to %dx%d) part way\n", w->d_w,
-                       w->d_h, width, height);
+                av_log(w->avctx, AV_LOG_ERROR, "The picture size grew or the depth changed (%dx%d %d-bit to "
+                       "%dx%d %d-bit) part way\n", w->d_w, w->d_h, w->d_depth, width, height, depth);
+                w->refused = 1;          /* (said: not again as the format's refusal) */
                 return AVERROR(ENOSYS);
             }
         hevcdec_close(w->d);            /* (its frames go with it) */
@@ -138,7 +146,7 @@ static int ensure_open(HWDecContext *w, int width, int height)
     hevcdec_config_init(&c);
     c.width = width;
     c.height = height;
-    c.bit_depth = 8;
+    c.bit_depth = depth;
     c.pipelined = w->pipelined;
     c.cached_frames = w->cached_frames;
     c.log = hevcdec_log;
@@ -150,7 +158,8 @@ static int ensure_open(HWDecContext *w, int width, int height)
     }
     w->d_w = width;
     w->d_h = height;
-    av_log(w->avctx, AV_LOG_VERBOSE, "hevcdec %s open, frames %dx%d%s\n", HEVCDEC_VERSION, width, height,
+    w->d_depth = depth;
+    av_log(w->avctx, AV_LOG_VERBOSE, "hevcdec %s open, frames %dx%d %d-bit%s\n", HEVCDEC_VERSION, width, height, depth,
            w->pipelined ? ", pipelined" : "");
     return 0;
 }
@@ -482,8 +491,8 @@ static int hwaccel_init(AVCodecContext *inner)
     const HEVCContext *h = inner->priv_data;
     const HEVCSPS *sps = h->ps.sps;
     if (!w) return AVERROR(ENOSYS);         /* (only inside the hevc_hwdec decoder) */
-    if (!sps || sps->chroma_format_idc != 1 || sps->bit_depth != 8) return AVERROR(ENOSYS);
-    return ensure_open(w, sps->width, sps->height);
+    if (!sps || sps->chroma_format_idc != 1 || (sps->bit_depth != 8 && sps->bit_depth != 10)) return AVERROR(ENOSYS);
+    return ensure_open(w, sps->width, sps->height, sps->bit_depth);
 }
 
 static void pool_release(void *opaque, uint8_t *data)
@@ -639,7 +648,7 @@ static enum AVPixelFormat inner_get_format(AVCodecContext *inner, const enum AVP
         if (*f == AV_PIX_FMT_HEVCDEC) return *f;
     if (w && !w->refused) {
         const char *name = f > fmts ? av_get_pix_fmt_name(f[-1]) : "?";
-        av_log(w->avctx, AV_LOG_ERROR, "Not for the HEVC block: %s (8-bit 4:2:0 only, up to 4096x4096)\n",
+        av_log(w->avctx, AV_LOG_ERROR, "Not for the HEVC block: %s (8-bit or 10-bit 4:2:0 only, up to 4096x4096)\n",
                name ? name : "?");
         w->refused = 1;
     }
@@ -663,7 +672,7 @@ static av_cold int hwdec_close(AVCodecContext *avctx)
 static av_cold int hwdec_init(AVCodecContext *avctx)
 {
     HWDecContext *w = avctx->priv_data;
-    int ret, maxw = 0, maxh = 0;
+    int ret, maxw = 0, maxh = 0, depth = 0;
     w->magic = MAGIC;
     w->avctx = avctx;
     if (!(w->pkt = av_packet_alloc()) || !(w->hwf = av_frame_alloc()) || !(w->held = av_frame_alloc()))
@@ -691,32 +700,35 @@ static av_cold int hwdec_init(AVCodecContext *avctx)
             const HEVCSPS *sps;
             if (!h->ps.sps_list[i]) continue;
             sps = (const HEVCSPS *)h->ps.sps_list[i]->data;
-            if (sps->chroma_format_idc != 1 || sps->bit_depth != 8) {
-                av_log(avctx, AV_LOG_ERROR, "Not for the HEVC block: %d-bit, chroma format %d (8-bit 4:2:0 only)\n",
-                       sps->bit_depth, sps->chroma_format_idc);
+            if (sps->chroma_format_idc != 1 || (sps->bit_depth != 8 && sps->bit_depth != 10)) {
+                av_log(avctx, AV_LOG_ERROR, "Not for the HEVC block: %d-bit, chroma format %d (8-bit or 10-bit 4:2:0 "
+                       "only)\n", sps->bit_depth, sps->chroma_format_idc);
                 return AVERROR(ENOSYS);
             }
             maxw = FFMAX(maxw, sps->width);
             maxh = FFMAX(maxh, sps->height);
+            if (!depth) depth = sps->bit_depth;      /* (the first: another one opens again at its first picture) */
         }
     }
-    if (maxw && (ret = ensure_open(w, maxw, maxh)) < 0) return ret;
-    avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    if (maxw && (ret = ensure_open(w, maxw, maxh, depth)) < 0) return ret;
+    avctx->pix_fmt = depth == 10 && !w->output_8bit ? AV_PIX_FMT_YUV420P10 : AV_PIX_FMT_YUV420P;
     return 0;
 }
 
-/* an inner frame (the block's picture) out as an ordinary YUV420P one */
+/* an inner frame (the block's picture) out as an ordinary YUV420P one
+   (YUV420P10 for a 10-bit stream, unless output_8bit) */
 static int give_out(AVCodecContext *avctx, AVFrame *frame, AVFrame *hwf)
 {
     HWDecContext *w = avctx->priv_data;
     hevcdec_frame *f = (hevcdec_frame *)hwf->data[3];
     int x = (int)hwf->crop_left, y = (int)hwf->crop_top;
     int width = hwf->width - x, height = hwf->height - y, ret, failed;
+    int sixteen = w->d_depth == 10 && !w->output_8bit;
     PoolEntry *e = entry_of(w, f);
     failed = hevcdec_frame_wait(w->d, f) != HEVCDEC_OK || (e && e->failed);
     if (failed && w->failures++ < 10) av_log(avctx, AV_LOG_ERROR, "A picture: %s\n", hevcdec_error(w->d));
     if ((ret = ff_set_dimensions(avctx, width, height)) < 0) return ret;
-    avctx->pix_fmt = AV_PIX_FMT_YUV420P;
+    avctx->pix_fmt = sixteen ? AV_PIX_FMT_YUV420P10 : AV_PIX_FMT_YUV420P;
     avctx->sample_aspect_ratio = w->inner->sample_aspect_ratio;
     avctx->color_range = w->inner->color_range;
     avctx->color_primaries = w->inner->color_primaries;
@@ -726,7 +738,12 @@ static int give_out(AVCodecContext *avctx, AVFrame *frame, AVFrame *hwf)
     if ((ret = ff_get_buffer(avctx, frame, 0)) < 0) return ret;
     if ((ret = av_frame_copy_props(frame, hwf)) < 0) return ret;
     frame->crop_left = frame->crop_top = frame->crop_right = frame->crop_bottom = 0;   /* (already the window) */
-    hevcdec_frame_to_i420(w->d, f, frame->data, frame->linesize, x, y, width, height);
+    if (sixteen) {
+        uint16_t *p16[3] = { (uint16_t *)frame->data[0], (uint16_t *)frame->data[1], (uint16_t *)frame->data[2] };
+        hevcdec_frame_to_i420_16(w->d, f, p16, frame->linesize, x, y, width, height);
+    } else {
+        hevcdec_frame_to_i420(w->d, f, frame->data, frame->linesize, x, y, width, height);
+    }
     if (failed) frame->decode_error_flags |= FF_DECODE_ERROR_INVALID_BITSTREAM;
     av_frame_unref(hwf);
     return 0;
@@ -803,6 +820,8 @@ static const AVOption options[] = {
       { .i64 = 1 }, 0, 1, VD },
     { "cached_frames", "the block's frames cacheable (much quicker to convert)", OFFSET(cached_frames),
       AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VD },
+    { "output_8bit", "10-bit streams given out as 8-bit YUV420P (each sample's top 8 bits)", OFFSET(output_8bit),
+      AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
     { NULL }
 };
 
@@ -826,6 +845,6 @@ const FFCodec ff_hevc_hwdec_decoder = {
     .p.priv_class   = &hwdec_class,
     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_HARDWARE,
     .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS | FF_CODEC_CAP_INIT_CLEANUP,
-    .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE },
+    .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_NONE },
     .p.wrapper_name = "hevcdec",
 };

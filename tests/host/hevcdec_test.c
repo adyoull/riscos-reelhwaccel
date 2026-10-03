@@ -4,7 +4,8 @@
  *
  *   hevcdec_test TRACE RAW WxH [TRACE2 RAW2 WxH2 ...]
  * Each TRACE comes from tools/hevctrace (FFmpeg's HEVC decoder) and RAW is
- * FFmpeg's decode of the same clip (8-bit I420, display order). The fake
+ * FFmpeg's decode of the same clip (I420, display order: 8-bit, or for a
+ * 10-bit trace yuv420p10le). The fake
  * "decodes" a picture by writing FFmpeg's (found by its first slice's
  * bitstream), so hevctest's check passes only if everything between -
  * the slices' bytes, the frames, the references, the 128-byte column
@@ -35,26 +36,41 @@ static uint32_t adler(const uint8_t *p, size_t n)
 /* ---- the pictures, by their first slice's bitstream ---- */
 #define MAXP 512
 static struct { uint32_t hash; const uint8_t *y, *u, *v; } map[MAXP];
-static int nmap, map_w, map_h;
+static int nmap, map_w, map_h, map_bytes;
 static uint8_t *raw;
 
-static int picture(uint32_t hash, const uint8_t **y, const uint8_t **u, const uint8_t **v, int *w, int *h)
+static int picture(uint32_t hash, const void **y, const void **u, const void **v, int *w, int *h, int *bytes)
 {
     for (int i = 0; i < nmap; i++)
-        if (map[i].hash == hash) { *y = map[i].y; *u = map[i].u; *v = map[i].v; *w = map_w; *h = map_h; return 0; }
+        if (map[i].hash == hash) {
+            *y = map[i].y; *u = map[i].u; *v = map[i].v; *w = map_w; *h = map_h; *bytes = map_bytes;
+            return 0;
+        }
     return -1;
 }
 
-/* the trace's pictures matched to RAW's by their Adler-32s; the hash of
-   each first slice's data (as phase 1 is given it) noted */
+/* Adler-32 of a w x h rectangle (bytes a row: wb) at p, rows stride apart */
+static uint32_t adler_rect(const uint8_t *p, size_t wb, int h, size_t stride)
+{
+    uint32_t a = 1, b = 0;
+    for (int y = 0; y < h; y++, p += stride)
+        for (size_t i = 0; i < wb; i++) { a = (a + p[i]) % 65521; b = (b + a) % 65521; }
+    return b << 16 | a;
+}
+
+/* the trace's pictures matched to RAW's by their Adler-32s over the
+   output window (RAW: whole pictures, the coded size, so the fake can
+   write them as the block would; for an uncropped clip the window is the
+   whole picture); the hash of each first slice's data (as phase 1 is
+   given it) noted */
 static int load(const char *trace, const char *rawname, int w, int h)
 {
     FILE *f;
     long n, rn;
     uint8_t *d;
-    size_t o = 28, fs = (size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2);
+    size_t o = 28, fs, yn, cn;
     size_t s_sps, s_pps, s_sp, s_dec, s_sm;
-    int matched = 0, pics = 0;
+    int matched = 0, pics = 0, bytes = 1;
     nmap = 0;
     map_w = w; map_h = h;
     free(raw);
@@ -69,8 +85,12 @@ static int load(const char *trace, const char *rawname, int w, int h)
     if (fread(d, 1, (size_t)n, f) != (size_t)n) { fclose(f); return -1; }
     fclose(f);
     s_sps = rd32(d + 8); s_pps = rd32(d + 12); s_sp = rd32(d + 16); s_dec = rd32(d + 20); s_sm = rd32(d + 24);
+    if (o + 48 <= (size_t)n && rd32(d + o + 20) > 8) bytes = 2;      /* (the first picture's depth) */
+    map_bytes = bytes;
+    yn = (size_t)w * h * bytes; cn = (size_t)((w + 1) / 2) * ((h + 1) / 2) * bytes; fs = yn + 2 * cn;
     while (o + 48 <= (size_t)n) {
         uint32_t nsl = rd32(d + o + 24), has_sm = rd32(d + o + 28), hash = 0, crc[3];
+        int wl = (int)rd32(d + o + 32), wt = (int)rd32(d + o + 36), ww = (int)rd32(d + o + 40), wh = (int)rd32(d + o + 44);
         o += 48 + s_sps + s_pps + s_dec + (has_sm ? s_sm : 0);
         for (uint32_t i = 0; i < nsl; i++) {
             const uint8_t *sp = d + o;
@@ -83,9 +103,11 @@ static int load(const char *trace, const char *rawname, int w, int h)
         for (int k = 0; k < 3; k++) { crc[k] = rd32(d + o); o += 4; }
         pics++;
         for (size_t k = 0; k * fs + fs <= (size_t)rn && nmap < MAXP; k++) {
-            const uint8_t *y = raw + k * fs, *u = y + (size_t)w * h, *v = u + (size_t)((w + 1) / 2) * ((h + 1) / 2);
-            size_t cn = (size_t)((w + 1) / 2) * ((h + 1) / 2);
-            if (adler(y, (size_t)w * h) == crc[0] && adler(u, cn) == crc[1] && adler(v, cn) == crc[2]) {
+            const uint8_t *y = raw + k * fs, *u = y + yn, *v = u + cn;
+            size_t cs = (size_t)((w + 1) / 2) * bytes, ys = (size_t)w * bytes;
+            size_t cwb = (size_t)((ww + 1) / 2) * bytes, coff = (size_t)(wt / 2) * cs + (size_t)(wl / 2) * bytes;
+            if (adler_rect(y + (size_t)wt * ys + (size_t)wl * bytes, (size_t)ww * bytes, wh, ys) == crc[0] &&
+                adler_rect(u + coff, cwb, (wh + 1) / 2, cs) == crc[1] && adler_rect(v + coff, cwb, (wh + 1) / 2, cs) == crc[2]) {
                 map[nmap].hash = hash; map[nmap].y = y; map[nmap].u = u; map[nmap].v = v; nmap++;
                 matched++;
                 break;
@@ -93,7 +115,7 @@ static int load(const char *trace, const char *rawname, int w, int h)
         }
     }
     free(d);
-    printf("%s: %d pictures, %d matched in %s\n", trace, pics, matched, rawname);
+    printf("%s: %d pictures (%d-bit), %d matched in %s\n", trace, pics, bytes == 2 ? 10 : 8, matched, rawname);
     return matched == pics && pics ? 0 : -1;
 }
 
@@ -133,6 +155,22 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     sscanf(size, "%dx%d", &w, &h);
     if (load(trace, rawname, w, h)) { CHECK(0, "%s: the pictures don't match %s", trace, rawname); return; }
     fake_hevc_set_pictures(picture);
+
+    if (w >= 3840) {                            /* 4K: frames of 12-17 MB, so a few of them, and the main runs only */
+        static const char *const opts[] = { "-f 6", "-p -f 6" };
+        for (int k = 0; k < 2; k++) {
+            fake_hevc_reset();
+            fake_hevc.p2_ticks = k ? 4 : 1;
+            o = run_app(&ret, trace, opts[k]);
+            printf("%s", o);
+            CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors &&
+                  !fake_hevc.unknown_pictures && fake_hevc.phase2s == nmap && (!k || fake_hevc.overlaps > 0),
+                  "hevctest %s %s (%d): %d references wrong, %d unknown, %d phase 2s", opts[k], trace, ret,
+                  fake_hevc.ref_errors, fake_hevc.unknown_pictures, fake_hevc.phase2s);
+            cleaned(trace);
+        }
+        return;
+    }
 
     fake_hevc_reset();
     o = run_app(&ret, trace, NULL);
@@ -240,21 +278,33 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
           "a block writing past the frames (%d):\n%s", ret, o);
     cleaned("overrun");
 
+    fake_hevc_reset();                          /* the stream's depth isn't the decoder's: refused, said */
+    fake_hevc.quiet = 1;
+    o = run_app(&ret, trace, map_bytes == 2 ? "-c 2 -D 8" : "-c 2 -D 10");
+    CHECK(ret == 1 && strstr(o, map_bytes == 2 ? "10-bit (chroma 10-bit): this decoder is for 8-bit" :
+                                                 "8-bit (chroma 8-bit): this decoder is for 10-bit") &&
+          fake_hevc.phase1s == 0, "hevctest, %d-bit trace, the other depth's decoder (%d):\n%s", map_bytes == 2 ? 10 : 8,
+          ret, o);
+    fake_hevc.fails = 0;
+    cleaned("other depth");
+
+    if (!strstr(trace, "crop")) {
     fake_hevc_reset();                          /* -d: the pictures as decoded, in decoding order */
     remove("/tmp/hevcdec_test.dump");
     o = run_app(&ret, trace, "-c 3 -d /tmp/hevcdec_test.dump");
     {
         FILE *f = fopen("/tmp/hevcdec_test.dump", "rb");
-        size_t fs = (size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2), got = 0, ok = 0;
+        size_t fs = ((size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2)) * map_bytes, got = 0, ok = 0;
         uint8_t *b = malloc(3 * fs + 1);
         if (f && b) { got = fread(b, 1, 3 * fs + 1, f); fclose(f); }
-        if (got == 3 * fs && nmap) ok = !memcmp(b, map[0].y, (size_t)w * h);   /* picture 1: FFmpeg's first */
+        if (got == 3 * fs && nmap) ok = !memcmp(b, map[0].y, (size_t)w * h * map_bytes);   /* picture 1: FFmpeg's first */
         CHECK(ret == 0 && got == 3 * fs && ok, "hevctest -d: %zu bytes (%zu a picture), first picture %s:\n%s", got, fs,
               ok ? "right" : "wrong", o);
         free(b);
         remove("/tmp/hevcdec_test.dump");
     }
     cleaned("-d");
+    }
 
     /* pipelined (-p): pictures given without waiting, phase 1 of one
        alongside phase 2 of another (phase 2 made slow here) */
@@ -331,6 +381,13 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     cleaned("-t");
 }
 
+static char logged[4096];
+static void log_to(void *h, const char *t)
+{
+    (void)h;
+    if (strlen(logged) + strlen(t) + 2 < sizeof logged) { strcat(logged, t); strcat(logged, "\n"); }
+}
+
 int main(int argc, char **argv)
 {
     hevcdec *d;
@@ -347,9 +404,36 @@ int main(int argc, char **argv)
     fake_hevc_reset();
     c.width = 8192;
     CHECK(hevcdec_open(&d, &c) == HEVCDEC_UNSUPPORTED, "8192 wide");
-    c.width = 352; c.bit_depth = 10;
-    CHECK(hevcdec_open(&d, &c) == HEVCDEC_UNSUPPORTED, "10-bit");
+    c.width = 352; c.bit_depth = 12;
+    CHECK(hevcdec_open(&d, &c) == HEVCDEC_UNSUPPORTED && strstr(hevcdec_open_error(), "12-bit"), "12-bit: %s",
+          hevcdec_open_error());
+    c.bit_depth = 10;                           /* (0.1.7) 10-bit: frames 3 samples a word, 96 a column */
+    c.log = log_to; logged[0] = 0;
+    r = hevcdec_open(&d, &c);
+    c.log = NULL;
+    CHECK(r == HEVCDEC_OK, "10-bit: %s", hevcdec_open_error());
+    if (r == HEVCDEC_OK) {
+        /* 352 wide: 4 columns of 96 samples (384); 288 high: columns of 432 rows; 4 * 128 * 432 bytes */
+        CHECK(strstr(logged, "frames 384x288 (10-bit NV12, 3 samples a word, 128-byte columns of 432 lines), 221184 bytes"),
+              "10-bit frames: %s", logged);
+        CHECK(hevcdec_frame_new(d) != NULL, "a 10-bit frame");
+        hevcdec_close(d);
+        d = NULL;
+    }
+    cleaned("10-bit open");
+    fake_hevc_reset();
     c.bit_depth = 8;
+    r = hevcdec_open(&d, &c);
+    if (r == HEVCDEC_OK) {                      /* 16-bit samples: a 10-bit decoder's only */
+        uint16_t buf[8], *p16[3] = { buf, buf, buf };
+        int st[3] = { 0, 0, 0 };
+        hevcdec_frame *f = hevcdec_frame_new(d);
+        CHECK(f && hevcdec_frame_to_i420_16(d, f, p16, st, 0, 0, 2, 2) == HEVCDEC_UNSUPPORTED, "16-bit from an 8-bit decoder");
+        hevcdec_close(d);
+        d = NULL;
+    }
+    cleaned("16-bit refused");
+    fake_hevc_reset();
     fake_hevc.no_memory = 1;
     r = hevcdec_open(&d, &c);
     CHECK(r == HEVCDEC_ERROR && !d, "no memory: %d %s", r, hevcdec_open_error());

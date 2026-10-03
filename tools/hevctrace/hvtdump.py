@@ -57,15 +57,15 @@ def main():
     if a and a[0] == '--check':
         path, raw, size = a[1], a[2], a[3]
         w, h = map(int, size.split('x'))
-        cw, ch = (w + 1) // 2, (h + 1) // 2
-        fs = w * h + 2 * cw * ch
+        pics = read_trace(path)
+        bps = 2 if pics and pics[0]['depth'] > 8 else 1    # (10-bit: the raw file is yuv420p10le)
+        yn, cn = w * h * bps, ((w + 1) // 2) * ((h + 1) // 2) * bps
+        fs = yn + 2 * cn
         r = open(raw, 'rb').read()
         want = []
         for i in range(len(r) // fs):
             f = r[i * fs:(i + 1) * fs]
-            want.append((zlib.adler32(f[:w * h]), zlib.adler32(f[w * h:w * h + cw * ch]),
-                         zlib.adler32(f[w * h + cw * ch:])))
-        pics = read_trace(path)
+            want.append((zlib.adler32(f[:yn]), zlib.adler32(f[yn:yn + cn]), zlib.adler32(f[yn + cn:])))
         got = [p['crc'] for p in pics]
         bad = [p['num'] for p in pics if p['crc'] not in want]
         missing = [i for i, c in enumerate(want) if c not in got]

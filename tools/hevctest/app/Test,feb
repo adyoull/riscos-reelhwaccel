@@ -1,4 +1,4 @@
-| Test: the five HEVC clips through the Pi 4's HEVC block (hevcdec), every
+| Test: the 8-bit and 10-bit HEVC clips (all but 4K: see UHD) through the Pi 4's HEVC block (hevcdec), every
 | picture checked against FFmpeg's own decode. Reports to Result.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
@@ -12,3 +12,8 @@ Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.slices.trace
 Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.nowpp.trace
 Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.odd.trace
 Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.small10.trace
+Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.slices10.trace
+Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.odd10.trace
+Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.crop10.trace
+Run <Obey$Dir>.hevctest -o <Obey$Dir>.Result <Obey$Dir>.clips.hd10.trace

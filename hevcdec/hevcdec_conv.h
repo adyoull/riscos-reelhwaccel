@@ -10,4 +10,11 @@
    (w+1)/2 x (h+1)/2). */
 void hevcdec_col128_to_i420(const uint8_t *b, size_t col, size_t c_off, uint8_t *const planes[3],
                             const int strides[3], int x0, int y0, int w, int h);
+/* 10-bit frames (NV12_10_COL128: 96 samples a 128-byte column row): as
+   16-bit samples (strides in bytes), or as 8-bit (each sample's top 8
+   bits) */
+void hevcdec_col30_to_planar16(const uint8_t *b, size_t col, size_t c_off, uint16_t *const planes[3], const int strides[3],
+                               int x0, int y0, int w, int h);
+void hevcdec_col30_to_i420(const uint8_t *b, size_t col, size_t c_off, uint8_t *const planes[3], const int strides[3],
+                           int x0, int y0, int w, int h);
 #endif

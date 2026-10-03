@@ -16,3 +16,7 @@ Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.odd.trace
 Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd.trace
 Run <Obey$Dir>.hevctest -p -t -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd.trace
 Run <Obey$Dir>.hevctest -P 4 -t -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.small10.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.crop10.trace
+Run <Obey$Dir>.hevctest -p -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd10.trace
+Run <Obey$Dir>.hevctest -p -t -o <Obey$Dir>.ResultP <Obey$Dir>.clips.hd10.trace

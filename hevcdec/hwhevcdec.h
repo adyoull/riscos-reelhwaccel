@@ -15,6 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
+ * 0.1.7: 10-bit too (config.bit_depth; frames NV12_10_COL128, converted to
+ * 16-bit samples by hevcdec_frame_to_i420_16, or to 8-bit), and sizes up
+ * to 4096x4096 (4K) tested.
  * 0.1.5: 8-bit 4:2:0 only; output frames cacheable (unless the config
  * says not), converted with NEON; pictures one at a time, or pipelined
  * (config.pipelined: hevcdec_decode returns at once, hevcdec_frame_wait). Streams without scaling
@@ -29,7 +32,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.6"
+#define HEVCDEC_VERSION "0.1.7"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -40,7 +43,7 @@ typedef struct hevcdec_frame hevcdec_frame;
 
 typedef struct {
     int width, height;          /* the largest picture to come (frames are made this size) */
-    int bit_depth;              /* 8 */
+    int bit_depth;              /* 8 (default) or 10 (0.1.7): the stream's; frames are made for it */
     int cached_frames;          /* 1 (default): output frames cacheable, much quicker to read */
     int pipelined;              /* 0 (default): hevcdec_decode waits for its picture. 1: it returns
                                    once the picture is given to the block (hevcdec_frame_wait for it),
@@ -85,7 +88,8 @@ void hevcdec_config_init(hevcdec_config *c);
 int hevcdec_open(hevcdec **out, const hevcdec_config *c);
 const char *hevcdec_open_error(void);
 
-/* An output frame (NV12, 128-byte columns, as the block writes it); NULL
+/* An output frame (NV12, or 10-bit NV12 three samples a word, in 128-byte
+   columns, as the block writes it); NULL
    if there's no memory. Frames go with hevcdec_close. */
 hevcdec_frame *hevcdec_frame_new(hevcdec *d);
 
@@ -104,9 +108,15 @@ int hevcdec_finish(hevcdec *d);
 
 /* Part of the frame's picture as planar 8-bit 4:2:0: w x h from (x, y) in
    luma samples (the SPS's output window; x and y even), U and V
-   (w+1)/2 x (h+1)/2 */
+   (w+1)/2 x (h+1)/2. From a 10-bit decoder: each sample's top 8 bits
+   (truncated, not rounded or dithered). */
 void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x,
                            int y, int w, int h);
+/* (0.1.7) The same as 10-bit samples in 16-bit words (FFmpeg's
+   AV_PIX_FMT_YUV420P10 on a little-endian machine; strides in bytes, planes
+   2-byte aligned): a 10-bit decoder only (else HEVCDEC_UNSUPPORTED) */
+int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const planes[3], const int strides[3], int x,
+                             int y, int w, int h);
 
 const char *hevcdec_error(const hevcdec *d);
 void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s);

@@ -7,7 +7,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
-V=${1:-0.1.6}
+V=${1:-0.1.8}
 CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 ELF2AIF=${ELF2AIF:-$TOP/tools/elf2aif/elf2aif}
 FFMPEG=${FFMPEG:-ffmpeg}
@@ -20,12 +20,18 @@ ${CROSS}gcc -O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -fstack-clash-protec
   -o "$TMP/hevctest.elf" "$HERE/hevctest.c" -L"$TMP/lib" -lhevcdec
 "$ELF2AIF" -e "$TMP/hevctest.elf" "$TMP/HEVCTest/hevctest,ff8" >/dev/null
 C="$TMP/HEVCTest/clips"
-clip() {   # name size frames x265-params
+clip() {   # name size frames x265-params [pix_fmt [hevc_metadata crop]]
+  local pf=${5:-yuv420p} size
   $FFMPEG -v error -y -f lavfi -i testsrc2=size=$2:rate=25 -frames:v $3 -c:v libx265 \
-    -x265-params "log-level=error:$4" -pix_fmt yuv420p "$C/$1.mp4"
+    -x265-params "log-level=error:$4" -pix_fmt $pf "$C/$1.mp4"
+  if [ -n "${6:-}" ]; then
+    $FFMPEG -v error -y -i "$C/$1.mp4" -c copy -bsf:v "hevc_metadata=$6" "$C/$1.c.mp4"
+    mv "$C/$1.c.mp4" "$C/$1.mp4"
+  fi
+  size=$(ffprobe -v error -select_streams v -show_entries stream=width,height -of csv=p=0:s=x "$C/$1.mp4")
   HEVC_TRACE="$C/$1.trace" "$TRACER" -v error -threads 1 -i "$C/$1.mp4" -f framecrc - > /dev/null
-  $FFMPEG -v error -y -i "$C/$1.mp4" -f rawvideo -pix_fmt yuv420p "$C/$1.yuv"
-  python3 "$TOP/tools/hevctrace/hvtdump.py" --check "$C/$1.trace" "$C/$1.yuv" "$2" > /dev/null
+  $FFMPEG -v error -y -flags unaligned -i "$C/$1.mp4" -f rawvideo -pix_fmt $pf "$C/$1.yuv"
+  python3 "$TOP/tools/hevctrace/hvtdump.py" --check "$C/$1.trace" "$C/$1.yuv" "$size" > /dev/null
   rm "$C/$1.yuv"
   mkdir "$C/$1"
   mv "$C/$1.trace" "$C/$1/trace"
@@ -36,6 +42,15 @@ clip slices 416x240 12 "keyint=6:bframes=2:slices=4"                # four slice
 clip nowpp 416x240 12 "keyint=12:bframes=3:wpp=0:scaling-list=default"   # no WPP; scaling lists
 clip odd 426x240 8 "keyint=4:bframes=0:wpp=0"                       # cropped (coded 432 wide)
 clip hd 1920x1080 60 "keyint=30:bframes=3:crf=26"                   # 1080p
+# (0.1.8) 10-bit: three samples a 32-bit word in the block's frames, 96 a column
+clip small10 352x288 20 "keyint=10:bframes=2" yuv420p10le
+clip slices10 416x240 12 "keyint=6:bframes=2:slices=4" yuv420p10le
+clip odd10 426x240 8 "keyint=4:bframes=0:wpp=0" yuv420p10le         # coded 432: four and a half columns
+clip crop10 416x240 6 "keyint=3:bframes=1" yuv420p10le "crop_left=16:crop_top=8:crop_right=32:crop_bottom=4"   # samples split across words
+clip hd10 1920x1080 60 "keyint=30:bframes=3:crf=26" yuv420p10le     # 1080p 10-bit
+# 4K (3840x2160), 8-bit and 10-bit
+clip uhd 3840x2160 30 "keyint=30:bframes=3:crf=28"
+clip uhd10 3840x2160 30 "keyint=30:bframes=3:crf=28" yuv420p10le
 cp "$HERE"/app/* "$TMP/HEVCTest/"
 mkdir -p "$TOP/dist"
 rm -f "$TOP/dist/HEVCTest-$V.zip"

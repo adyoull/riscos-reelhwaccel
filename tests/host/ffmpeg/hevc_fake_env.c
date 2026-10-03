@@ -33,12 +33,15 @@ static uint32_t adler(const uint8_t *p, size_t n)
 
 #define MAXP 1024
 static struct { uint32_t hash; const uint8_t *y, *u, *v; } map[MAXP];
-static int nmap, map_w, map_h;
+static int nmap, map_w, map_h, map_bytes;
 
-static int picture(uint32_t hash, const uint8_t **y, const uint8_t **u, const uint8_t **v, int *w, int *h)
+static int picture(uint32_t hash, const void **y, const void **u, const void **v, int *w, int *h, int *bytes)
 {
     for (int i = 0; i < nmap; i++)
-        if (map[i].hash == hash) { *y = map[i].y; *u = map[i].u; *v = map[i].v; *w = map_w; *h = map_h; return 0; }
+        if (map[i].hash == hash) {
+            *y = map[i].y; *u = map[i].u; *v = map[i].v; *w = map_w; *h = map_h; *bytes = map_bytes;
+            return 0;
+        }
     return -1;
 }
 
@@ -67,7 +70,7 @@ __attribute__((constructor)) static void load(void)
     const char *tn = getenv("HEVC_FAKE_TRACE"), *yn = getenv("HEVC_FAKE_YUV"), *sz = getenv("HEVC_FAKE_SIZE");
     uint8_t *d, *raw;
     long n, rn;
-    size_t o = 28, fs, s_sps, s_pps, s_sp, s_dec, s_sm;
+    size_t o = 28, fs, yb, cb, s_sps, s_pps, s_sp, s_dec, s_sm;
     int w = 0, h = 0;
     fake_hevc_reset();
     if (getenv("HEVC_FAKE_P1")) fake_hevc.p1_ticks = atoi(getenv("HEVC_FAKE_P1"));
@@ -78,9 +81,11 @@ __attribute__((constructor)) static void load(void)
     atexit(report);
     if (!tn || !yn || !sz || sscanf(sz, "%dx%d", &w, &h) != 2) return;
     if (!(d = slurp(tn, &n)) || !(raw = slurp(yn, &rn))) { fprintf(stderr, "fake_hevc: can't read %s or %s\n", tn, yn); return; }
-    fs = (size_t)w * h + 2 * (size_t)((w + 1) / 2) * ((h + 1) / 2);
     map_w = w; map_h = h;
     s_sps = rd32(d + 8); s_pps = rd32(d + 12); s_sp = rd32(d + 16); s_dec = rd32(d + 20); s_sm = rd32(d + 24);
+    map_bytes = o + 48 <= (size_t)n && rd32(d + o + 20) > 8 ? 2 : 1;   /* (the first picture's depth) */
+    yb = (size_t)w * h * map_bytes; cb = (size_t)((w + 1) / 2) * ((h + 1) / 2) * map_bytes;
+    fs = yb + 2 * cb;
     while (o + 48 <= (size_t)n) {
         uint32_t nsl = rd32(d + o + 24), has_sm = rd32(d + o + 28), hash = 0, crc[3];
         o += 48 + s_sps + s_pps + s_dec + (has_sm ? s_sm : 0);
@@ -93,9 +98,8 @@ __attribute__((constructor)) static void load(void)
         }
         for (int k = 0; k < 3; k++) { crc[k] = rd32(d + o); o += 4; }
         for (size_t k = 0; k * fs + fs <= (size_t)rn && nmap < MAXP; k++) {
-            const uint8_t *y = raw + k * fs, *u = y + (size_t)w * h, *v = u + (size_t)((w + 1) / 2) * ((h + 1) / 2);
-            size_t cn = (size_t)((w + 1) / 2) * ((h + 1) / 2);
-            if (adler(y, (size_t)w * h) == crc[0] && adler(u, cn) == crc[1] && adler(v, cn) == crc[2]) {
+            const uint8_t *y = raw + k * fs, *u = y + yb, *v = u + cb;
+            if (adler(y, yb) == crc[0] && adler(u, cb) == crc[1] && adler(v, cb) == crc[2]) {
                 map[nmap].hash = hash; map[nmap].y = y; map[nmap].u = u; map[nmap].v = v; nmap++;
                 break;
             }

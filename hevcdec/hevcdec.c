@@ -263,8 +263,8 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
         snprintf(open_err, sizeof open_err, "%dx%d isn't a size the block decodes (up to 4096x4096)", c->width, c->height);
         return HEVCDEC_UNSUPPORTED;
     }
-    if (c->bit_depth != 8) {
-        snprintf(open_err, sizeof open_err, "%d-bit isn't done yet (8-bit only)", c->bit_depth);
+    if (c->bit_depth != 8 && c->bit_depth != 10) {
+        snprintf(open_err, sizeof open_err, "%d-bit isn't a depth the block decodes (8 or 10)", c->bit_depth);
         return HEVCDEC_UNSUPPORTED;
     }
     if (!(d = calloc(1, sizeof *d))) { snprintf(open_err, sizeof open_err, "Out of memory"); return HEVCDEC_ERROR; }
@@ -279,13 +279,21 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
     d->ctx.fh.m2m_ctx = &d->m2m;
     /* the output: NV12 in 128-byte columns (V4L2_PIX_FMT_NV12_COL128): width
        up to whole columns, height to 16, each column holding the luma rows
-       then the chroma rows (rpivid_video.c's shape, the smallest it takes) */
+       then the chroma rows (rpivid_video.c's shape, the smallest it takes).
+       10-bit (V4L2_PIX_FMT_NV12_10_COL128): three samples a 32-bit word, so
+       96 a column's row; the width (in samples) up to whole columns */
     f = &d->ctx.dst_fmt;
-    f->pixelformat = V4L2_PIX_FMT_NV12_COL128;
-    f->width = ALIGN((unsigned)c->width, 128);
     f->height = ALIGN((unsigned)c->height, 16);
     f->plane_fmt[0].bytesperline = f->height * 3 / 2;
-    f->plane_fmt[0].sizeimage = f->plane_fmt[0].bytesperline * f->width;
+    if (c->bit_depth == 10) {
+        f->pixelformat = V4L2_PIX_FMT_NV12_10_COL128;
+        f->width = ALIGN(((unsigned)c->width + 2) / 3, 32) * 3;
+        f->plane_fmt[0].sizeimage = f->plane_fmt[0].bytesperline * f->width * 4 / 3;
+    } else {
+        f->pixelformat = V4L2_PIX_FMT_NV12_COL128;
+        f->width = ALIGN((unsigned)c->width, 128);
+        f->plane_fmt[0].sizeimage = f->plane_fmt[0].bytesperline * f->width;
+    }
     d->ctx.dst_fmt_set = 1;
     /* (the block's interrupts: both phases' bits latched, any pending cleared) */
     hevcdec_hw_ictrl_write(d->hw, ARG_IC_ICTRL_ACTIVE1_EN_SET | ARG_IC_ICTRL_ACTIVE2_EN_SET);
@@ -297,8 +305,8 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
     }
     d->started = 1;
     d->cached_frames = c->cached_frames && hevcdec_hw_can_cache(d->hw);
-    logf_(d, "hevcdec %s: frames %ux%u (NV12, 128-byte columns of %u lines), %u bytes each, %s", HEVCDEC_VERSION,
-          f->width, f->height, f->plane_fmt[0].bytesperline, f->plane_fmt[0].sizeimage,
+    logf_(d, "hevcdec %s: frames %ux%u (%s, 128-byte columns of %u lines), %u bytes each, %s", HEVCDEC_VERSION,
+          f->width, f->height, c->bit_depth == 10 ? "10-bit NV12, 3 samples a word" : "NV12", f->plane_fmt[0].bytesperline, f->plane_fmt[0].sizeimage,
           d->cached_frames ? "cacheable" : c->cached_frames ? "not cacheable (no cache maintenance)" : "not cacheable");
     *out = d;
     return HEVCDEC_OK;
@@ -443,9 +451,11 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
     const struct v4l2_ctrl_hevc_scaling_matrix *scaling = pic->scaling;
     if (d->dead) return fail(d, "The block didn't finish a picture: restart the machine before decoding again");
     d->err[0] = 0;
-    if (sps->chroma_format_idc != 1 || sps->bit_depth_luma_minus8 || sps->bit_depth_chroma_minus8)
-        return fail(d, "Chroma format %u, %u-bit: only 8-bit 4:2:0 for now", sps->chroma_format_idc,
-                    sps->bit_depth_luma_minus8 + 8u), HEVCDEC_UNSUPPORTED;
+    if (sps->chroma_format_idc != 1 || sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8 ||
+        sps->bit_depth_luma_minus8 + 8 != d->cfg.bit_depth)
+        return fail(d, "Chroma format %u, %u-bit (chroma %u-bit): this decoder is for %d-bit 4:2:0", sps->chroma_format_idc,
+                    sps->bit_depth_luma_minus8 + 8u, sps->bit_depth_chroma_minus8 + 8u, d->cfg.bit_depth),
+               HEVCDEC_UNSUPPORTED;
     if (sps->pic_width_in_luma_samples > d->ctx.dst_fmt.width || sps->pic_height_in_luma_samples > d->ctx.dst_fmt.height)
         return fail(d, "%ux%u is bigger than the frames (%ux%u)", sps->pic_width_in_luma_samples,
                     sps->pic_height_in_luma_samples, d->ctx.dst_fmt.width, d->ctx.dst_fmt.height), HEVCDEC_UNSUPPORTED;
@@ -526,18 +536,35 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
    cleaned and invalidated first: the block wrote it behind the cache,
    which may hold lines of what was there before (read, or fetched
    ahead). The copying is hevcdec_conv.c's (NEON). */
-void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
-                           int y0, int w, int h)
+/* the frame ready to read: its picture decoded, the caches cleaned and invalidated */
+static const uint8_t *frame_ready(hevcdec *d, const hevcdec_frame *f)
 {
     const uint8_t *b = f->vb.vaddr;
-    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
     if (f->submitted && !f->vb.state) hevcdec_frame_wait(d, (hevcdec_frame *)f);   /* (still being decoded) */
     if (f->cached) {
         uint32_t t0 = hevcdec_hw_now_cs();
         hevcdec_hw_cache_clean_inv(d->hw, b, f->vb.planes[0].length);
         d->stats.cs_cache += hevcdec_hw_now_cs() - t0;
     }
-    hevcdec_col128_to_i420(b, col, c_off, planes, strides, x0, y0, w, h);
+    return b;
+}
+
+void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
+                           int y0, int w, int h)
+{
+    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
+    const uint8_t *b = frame_ready(d, f);
+    if (d->cfg.bit_depth == 10) hevcdec_col30_to_i420(b, col, c_off, planes, strides, x0, y0, w, h);
+    else hevcdec_col128_to_i420(b, col, c_off, planes, strides, x0, y0, w, h);
+}
+
+int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const planes[3], const int strides[3], int x0,
+                             int y0, int w, int h)
+{
+    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
+    if (d->cfg.bit_depth != 10) return fail(d, "16-bit samples are for a 10-bit decoder"), HEVCDEC_UNSUPPORTED;
+    hevcdec_col30_to_planar16(frame_ready(d, f), col, c_off, planes, strides, x0, y0, w, h);
+    return HEVCDEC_OK;
 }
 
 void hevcdec_close(hevcdec *d)

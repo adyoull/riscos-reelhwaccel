@@ -21,11 +21,21 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   nowpp   416x240, 12 pictures, no WPP, scaling lists
   odd     426x240, 8 pictures (coded 432 wide, cropped)
   hd      1920x1080, 60 pictures, B frames, WPP
+  and 10-bit (new in 0.1.8):
+  small10, slices10, odd10   as small, slices and odd, 10-bit
+  crop10  416x240 cropped to 368x228 from 16,8 (the left edge mid-word)
+  hd10    1920x1080, 60 pictures, 10-bit
+  and 4K (new in 0.1.8): uhd and uhd10, 3840x2160, 30 pictures, 8-bit and
+  10-bit
 
-Running it (please send back Result, ResultT and ResultP):
-  Test     Every clip, every picture checked. Writes Result.
-  Speed    The 1080p clip without checks: pictures a second. Writes
-           ResultT.
+Running it (please send back Result, ResultT, ResultP and ResultK):
+  Test     Every clip but the 4K ones, every picture checked. Writes
+           Result.
+  Speed    The 1080p clips (8-bit, 10-bit) without checks: pictures a
+           second. Writes ResultT.
+  UHD      The 4K clips (8-bit, 10-bit): every picture checked, then
+           timed, then timed pipelined. Writes ResultK. Needs about 100
+           MB for hevctest and about 170 MB for the block's frames.
   Verbose  The first three pictures of the small clip with the
            decoder's log, if Test fails. Writes ResultV.
   Pipelined Every clip with each picture given to the block without
@@ -75,6 +85,15 @@ That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
 
+0.1.8 (hevcdec 0.1.7): 10-bit and 4K. For 10-bit streams the block
+writes three samples to each 32-bit word (96 to a column's row instead
+of 128); hevcdec unpacks them to 16-bit samples (FFmpeg's 10-bit
+format), or to 8-bit (each sample's top 8 bits) for a player that shows
+8-bit. hevctest checks the 16-bit pictures against FFmpeg's, and the
+8-bit ones against the 16-bit ones. 4K (3840x2160) is the same decoder
+with bigger frames: please run UHD as well, and say if it can't get the
+memory.
+
 0.1.6 (hevcdec 0.1.5): the block's two phases overlap. Phase 1 (reading
 the bitstream) of the next picture runs while phase 2 (making the
 picture) of the last does, and the program can carry on while the block
@@ -100,7 +119,7 @@ If a run says a phase "didn't finish", restart before running anything
 else; if the machine locks up, switch it off and on again.
 
 Needs: a Raspberry Pi 4 (or 400) with RISC OS 5.23 or later (Physical
-Memory Pools). 8-bit 4:2:0 only for now.
+Memory Pools). 8-bit and 10-bit 4:2:0, up to 4096x4096.
 Part of riscos-reelhwaccel; GPL version 2. hevcdec includes
 Raspberry Pi's rpivid_h265.c (GPL version 2 or later; Copyright (C) 2020
 Raspberry Pi (Trading) Ltd, based on the Cedrus VPU driver). The clips

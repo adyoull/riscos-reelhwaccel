@@ -1,5 +1,39 @@
 # Changes
 
+## hevcdec 0.1.7, HEVCTest 0.1.8, devkit 0.2.5: 10-bit and 4K (test zip, 2026-10-03)
+
+- hevcdec: `config.bit_depth` 10 (Main 10). Frames are
+  V4L2_PIX_FMT_NV12_10_COL128, as rpivid_video.c sizes them: the same
+  128-byte columns, each row 32 little-endian words of three 10-bit
+  samples (96 luma, or 48 U,V pairs), the width up to whole columns of 96.
+  `hevcdec_frame_to_i420_16` gives 16-bit samples (FFmpeg's YUV420P10);
+  `hevcdec_frame_to_i420` from a 10-bit decoder gives each sample's top 8
+  bits. NEON: 8 words into 24 samples with VST3, U and V split with VLD2.
+  A picture whose depth isn't the decoder's is refused (UNSUPPORTED).
+- hevc_hwdec (patch 0002): 10-bit 4:2:0 too (FFmpeg's HEVC get_format
+  offers AV_PIX_FMT_HEVCDEC for YUV420P10), out as YUV420P10, or YUV420P
+  with `-output_8bit 1`. A depth change part way is refused (ENOSYS),
+  said once. 4:2:2, 4:4:4 and 12-bit are still refused.
+- 4K: nothing new in the code (sizes up to 4096x4096 were accepted);
+  now tested, on the host and in HEVCTest's UHD Obey file.
+- The fake HEVC block writes 10-bit frames when CONFIG2 says 10-bit, and
+  checks CONFIG2's luma and chroma depths agree. Host clips small10,
+  slices10, odd10 (four and a half columns), crop10 (cropped on the left
+  by 16: samples split across words), uhd and uhd10 (3840x2160); in
+  FFmpeg the 10-bit clips, a 10-bit cropped clip, `-output_8bit 1`
+  against FFmpeg's samples' top bits, a depth change part way, 4K, and
+  4:2:2 and 12-bit refused. hevcdec_test matches pictures over the
+  trace's output window, so cropped clips can be fed whole pictures.
+  Mutations caught: the word's samples in the wrong order, U and V
+  swapped, the luma or chroma column offset wrong, the 8-bit shift wrong,
+  8-bit columns for 10-bit frames, the last chroma row missed, 8-bit V
+  from U, 10-bit given out as 8-bit, the depth not compared on reopening.
+- HEVCTest 0.1.8: clips small10, slices10, odd10, crop10, hd10 (Test,
+  Pipelined, Speed, Dump), and uhd and uhd10 (the new UHD Obey file:
+  checked, timed, timed pipelined, ten frames). 10-bit pictures are
+  checked as 16-bit against FFmpeg's, and their 8-bit conversion against
+  the 16-bit one.
+
 ## vcdec 0.4.2, hevcdec 0.1.6, devkit 0.2.4: never the program's page at &8000 (test zips, 2026-10-03)
 
 riscos-unixlib traced the "code 6" EMT trap to our contiguous memory:
