@@ -157,6 +157,37 @@ static int read_trace(const char *name, uint8_t **file)
 
 static uint8_t *planes8[3];                /* 10-bit: the 8-bit conversion, checked against the 16-bit one */
 static int strides8[3];
+static uint8_t *planesh[3];                /* (0.1.10) the halved conversion, checked against the 1:1 one's 2x2 means */
+static int stridesh[3];
+
+/* the halved conversion of f (window w x h from x, y: w/2 x h/2) against
+   the 2x2 means of the 1:1 conversion in planes (bps bytes a sample): 0 if
+   every sample is right */
+static int check_half(hevcdec *d, const hevcdec_frame *f, int x, int y, int w, int h, uint8_t *const planes[3],
+                      const int strides[3], int bps)
+{
+    int ow = w / 2, oh = h / 2, bad = 0;
+    if (ow < 1 || oh < 1 || (x & 3) || !planesh[0]) return 0;
+    if (hevcdec_frame_to_i420_half(d, f, planesh, stridesh, x, y, ow, oh) != HEVCDEC_OK) return 1;
+    for (int k = 0; k < 3 && !bad; k++) {
+        int pw = k ? (ow + 1) / 2 : ow, ph = k ? (oh + 1) / 2 : oh, sw = k ? (w + 1) / 2 : w, sh = k ? (h + 1) / 2 : h;
+        for (int r = 0; r < ph && !bad; r++)
+            for (int c = 0; c < pw; c++) {
+                int c1 = 2 * c + 1 < sw ? 2 * c + 1 : 2 * c, r1 = 2 * r + 1 < sh ? 2 * r + 1 : 2 * r;
+                unsigned s4 = 0, want;
+                if (2 * c + 1 >= sw || 2 * r + 1 >= sh) continue;   /* (an edge without its whole block: not checked) */
+                for (int dy = 0; dy < 2; dy++)
+                    for (int dx = 0; dx < 2; dx++) {
+                        const uint8_t *row = planes[k] + (size_t)(dy ? r1 : 2 * r) * strides[k];
+                        int cc = dx ? c1 : 2 * c;
+                        s4 += bps == 2 ? ((const uint16_t *)(const void *)row)[cc] : row[cc];
+                    }
+                want = bps == 2 ? (s4 + 8) >> 4 : (s4 + 2) >> 2;
+                if (planesh[k][(size_t)r * stridesh[k] + c] != want) { bad = 1; break; }
+            }
+    }
+    return bad;
+}
 
 /* a decoded picture converted (timed), saved (-d) and checked: 0 if it's
    FFmpeg's. 10-bit: as 16-bit samples (checked against FFmpeg's), and as
@@ -189,6 +220,11 @@ static int check_one(hevcdec *d, const pic_t *p, hevcdec_frame *f, uint8_t *cons
                                    (unsigned)p->number, (int)p->poc);
             return 1;
         }
+    }
+    if (check_half(d, f, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h, planes, strides, bps)) {
+        if (++shown <= 10) say("Picture %u (poc %d): the halved conversion WRONG (not the 2x2 means)\n", (unsigned)p->number,
+                               (int)p->poc);
+        return 1;
     }
     if (dump) {
         for (int y = 0; y < (int)p->out_h; y++) fwrite(planes[0] + (size_t)y * strides[0], 1, (size_t)p->out_w * bps, dump);
@@ -250,6 +286,15 @@ static int benchmark(hevcdec *d, hevcdec_frame *f, const pic_t *p, uint8_t *cons
             bad |= !same;
         }
         for (int k = 0; k < 3; k++) free(ref[k]);
+    }
+    if (planesh[0] && !(p->left & 3)) {        /* (0.1.10) halved, straight into 8-bit planes a quarter the size */
+        uint32_t t0 = now_cs(), cs;
+        for (int i = 0; i < BENCH_N; i++)
+            hevcdec_frame_to_i420_half(d, f, planesh, stridesh, (int)p->left, (int)p->top, (int)p->out_w / 2,
+                                       (int)p->out_h / 2);
+        cs = now_cs() - t0;
+        say("  halved to 8-bit (%ux%u)%*s %u.%02u ms a picture\n", (unsigned)p->out_w / 2, (unsigned)p->out_h / 2, 14, "",
+            (unsigned)(cs * 10 / BENCH_N), (unsigned)(cs * 1000 / BENCH_N % 100));
     }
     return bad;
 }
@@ -378,6 +423,12 @@ int probe_main(int argc, char **argv)
         planes[1] = malloc((size_t)strides[1] * ((c.height + 1) / 2));
         planes[2] = malloc((size_t)strides[2] * ((c.height + 1) / 2));
         if (!planes[0] || !planes[1] || !planes[2]) { say("Out of memory\n"); goto out; }
+        stridesh[0] = c.width / 2 + 16;
+        stridesh[1] = stridesh[2] = c.width / 4 + 16;
+        planesh[0] = malloc((size_t)stridesh[0] * (c.height / 2 + 1));
+        planesh[1] = malloc((size_t)stridesh[1] * (c.height / 4 + 1));
+        planesh[2] = malloc((size_t)stridesh[2] * (c.height / 4 + 1));
+        if (!planesh[0] || !planesh[1] || !planesh[2]) { say("Out of memory\n"); goto out; }
         if (bps == 2) {
             strides8[0] = c.width;
             strides8[1] = strides8[2] = (c.width + 1) / 2;
@@ -499,6 +550,8 @@ out:
         free(planes[0]); free(planes[1]); free(planes[2]);
         free(planes8[0]); free(planes8[1]); free(planes8[2]);
         planes8[0] = planes8[1] = planes8[2] = NULL;
+        free(planesh[0]); free(planesh[1]); free(planesh[2]);
+        planesh[0] = planesh[1] = planesh[2] = NULL;
         if (out2) fclose(out2);
         if (dump) fclose(dump);
         return ok ? 0 : 1;

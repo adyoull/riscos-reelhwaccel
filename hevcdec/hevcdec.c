@@ -33,6 +33,7 @@ struct hevcdec_frame {
     int cached;                          /* cacheable: invalidated before it's read */
     int submitted;                       /* given to the block: decoded when vb.state is set */
     char err[160];                       /* why the block failed it */
+    hevcdec *d;                          /* (its decoder) */
 };
 
 struct hevcdec {
@@ -320,6 +321,7 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
     if (i == MAX_FRAMES) { fail(d, "More than %d frames", MAX_FRAMES); return NULL; }
     if (!(fr = calloc(1, sizeof *fr))) { fail(d, "Out of memory"); return NULL; }
     fr->vb.vb2_buf.index = (unsigned)i;
+    fr->d = d;
     fr->vb.vb2_buf.num_planes = 1;
     fr->vb.planes[0].length = d->ctx.dst_fmt.plane_fmt[0].sizeimage;
     fr->cached = d->cached_frames;
@@ -584,6 +586,27 @@ int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const
     void *p[3] = { planes[0], planes[1], planes[2] };
     if (d->cfg.bit_depth != 10) return fail(d, "16-bit samples are for a 10-bit decoder"), HEVCDEC_UNSUPPORTED;
     convert(d, f, p, strides, 16, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
+    return HEVCDEC_OK;
+}
+
+hevcdec *hevcdec_frame_decoder(const hevcdec_frame *f) { return f ? f->d : NULL; }
+
+int hevcdec_frame_to_i420_half(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
+                               int y0, int w, int h)
+{
+    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
+    hevcdec_conv_opts o;
+    const uint8_t *b;
+    if ((x0 & 3) || (y0 & 1) || x0 < 0 || y0 < 0 || w < 1 || h < 1 || (unsigned)(x0 + 2 * w) > d->ctx.dst_fmt.width ||
+        (unsigned)(y0 + 2 * h) > d->ctx.dst_fmt.height)
+        return fail(d, "Halving %dx%d from %d,%d: outside the frame, or not from a multiple of 4 across", w, h, x0, y0),
+               HEVCDEC_UNSUPPORTED;
+    b = frame_ready(d, f);
+    o.way = HEVCDEC_CONV_COLUMNS;
+    o.tick = conv_tick;
+    o.arg = d;
+    if (!d->dead) poll_phases(d);
+    hevcdec_conv_half(b, col, c_off, d->cfg.bit_depth == 10, planes, strides, x0, y0, w, h, &o);
     return HEVCDEC_OK;
 }
 

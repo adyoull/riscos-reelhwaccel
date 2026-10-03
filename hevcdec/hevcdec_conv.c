@@ -16,6 +16,12 @@
  * samples, or as 8-bit (the top 8 bits). Part rows (a window's edges) go
  * through a row buffer.
  *
+ * Halved (0.1.9, hevcdec_frame_to_i420_half): each output sample the
+ * rounded mean of a 2x2 block of the window's (as Reel halves a 4K
+ * picture into an HD-sized overlay), always to 8-bit: 8-bit frames with
+ * NEON's pairwise adds (VPADDL, VPADAL; chroma's U and V apart by VLD4),
+ * 10-bit ones through two unpacked rows. Column by column.
+ *
  * The order (0.1.8): column by column (the frame read in order; the
  * default), row by row (each row across every column), column by column
  * with rows 8 on preloaded (PLD), or (10-bit) every row through the row
@@ -273,6 +279,117 @@ void hevcdec_conv(const uint8_t *b, size_t col, size_t c_off, int ten, void *con
         n = per / 2 - (x0 / 2 + x) % (per / 2);
         if (n > cw - x) n = cw - x;
         for (int y = 0; y < ch; y++) chroma_row(&j, x, n, y);
+        if (tick) tick(arg);
+    }
+}
+
+/* ---- halved: 2x2 means, to 8-bit ---- */
+
+/* luma: output samples [ox, ox+n) (n of them within one column), output row oy */
+static void luma_half_row(const job_t *j, int ox, int n, int oy)
+{
+    int sx = j->x0 + 2 * ox, per = j->ten ? 96 : 128, off = sx % per;
+    const uint8_t *a = j->b + (size_t)(sx / per) * j->col + (size_t)(j->y0 + 2 * oy) * 128, *b = a + 128;
+    uint8_t *d = (uint8_t *)j->planes[0] + (size_t)oy * (size_t)j->strides[0] + (size_t)ox;
+    int i = 0;
+    if (!j->ten) {
+        a += off; b += off;
+#ifdef __ARM_NEON
+        for (; i + 8 <= n; i += 8) {
+            uint16x8_t sum = vpaddlq_u8(vld1q_u8(a + 2 * i));
+            sum = vpadalq_u8(sum, vld1q_u8(b + 2 * i));
+            vst1_u8(d + i, vrshrn_n_u16(sum, 2));
+        }
+#endif
+        for (; i < n; i++) d[i] = (uint8_t)((a[2 * i] + a[2 * i + 1] + b[2 * i] + b[2 * i + 1] + 2) >> 2);
+        return;
+    }
+    {
+        uint16_t ta[96] __attribute__((aligned(16))), tb[96] __attribute__((aligned(16)));
+        const uint16_t *pa = ta + off, *pb = tb + off;
+        unpack30_row(ta, a);
+        unpack30_row(tb, b);
+#ifdef __ARM_NEON
+        for (; i + 8 <= n; i += 8) {
+            uint16x8x2_t x = vld2q_u16(pa + 2 * i), y = vld2q_u16(pb + 2 * i);
+            uint16x8_t sum = vaddq_u16(vaddq_u16(x.val[0], x.val[1]), vaddq_u16(y.val[0], y.val[1]));
+            vst1_u8(d + i, vrshrn_n_u16(sum, 4));
+        }
+#endif
+        for (; i < n; i++) d[i] = (uint8_t)((pa[2 * i] + pa[2 * i + 1] + pb[2 * i] + pb[2 * i + 1] + 8) >> 4);
+    }
+}
+
+/* chroma: output U,V samples [ox, ox+n) (within one column), output chroma row oy */
+static void chroma_half_row(const job_t *j, int ox, int n, int oy)
+{
+    int sx = j->x0 / 2 + 2 * ox, per = j->ten ? 48 : 64, off = sx % per;
+    const uint8_t *a = j->b + (size_t)(sx / per) * j->col + j->c_off + (size_t)(j->y0 / 2 + 2 * oy) * 128, *b = a + 128;
+    uint8_t *u = (uint8_t *)j->planes[1] + (size_t)oy * (size_t)j->strides[1] + (size_t)ox;
+    uint8_t *v = (uint8_t *)j->planes[2] + (size_t)oy * (size_t)j->strides[2] + (size_t)ox;
+    int i = 0;
+    if (!j->ten) {                              /* (bytes U V U V: a pair's U at 4i and 4i+2, its V at 4i+1, 4i+3) */
+        a += 2 * off; b += 2 * off;
+#ifdef __ARM_NEON
+        for (; i + 16 <= n; i += 16) {
+            uint8x16x4_t x = vld4q_u8(a + 4 * i), y = vld4q_u8(b + 4 * i);
+            uint16x8_t ul = vaddq_u16(vaddl_u8(vget_low_u8(x.val[0]), vget_low_u8(x.val[2])),
+                                      vaddl_u8(vget_low_u8(y.val[0]), vget_low_u8(y.val[2])));
+            uint16x8_t uh = vaddq_u16(vaddl_u8(vget_high_u8(x.val[0]), vget_high_u8(x.val[2])),
+                                      vaddl_u8(vget_high_u8(y.val[0]), vget_high_u8(y.val[2])));
+            uint16x8_t vl = vaddq_u16(vaddl_u8(vget_low_u8(x.val[1]), vget_low_u8(x.val[3])),
+                                      vaddl_u8(vget_low_u8(y.val[1]), vget_low_u8(y.val[3])));
+            uint16x8_t vh = vaddq_u16(vaddl_u8(vget_high_u8(x.val[1]), vget_high_u8(x.val[3])),
+                                      vaddl_u8(vget_high_u8(y.val[1]), vget_high_u8(y.val[3])));
+            vst1q_u8(u + i, vcombine_u8(vrshrn_n_u16(ul, 2), vrshrn_n_u16(uh, 2)));
+            vst1q_u8(v + i, vcombine_u8(vrshrn_n_u16(vl, 2), vrshrn_n_u16(vh, 2)));
+        }
+#endif
+        for (; i < n; i++) {
+            u[i] = (uint8_t)((a[4 * i] + a[4 * i + 2] + b[4 * i] + b[4 * i + 2] + 2) >> 2);
+            v[i] = (uint8_t)((a[4 * i + 1] + a[4 * i + 3] + b[4 * i + 1] + b[4 * i + 3] + 2) >> 2);
+        }
+        return;
+    }
+    {
+        uint16_t ta[96] __attribute__((aligned(16))), tb[96] __attribute__((aligned(16)));
+        const uint16_t *pa = ta + 2 * off, *pb = tb + 2 * off;
+        unpack30_row(ta, a);
+        unpack30_row(tb, b);
+#ifdef __ARM_NEON
+        for (; i + 8 <= n; i += 8) {
+            uint16x8x4_t x = vld4q_u16(pa + 4 * i), y = vld4q_u16(pb + 4 * i);
+            uint16x8_t su = vaddq_u16(vaddq_u16(x.val[0], x.val[2]), vaddq_u16(y.val[0], y.val[2]));
+            uint16x8_t sv = vaddq_u16(vaddq_u16(x.val[1], x.val[3]), vaddq_u16(y.val[1], y.val[3]));
+            vst1_u8(u + i, vrshrn_n_u16(su, 4));
+            vst1_u8(v + i, vrshrn_n_u16(sv, 4));
+        }
+#endif
+        for (; i < n; i++) {
+            u[i] = (uint8_t)((pa[4 * i] + pa[4 * i + 2] + pb[4 * i] + pb[4 * i + 2] + 8) >> 4);
+            v[i] = (uint8_t)((pa[4 * i + 1] + pa[4 * i + 3] + pb[4 * i + 1] + pb[4 * i + 3] + 8) >> 4);
+        }
+    }
+}
+
+void hevcdec_conv_half(const uint8_t *b, size_t col, size_t c_off, int ten, uint8_t *const planes[3], const int strides[3],
+                       int x0, int y0, int ow, int oh, const hevcdec_conv_opts *o)
+{
+    const int cw = (ow + 1) / 2, ch = (oh + 1) / 2, per = ten ? 96 : 128;
+    void *p[3] = { planes[0], planes[1], planes[2] };
+    job_t j = { b, col, c_off, ten, 8, HEVCDEC_CONV_COLUMNS, p, strides, x0, y0 };
+    void (*tick)(void *) = o ? o->tick : NULL;
+    void *arg = o ? o->arg : NULL;
+    for (int x = 0, n; x < ow; x += n) {        /* (x0 even: a column's samples pair up within it) */
+        n = (per - (x0 + 2 * x) % per) / 2;
+        if (n > ow - x) n = ow - x;
+        for (int y = 0; y < oh; y++) luma_half_row(&j, x, n, y);
+        if (tick) tick(arg);
+    }
+    for (int x = 0, n; x < cw; x += n) {        /* (x0 a multiple of 4: so do chroma's) */
+        n = (per / 2 - (x0 / 2 + 2 * x) % (per / 2)) / 2;
+        if (n > cw - x) n = cw - x;
+        for (int y = 0; y < ch; y++) chroma_half_row(&j, x, n, y);
         if (tick) tick(arg);
     }
 }

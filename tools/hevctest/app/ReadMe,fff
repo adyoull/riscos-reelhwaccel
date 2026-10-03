@@ -88,6 +88,12 @@ That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
 
+0.1.10 (hevcdec 0.1.9): a halved conversion, for a player showing a 4K
+picture in an HD-sized overlay in one pass (each output sample the mean
+of a 2x2 block). Every picture is now also converted halved and checked
+against its full-size conversion; Convert times it too ("halved to
+8-bit").
+
 0.1.9 (hevcdec 0.1.8): quicker with a player. Until now hevcdec only
 noticed the block had finished a phase when the program next called it,
 so while the program converted one picture the block finished the first

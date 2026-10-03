@@ -16,6 +16,14 @@
  *    option output_8bit), converted, waiting for the block only if it
  *    hasn't finished the picture yet.
  *
+ * output_hw: the pictures given out unconverted, as AV_PIX_FMT_HEVCDEC frames
+ * (data[3] the hevcdec_frame; the window from crop_left, crop_top to width,
+ * height), for the caller to convert when it shows them, straight into its
+ * own buffer (hevcdec_frame_to_i420, _16 or _half, on
+ * hevcdec_frame_decoder(f)). Each frame holds one of hevcdec's frames
+ * until it is freed (on the thread that decodes); hevcdec stays open until
+ * the decoder is closed and the last such frame is freed.
+ *
  * drop_before (as h264_vchiq's in riscos-ffmpeg): a player that has fallen
  * behind sets it, and pictures with an earlier pts are decoded by the block
  * (they may be references) but neither converted nor given out.
@@ -74,8 +82,24 @@ typedef struct PoolEntry {
     hevcdec_frame *f;
     int in_use;                 /* a frame of FFmpeg's holds it */
     int failed;                 /* hevcdec refused its picture */
-    struct HWDecContext *w;
 } PoolEntry;
+
+/* hevcdec and its frames, kept until the decoder is closed and the last
+   frame holding one of them is freed (output_hw: a caller may keep frames
+   past avcodec_free_context). One thread: the one that decodes. */
+typedef struct HWDecShared {
+    hevcdec *d;
+    PoolEntry pool[MAX_POOL];
+    int npool;
+    int refs;                   /* the decoder's, and one a frame in use */
+} HWDecShared;
+
+static void shared_unref(HWDecShared *sh)
+{
+    if (--sh->refs > 0) return;
+    if (sh->d) hevcdec_close(sh->d);           /* (its frames go with it) */
+    av_free(sh);
+}
 
 typedef struct HWDecContext {
     const AVClass *class;
@@ -87,10 +111,8 @@ typedef struct HWDecContext {
     AVFrame *held;              /* (pipelined) a picture kept back while the next is given to the block */
     int eof_sent;
     int refused;                /* not for the block: AVERROR(ENOSYS) */
-    hevcdec *d;
+    HWDecShared *sh;            /* hevcdec, its frames */
     int d_w, d_h, d_depth;
-    PoolEntry pool[MAX_POOL];
-    int npool;
     uint64_t number;            /* pictures given so far */
     /* the picture in hand */
     struct v4l2_ctrl_hevc_decode_params dec;
@@ -104,6 +126,7 @@ typedef struct HWDecContext {
     int cached_frames;
     int output_8bit;            /* 10-bit streams given out as YUV420P (each sample's top 8 bits) */
     int64_t drop_before;        /* pictures with an earlier pts (pkt_timebase) are decoded but not converted or given out */
+    int output_hw;              /* frames given out unconverted (AV_PIX_FMT_HEVCDEC): the caller converts them */
     unsigned dropped;
 } HWDecContext;
 
@@ -136,18 +159,18 @@ static int ensure_open(HWDecContext *w, int width, int height, int depth)
         av_log(w->avctx, AV_LOG_ERROR, "Not for the HEVC block: %d-bit (8-bit or 10-bit only)\n", depth);
         return AVERROR(ENOSYS);
     }
-    if (w->d && width <= w->d_w && height <= w->d_h && depth == w->d_depth) return 0;
-    if (w->d) {
-        for (int i = 0; i < w->npool; i++)
-            if (w->pool[i].in_use) {
+    if (w->sh->d && width <= w->d_w && height <= w->d_h && depth == w->d_depth) return 0;
+    if (w->sh->d) {
+        for (int i = 0; i < w->sh->npool; i++)
+            if (w->sh->pool[i].in_use) {
                 av_log(w->avctx, AV_LOG_ERROR, "The picture size grew or the depth changed (%dx%d %d-bit to "
                        "%dx%d %d-bit) part way\n", w->d_w, w->d_h, w->d_depth, width, height, depth);
                 w->refused = 1;          /* (said: not again as the format's refusal) */
                 return AVERROR(ENOSYS);
             }
-        hevcdec_close(w->d);            /* (its frames go with it) */
-        w->d = NULL;
-        w->npool = 0;
+        hevcdec_close(w->sh->d);            /* (its frames go with it) */
+        w->sh->d = NULL;
+        w->sh->npool = 0;
     }
     hevcdec_config_init(&c);
     c.width = width;
@@ -157,9 +180,9 @@ static int ensure_open(HWDecContext *w, int width, int height, int depth)
     c.cached_frames = w->cached_frames;
     c.log = hevcdec_log;
     c.log_handle = w->avctx;
-    if ((r = hevcdec_open(&w->d, &c)) != HEVCDEC_OK) {
+    if ((r = hevcdec_open(&w->sh->d, &c)) != HEVCDEC_OK) {
         av_log(w->avctx, AV_LOG_ERROR, "The HEVC block can't be used: %s\n", hevcdec_open_error());
-        w->d = NULL;
+        w->sh->d = NULL;
         return AVERROR(ENOSYS);
     }
     w->d_w = width;
@@ -504,8 +527,8 @@ static int hwaccel_init(AVCodecContext *inner)
 static void pool_release(void *opaque, uint8_t *data)
 {
     PoolEntry *e = (PoolEntry *)data;
-    (void)opaque;
     e->in_use = 0;
+    shared_unref(opaque);
 }
 
 /* a frame for a picture: one of hevcdec's, as data[3] */
@@ -514,25 +537,25 @@ static int hwaccel_alloc_frame(AVCodecContext *inner, AVFrame *frame)
     HWDecContext *w = ours(inner);
     PoolEntry *e = NULL;
     int i;
-    if (!w || !w->d) return AVERROR(ENOSYS);
-    for (i = 0; i < w->npool && !e; i++)
-        if (!w->pool[i].in_use) e = &w->pool[i];
+    if (!w || !w->sh->d) return AVERROR(ENOSYS);
+    for (i = 0; i < w->sh->npool && !e; i++)
+        if (!w->sh->pool[i].in_use) e = &w->sh->pool[i];
     if (!e) {
-        if (w->npool == MAX_POOL) {
+        if (w->sh->npool == MAX_POOL) {
             av_log(w->avctx, AV_LOG_ERROR, "All %d of hevcdec's frames are in use\n", MAX_POOL);
             return AVERROR(ENOMEM);
         }
-        e = &w->pool[w->npool];
-        if (!(e->f = hevcdec_frame_new(w->d))) {
-            av_log(w->avctx, AV_LOG_ERROR, "No frame: %s\n", hevcdec_error(w->d));
+        e = &w->sh->pool[w->sh->npool];
+        if (!(e->f = hevcdec_frame_new(w->sh->d))) {
+            av_log(w->avctx, AV_LOG_ERROR, "No frame: %s\n", hevcdec_error(w->sh->d));
             return AVERROR(ENOMEM);
         }
-        e->w = w;
-        w->npool++;
+        w->sh->npool++;
     }
-    frame->buf[0] = av_buffer_create((uint8_t *)e, sizeof(*e), pool_release, NULL, 0);
+    frame->buf[0] = av_buffer_create((uint8_t *)e, sizeof(*e), pool_release, w->sh, 0);
     if (!frame->buf[0]) return AVERROR(ENOMEM);
     e->in_use = 1;
+    w->sh->refs++;
     e->failed = 0;
     frame->data[3] = (uint8_t *)e->f;
     /* (ff_get_buffer leaves this to an alloc_frame: the decoder's own
@@ -542,8 +565,8 @@ static int hwaccel_alloc_frame(AVCodecContext *inner, AVFrame *frame)
 
 static PoolEntry *entry_of(HWDecContext *w, const hevcdec_frame *f)
 {
-    for (int i = 0; i < w->npool; i++)
-        if (w->pool[i].f == f) return &w->pool[i];
+    for (int i = 0; i < w->sh->npool; i++)
+        if (w->sh->pool[i].f == f) return &w->sh->pool[i];
     return NULL;
 }
 
@@ -613,17 +636,17 @@ static int hwaccel_end_frame(AVCodecContext *inner)
     pic.scaling = scl ? &sm : NULL;
     pic.nslices = w->nsl;
     pic.slices = w->sl;
-    r = hevcdec_decode(w->d, &pic, (hevcdec_frame *)h->ref->frame->data[3],
+    r = hevcdec_decode(w->sh->d, &pic, (hevcdec_frame *)h->ref->frame->data[3],
                        ((const HWDecPicture *)h->ref->hwaccel_picture_private)->number);
     if (r == HEVCDEC_UNSUPPORTED) {
-        av_log(w->avctx, AV_LOG_ERROR, "Not for the HEVC block: %s\n", hevcdec_error(w->d));
+        av_log(w->avctx, AV_LOG_ERROR, "Not for the HEVC block: %s\n", hevcdec_error(w->sh->d));
         w->refused = 1;
         return AVERROR(ENOSYS);
     }
     if (r != HEVCDEC_OK) {
         PoolEntry *e = entry_of(w, (const hevcdec_frame *)h->ref->frame->data[3]);
         if (e) e->failed = 1;
-        if (w->failures++ < 10) av_log(w->avctx, AV_LOG_ERROR, "Picture %"PRIu64": %s\n", w->number, hevcdec_error(w->d));
+        if (w->failures++ < 10) av_log(w->avctx, AV_LOG_ERROR, "Picture %"PRIu64": %s\n", w->number, hevcdec_error(w->sh->d));
         return AVERROR_EXTERNAL;
     }
     return 0;
@@ -670,8 +693,8 @@ static av_cold int hwdec_close(AVCodecContext *avctx)
     av_frame_free(&w->held);
     av_packet_free(&w->pkt);
     avcodec_free_context(&w->inner);         /* (its frames, and so hevcdec's, let go of) */
-    if (w->d) hevcdec_close(w->d);
-    w->d = NULL;
+    if (w->sh) shared_unref(w->sh);          /* (hevcdec closed now, or with the last frame a caller keeps) */
+    w->sh = NULL;
     av_freep(&w->sp);
     av_freep(&w->sl);
     return 0;
@@ -683,6 +706,8 @@ static av_cold int hwdec_init(AVCodecContext *avctx)
     int ret, maxw = 0, maxh = 0, depth = 0;
     w->magic = MAGIC;
     w->avctx = avctx;
+    if (!(w->sh = av_mallocz(sizeof(*w->sh)))) return AVERROR(ENOMEM);
+    w->sh->refs = 1;
     if (!(w->pkt = av_packet_alloc()) || !(w->hwf = av_frame_alloc()) || !(w->held = av_frame_alloc()))
         return AVERROR(ENOMEM);
     if (!(w->inner = avcodec_alloc_context3(&ff_hevc_decoder.p))) return AVERROR(ENOMEM);
@@ -719,7 +744,8 @@ static av_cold int hwdec_init(AVCodecContext *avctx)
         }
     }
     if (maxw && (ret = ensure_open(w, maxw, maxh, depth)) < 0) return ret;
-    avctx->pix_fmt = depth == 10 && !w->output_8bit ? AV_PIX_FMT_YUV420P10 : AV_PIX_FMT_YUV420P;
+    avctx->pix_fmt = w->output_hw ? AV_PIX_FMT_HEVCDEC : depth == 10 && !w->output_8bit ? AV_PIX_FMT_YUV420P10 :
+                     AV_PIX_FMT_YUV420P;
     return 0;
 }
 
@@ -733,8 +759,22 @@ static int give_out(AVCodecContext *avctx, AVFrame *frame, AVFrame *hwf)
     int width = hwf->width - x, height = hwf->height - y, ret, failed;
     int sixteen = w->d_depth == 10 && !w->output_8bit;
     PoolEntry *e = entry_of(w, f);
-    failed = hevcdec_frame_wait(w->d, f) != HEVCDEC_OK || (e && e->failed);
-    if (failed && w->failures++ < 10) av_log(avctx, AV_LOG_ERROR, "A picture: %s\n", hevcdec_error(w->d));
+    if (w->output_hw) {                      /* (unconverted, maybe still being decoded: the caller's conversion
+                                                waits for it; a failure known by now is flagged) */
+        if ((ret = ff_set_dimensions(avctx, width, height)) < 0) return ret;
+        avctx->pix_fmt = AV_PIX_FMT_HEVCDEC;
+        avctx->sample_aspect_ratio = w->inner->sample_aspect_ratio;
+        avctx->color_range = w->inner->color_range;
+        avctx->color_primaries = w->inner->color_primaries;
+        avctx->color_trc = w->inner->color_trc;
+        avctx->colorspace = w->inner->colorspace;
+        avctx->chroma_sample_location = w->inner->chroma_sample_location;
+        av_frame_move_ref(frame, hwf);
+        if (e && e->failed) frame->decode_error_flags |= FF_DECODE_ERROR_INVALID_BITSTREAM;
+        return 0;
+    }
+    failed = hevcdec_frame_wait(w->sh->d, f) != HEVCDEC_OK || (e && e->failed);
+    if (failed && w->failures++ < 10) av_log(avctx, AV_LOG_ERROR, "A picture: %s\n", hevcdec_error(w->sh->d));
     if ((ret = ff_set_dimensions(avctx, width, height)) < 0) return ret;
     avctx->pix_fmt = sixteen ? AV_PIX_FMT_YUV420P10 : AV_PIX_FMT_YUV420P;
     avctx->sample_aspect_ratio = w->inner->sample_aspect_ratio;
@@ -748,9 +788,9 @@ static int give_out(AVCodecContext *avctx, AVFrame *frame, AVFrame *hwf)
     frame->crop_left = frame->crop_top = frame->crop_right = frame->crop_bottom = 0;   /* (already the window) */
     if (sixteen) {
         uint16_t *p16[3] = { (uint16_t *)frame->data[0], (uint16_t *)frame->data[1], (uint16_t *)frame->data[2] };
-        hevcdec_frame_to_i420_16(w->d, f, p16, frame->linesize, x, y, width, height);
+        hevcdec_frame_to_i420_16(w->sh->d, f, p16, frame->linesize, x, y, width, height);
     } else {
-        hevcdec_frame_to_i420(w->d, f, frame->data, frame->linesize, x, y, width, height);
+        hevcdec_frame_to_i420(w->sh->d, f, frame->data, frame->linesize, x, y, width, height);
     }
     if (failed) frame->decode_error_flags |= FF_DECODE_ERROR_INVALID_BITSTREAM;
     av_frame_unref(hwf);
@@ -854,6 +894,8 @@ static const AVOption options[] = {
     { "drop_before", "pictures with an earlier pts (pkt_timebase) decoded but not converted or given out; a player "
       "that is behind sets it as it goes", OFFSET(drop_before), AV_OPT_TYPE_INT64, { .i64 = INT64_MIN }, INT64_MIN,
       INT64_MAX, VD },
+    { "output_hw", "give frames out unconverted (AV_PIX_FMT_HEVCDEC, data[3] the hevcdec_frame) for the caller to convert "
+      "with hevcdec_frame_to_i420(_16, _half)", OFFSET(output_hw), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
     { NULL }
 };
 
@@ -877,6 +919,7 @@ const FFCodec ff_hevc_hwdec_decoder = {
     .p.priv_class   = &hwdec_class,
     .p.capabilities = AV_CODEC_CAP_DELAY | AV_CODEC_CAP_AVOID_PROBING | AV_CODEC_CAP_HARDWARE,
     .caps_internal  = FF_CODEC_CAP_SETS_PKT_DTS | FF_CODEC_CAP_INIT_CLEANUP,
-    .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_NONE },
+    .p.pix_fmts     = (const enum AVPixelFormat[]) { AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10, AV_PIX_FMT_HEVCDEC,
+                                                     AV_PIX_FMT_NONE },
     .p.wrapper_name = "hevcdec",
 };

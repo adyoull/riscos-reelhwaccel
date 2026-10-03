@@ -157,6 +157,25 @@ for opts in "" "-pipelined 0"; do
     { echo "FAIL: -drop_before $N $opts (keep $K): got $(wc -l < "$O/drop.got") pictures"; grep "late\|fake_hevc" "$O/drop.err"; bad=1; }
 done
 
+# output_hw: frames handed out unconverted, kept in a queue of 12 (as Reel), converted when shown straight into
+# the caller's planes, 1:1 (FFmpeg's pictures exactly) and halved (2x2 means), the last ones after the decoder
+# is closed; then nothing left (hevcdec closed with the last frame)
+B=$O/build
+arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -I"$B" -I"$O/src/ffmpeg-5.1.10" -I"$O/lib" -no-pie \
+  -o "$O/hevc_hw_test" "$HERE/hevc_hw_test.c" "$B/libavformat/libavformat.a" "$B/libavcodec/libavcodec.a" \
+  "$B/libswresample/libswresample.a" "$B/libavutil/libavutil.a" -L"$O/lib" -lhevcdec "$O/hevc_fake_env.o" "$O/fake_hevc.o" \
+  -lm -lpthread -latomic || { echo "FAIL: building hevc_hw_test"; bad=1; }
+for t in small:small.mp4:352x288:8:small.yuv small10:small10.mp4:352x288:10:small10.yuv crop10:crop10.mp4:304x276:10:crop10.ref.yuv; do
+  IFS=: read -r n mp sz bits ref <<< "$t"
+  case $n in crop10) mpp=$O/$mp refp=$O/$ref ;; *) mpp=$C/$mp refp=$C/$ref ;; esac
+  export HEVC_FAKE_TRACE=$C/${n/crop10/small10}.trace HEVC_FAKE_YUV=$C/${n/crop10/small10}.yuv HEVC_FAKE_SIZE=352x288
+  "$Q" "$O/hevc_hw_test" "$mpp" "$O/hw.$n.yuv" "$O/hw.$n.half.yuv" 12 > "$O/hw.$n.out" 2> "$O/hw.$n.err" &&
+    python3 "$HERE/halve.py" "$refp" "$sz" "$bits" "$O/hw.$n.want.half.yuv" &&
+    cmp -s "$O/hw.$n.yuv" "$refp" && cmp -s "$O/hw.$n.half.yuv" "$O/hw.$n.want.half.yuv" && clean "$O/hw.$n.err" ||
+    { echo "FAIL: output_hw, $n: $(cat "$O/hw.$n.out")"; cmp "$O/hw.$n.yuv" "$refp"; cmp "$O/hw.$n.half.yuv" "$O/hw.$n.want.half.yuv";
+      cat "$O/hw.$n.err"; bad=1; }
+done
+
 # a picture the block fails (its phase 1 doesn't finish properly): given out, flagged corrupt
 HEVC_FAKE_FAIL=4 HEVC_FAKE_QUIET=1 "$Q" "$FF" -nostdin -loglevel warning -c:v hevc_hwdec -i "$C/small.mp4" -f null - \
   2> "$O/fail.err" || { echo "FAIL: ffmpeg with a picture failed stopped:"; cat "$O/fail.err"; bad=1; }

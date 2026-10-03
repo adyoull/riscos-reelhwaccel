@@ -1,5 +1,32 @@
 # Changes
 
+## hevcdec 0.1.9, HEVCTest 0.1.10, devkit 0.2.8: one copy instead of two (output_hw) (2026-10-03)
+
+Agreed with riscos-ffmpeg (FFmpeg/handoffs/2026-10-03-reelhwaccel-devkit-0.2.7-adopted):
+Reel converts each picture when it shows it, straight into the overlay,
+instead of hevc_hwdec converting it into an AVFrame that Reel copies again
+(and halves, at 4K).
+
+- hevc_hwdec `output_hw`: frames given out unconverted (AV_PIX_FMT_HEVCDEC,
+  data[3] the hevcdec_frame, the window in the crop fields), not waited
+  for. hevcdec and its frames are now reference counted (one reference
+  the decoder's, one each frame in use): a caller's frames outlive
+  avcodec_free_context, hevcdec closing with the last.
+- hevcdec_frame_decoder(f), and hevcdec_frame_to_i420_half: the window
+  halved into the caller's 8-bit planes, each sample the rounded mean of a
+  2x2 block (as reelcore_halve_plane), 10-bit means rounded to 8 bits;
+  NEON (VPADDL/VPADAL for 8-bit luma, VLD4 for chroma's U and V, two
+  unpacked rows for 10-bit); polling between columns as the others.
+- HEVCTest 0.1.10: every picture's halved conversion checked against the
+  2x2 means of its 1:1 one; -K times the halved conversion too.
+- Host tests: hevc_hw_test (libavformat and hevc_hwdec with output_hw, a
+  queue of 12 frames as Reel's, each converted 1:1 and halved when shown,
+  the last after the decoder is closed): 8-bit, 10-bit and 10-bit cropped
+  on the left, exactly FFmpeg's pictures and their 2x2 means, nothing
+  left. Mutations caught: rounding dropped, U/V mixed (8-bit and
+  10-bit), the second row not read, hevcdec closed with frames still
+  held, frames never letting go.
+
 ## devkit 0.2.7: hevc_hwdec's drop_before (2026-10-03)
 
 riscos-ffmpeg asked (handoff 2026-10-03-reelhwaccel-hevc_hwdec-drop_before-request):

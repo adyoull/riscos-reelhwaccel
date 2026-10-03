@@ -389,7 +389,7 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
         int lines = 0;
         for (const char *q = o; (q = strstr(q, " ms a picture")); q++) lines++;
         CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !strstr(o, "WRONG") &&
-              lines == (map_bytes == 2 ? 8 : 3) && strstr(o, "column by column (the default)") && strstr(o, "row by row") &&
+              lines == (map_bytes == 2 ? 8 : 3) + 1 && strstr(o, "halved to 8-bit") && strstr(o, "column by column (the default)") && strstr(o, "row by row") &&
               strstr(o, "column by column, preloading") && (map_bytes == 1 || strstr(o, "through a row buffer")),
               "hevctest -K %s (%d, %d ways timed):\n%s", trace, ret, lines, o);
     }
