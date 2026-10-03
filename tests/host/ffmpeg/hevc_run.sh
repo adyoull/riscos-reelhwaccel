@@ -141,6 +141,22 @@ sys.exit(0 if bytes(v >> 2 for v in a) == open(sys.argv[2], 'rb').read() else 1)
   { echo "FAIL: -output_8bit 1: not the top 8 bits of FFmpeg's 10-bit pictures"; bad=1; }
 clean "$O/small10.8.err" || { echo "FAIL: the fake after -output_8bit 1:"; cat "$O/small10.8.err"; bad=1; }
 
+# drop_before: pictures with an earlier pts decoded by the block (all 20 phase 2s) but not converted
+# or given out; the rest exactly the hevc decoder's last pictures; pipelined and not
+export HEVC_FAKE_TRACE=$C/small.trace HEVC_FAKE_YUV=$C/small.yuv HEVC_FAKE_SIZE=352x288
+N=$(ffprobe -v error -select_streams v -show_entries frame=pts -of csv=p=0 "$C/small.mp4" | sort -n | sed -n 8p)
+K=$(ffprobe -v error -select_streams v -show_entries frame=pts -of csv=p=0 "$C/small.mp4" | awk -v n="$N" '$1 >= n' | wc -l)
+"$Q" "$FF" -nostdin -loglevel error -c:v hevc -i "$C/small.mp4" -vsync passthrough -f framecrc - 2>/dev/null |
+  awk -F', ' '!/^#/{print $6}' | tail -n "$K" > "$O/drop.want"
+for opts in "" "-pipelined 0"; do
+  "$Q" "$FF" -nostdin -loglevel verbose -c:v hevc_hwdec $opts -drop_before "$N" -i "$C/small.mp4" -vsync passthrough \
+    -f framecrc - 2> "$O/drop.err" | awk -F', ' '!/^#/{print $6}' > "$O/drop.got"
+  [ -n "$N" ] && [ "$K" -gt 0 ] && [ "$K" -lt 20 ] && cmp -s "$O/drop.got" "$O/drop.want" &&
+    grep -q "$((20 - K)) late pictures decoded but not converted (drop_before)" "$O/drop.err" &&
+    grep -q "fake_hevc: 0 complaints, 20 phase 1s, 20 phase 2s, .* 0 buffers not freed" "$O/drop.err" ||
+    { echo "FAIL: -drop_before $N $opts (keep $K): got $(wc -l < "$O/drop.got") pictures"; grep "late\|fake_hevc" "$O/drop.err"; bad=1; }
+done
+
 # a picture the block fails (its phase 1 doesn't finish properly): given out, flagged corrupt
 HEVC_FAKE_FAIL=4 HEVC_FAKE_QUIET=1 "$Q" "$FF" -nostdin -loglevel warning -c:v hevc_hwdec -i "$C/small.mp4" -f null - \
   2> "$O/fail.err" || { echo "FAIL: ffmpeg with a picture failed stopped:"; cat "$O/fail.err"; bad=1; }

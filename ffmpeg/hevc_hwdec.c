@@ -16,6 +16,10 @@
  *    option output_8bit), converted, waiting for the block only if it
  *    hasn't finished the picture yet.
  *
+ * drop_before (as h264_vchiq's in riscos-ffmpeg): a player that has fallen
+ * behind sets it, and pictures with an earlier pts are decoded by the block
+ * (they may be references) but neither converted nor given out.
+ *
  * It refuses (AVERROR(ENOSYS), so the caller can use the hevc decoder
  * instead) streams the block can't decode here: other than 8-bit or
  * 10-bit 4:2:0, over 4096x4096, a picture size that grows or a depth that
@@ -99,6 +103,8 @@ typedef struct HWDecContext {
     int pipelined;
     int cached_frames;
     int output_8bit;            /* 10-bit streams given out as YUV420P (each sample's top 8 bits) */
+    int64_t drop_before;        /* pictures with an earlier pts (pkt_timebase) are decoded but not converted or given out */
+    unsigned dropped;
 } HWDecContext;
 
 typedef struct HWDecPicture {
@@ -658,6 +664,8 @@ static enum AVPixelFormat inner_get_format(AVCodecContext *inner, const enum AVP
 static av_cold int hwdec_close(AVCodecContext *avctx)
 {
     HWDecContext *w = avctx->priv_data;
+    if (w->dropped)
+        av_log(avctx, AV_LOG_VERBOSE, "%u late pictures decoded but not converted (drop_before)\n", w->dropped);
     av_frame_free(&w->hwf);
     av_frame_free(&w->held);
     av_packet_free(&w->pkt);
@@ -749,6 +757,20 @@ static int give_out(AVCodecContext *avctx, AVFrame *frame, AVFrame *hwf)
     return 0;
 }
 
+/* too late to be shown (drop_before): the block still decodes it (a later
+   picture may refer to it), but it isn't converted, nor given out */
+static int late(const HWDecContext *w, const AVFrame *f)
+{
+    return w->drop_before != INT64_MIN && f->pts != AV_NOPTS_VALUE && f->pts < w->drop_before;
+}
+
+static void drop(HWDecContext *w, AVFrame *f)
+{
+    av_frame_unref(f);                       /* (its hevcdec frame free again once no reference holds it: a picture
+                                                still being decoded into it is waited for before the frame is reused) */
+    w->dropped++;
+}
+
 static int hwdec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     HWDecContext *w = avctx->priv_data;
@@ -765,12 +787,18 @@ static int hwdec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
                 av_frame_unref(w->hwf);
                 return AVERROR(ENOSYS);
             }
+            if (late(w, w->hwf)) { drop(w, w->hwf); continue; }
             if (!w->pipelined) return give_out(avctx, frame, w->hwf);
             /* pipelined: each picture given out one later, so the next is
                already with the block (without B pictures FFmpeg hands each
                out as soon as it's decoded, and converting it at once would
                leave the block idle while the program waits for it) */
             if (!w->held->buf[0]) { av_frame_move_ref(w->held, w->hwf); continue; }
+            if (late(w, w->held)) {                              /* (late by now: drop_before moved on) */
+                drop(w, w->held);
+                av_frame_move_ref(w->held, w->hwf);
+                continue;
+            }
             ret = give_out(avctx, frame, w->held);
             av_frame_unref(w->held);                             /* (also if it failed) */
             av_frame_move_ref(w->held, w->hwf);
@@ -778,6 +806,7 @@ static int hwdec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         }
         if (ret == AVERROR_EOF) {
             if (!w->held->buf[0]) return AVERROR_EOF;
+            if (late(w, w->held)) { drop(w, w->held); return AVERROR_EOF; }
             ret = give_out(avctx, frame, w->held);
             av_frame_unref(w->held);
             return ret;
@@ -822,6 +851,9 @@ static const AVOption options[] = {
       AV_OPT_TYPE_BOOL, { .i64 = 1 }, 0, 1, VD },
     { "output_8bit", "10-bit streams given out as 8-bit YUV420P (each sample's top 8 bits)", OFFSET(output_8bit),
       AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
+    { "drop_before", "pictures with an earlier pts (pkt_timebase) decoded but not converted or given out; a player "
+      "that is behind sets it as it goes", OFFSET(drop_before), AV_OPT_TYPE_INT64, { .i64 = INT64_MIN }, INT64_MIN,
+      INT64_MAX, VD },
     { NULL }
 };
 

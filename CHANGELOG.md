@@ -1,5 +1,23 @@
 # Changes
 
+## devkit 0.2.7: hevc_hwdec's drop_before (2026-10-03)
+
+riscos-ffmpeg asked (handoff 2026-10-03-reelhwaccel-hevc_hwdec-drop_before-request):
+at 4K, Reel fell behind and set skip_frame, so the block was given only
+keyframes, when the block wasn't the limit; the ARM's conversion of
+pictures that would be thrown away as late was.
+
+- hevc_hwdec: `drop_before` (int64 pts in pkt_timebase, default
+  INT64_MIN), as their h264_vchiq patch 0022: a picture with an earlier
+  pts is decoded by the block but not converted and not given out (also
+  a held pipelined picture that has become late, and at the end of the
+  stream); the count is logged at close (verbose).
+- Host test: -drop_before at the 8th pts of small: the 13 later pictures
+  given out, exactly the hevc decoder's last 13, all 20 decoded by the
+  (fake) block, the count logged, pipelined and not; the option ignored
+  (mutation) fails it.
+- hevcdec unchanged (0.1.8).
+
 ## hevcdec 0.1.8, HEVCTest 0.1.9, devkit 0.2.6: the block kept busy during conversion (test zip, 2026-10-03)
 
 The hot paths, looked at (project doc reelhwaccel-hevc-hotpaths.md):
