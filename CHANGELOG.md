@@ -1,5 +1,31 @@
 # Changes
 
+## hevc_hwdec in FFmpeg 5.1.10, devkit 0.2.2 (2026-10-03)
+
+HEVCTest 0.1.6 on a Pi 4: every picture right; pipelined, 1080p at 352.9
+pictures a second (phase 2 bound, about 2.8 ms a picture), against
+222-231 waiting for each.
+
+- `ffmpeg/0002-avcodec-hevc_hwdec.patch` (`ffmpeg/hevc_hwdec.c`,
+  `--enable-libhevcdec`): the hwaccel `hevc_hwdec` on FFmpeg's HEVC
+  decoder (AV_PIX_FMT_HEVCDEC; FFmpeg parses and keeps the DPB, each
+  picture goes to hevcdec as V4L2 stateless controls into a frame of
+  hevcdec's), and the decoder `hevc_hwdec` around it giving YUV420P with
+  the cropping applied. Refused with ENOSYS (so the caller can use `hevc`)
+  for other than 8-bit 4:2:0, over 4096x4096, a size growing part way, or
+  no block: at open when the extradata has the SPS, else at the first
+  picture. A picture the block fails on is flagged as corrupt and
+  decoding goes on. Options `pipelined` and `cached_frames` (both on).
+- Tests: `tests/host/ffmpeg/hevc_run.sh` builds FFmpeg with 0001 and 0002
+  over the fake HEVC block and checks every picture of each clip against
+  `hevc` (pipelined and not, cached and not, -ss, a raw stream, a cropped
+  stream, a failed picture, 10-bit and no block refused). It found the top
+  and left crop applied twice. 10 of 10 mutations caught.
+- The fake HEVC block can fail a chosen picture (HEVC_FAKE_FAIL), and its
+  picture hash ignores trailing zero bytes (as raw streams' slices end).
+- devkit 0.2.2: adds libhevcdec.a, hevcdec.h, hevc_ctrls.h and the 0002
+  patch, link-tested.
+
 ## hevcdec 0.1.5 and HEVCTest 0.1.6: the two phases overlapped (test zip, 2026-10-02)
 
 HEVCTest 0.1.5 on a Pi 4: all right. The EMT trap on a quick start from

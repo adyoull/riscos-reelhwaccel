@@ -1,12 +1,14 @@
 # riscos-reelhwaccel devkit
 
-What FFmpeg and Reel need to decode H.264 on the Raspberry Pi's VideoCore
-from RISC OS:
+What FFmpeg and Reel need to decode H.264 on the Raspberry Pi's VideoCore,
+and HEVC on the Pi 4's HEVC block, from RISC OS:
 
 | File | What it is |
 |---|---|
 | `include/vcdec.h`, `lib/libvcdec.a` | vcdec: the VideoCore's H.264 decoder through RISC OS's VCHIQ module and the firmware's MMAL service. GCCSDK GCC 10, ARMv7, hard float. |
 | `ffmpeg/0001-avcodec-h264_vchiq.patch` | FFmpeg 5.1.10's `h264_vchiq` decoder on top of vcdec (`git am`, or `patch -p1`). It applies to plain 5.1.10 and on top of riscos-ffmpeg's series. |
+| `include/hevcdec.h`, `include/hevc_ctrls.h`, `lib/libhevcdec.a` | hevcdec: the Pi 4's HEVC block (rpivid), driven directly from user mode, fed V4L2 stateless HEVC controls. GCCSDK GCC 10, ARMv7, hard float, NEON. |
+| `ffmpeg/0002-avcodec-hevc_hwdec.patch` | FFmpeg 5.1.10's `hevc_hwdec` hwaccel and decoder on top of hevcdec. Apply after 0001; it applies on top of riscos-ffmpeg's series too. |
 
 ## FFmpeg
 
@@ -27,6 +29,31 @@ gives ordinary YUV420P frames, in display order with their pts.
 - **Memory (vcdec 0.4):** pictures arrive in a cacheable Physical Memory Pool and are copied out by LDM 8: 1080p at 82 pictures a second on a Pi 4, against 64 from PCI memory. Without a pool (RISC OS before 5.23, or no contiguous pages) vcdec uses PCI memory and logs why (`-v verbose`). `-pci_memory 1` asks for PCI memory, as an escape hatch.
 - **Linking:** add `-lvcdec` after `-lavcodec` when linking programs.
 
+## HEVC: hevc_hwdec
+
+Apply 0002 after 0001, then add to the configure line above:
+
+    --enable-libhevcdec --enable-decoder=hevc_hwdec --enable-hwaccel=hevc_hwdec
+
+(`--enable-libhevcdec` needs `--enable-gpl`; it also selects the `hevc`
+decoder, which `hevc_hwdec` runs inside.) Link programs with `-lhevcdec`
+after `-lavcodec`.
+
+`hevc_hwdec` is FFmpeg's own HEVC decoder with the block doing the
+decoding: FFmpeg parses the stream and keeps the reference pictures, the
+block decodes each picture, and the decoder gives ordinary YUV420P frames
+(converted from the block's 128-byte column format), with their pts and
+cropping applied. Ask for it by name (`-c:v hevc_hwdec`, or
+`avcodec_find_decoder_by_name("hevc_hwdec")`).
+
+- **Refused with AVERROR(ENOSYS),** so the caller can open `hevc` instead: anything but 8-bit 4:2:0 (10-bit is still to come); over 4096x4096; a picture size that grows part way; machines without the block (not a Pi 4). Streams with their parameter sets in the extradata (MP4, MKV) are refused at open; raw streams at their first picture.
+- **A picture the block fails on** comes out with `decode_error_flags` set (FFmpeg logs "corrupt decoded frame"); decoding carries on.
+- **Options:** `pipelined` (default on: the block decodes while FFmpeg parses the next picture; one picture is held back, so output is a picture later) and `cached_frames` (default on: the block's frames are cacheable, cleaned and invalidated before conversion, about twice as quick to convert).
+- **Threads:** the decoder runs FFmpeg's HEVC decoder single-threaded; the parallelism is the block's.
+- **Seeking:** `avcodec_flush_buffers` as for `hevc`.
+- **Headers:** FFmpeg has its own `libavcodec/hevcdec.h`; ours is included as `<hevcdec.h>` through `-I<devkit>/include`, so keep that on the include path rather than copying the header into libavcodec.
+- **Speed (Pi 4, 1080p):** about 350 pictures a second through the block when pipelined, about 225 when not.
+
 ## vcdec on its own
 
 See `vcdec.h`: open, send an access unit with its pts, receive a picture
@@ -42,3 +69,9 @@ module with its own MMAL client, based on the MMAL message formats as that
 driver's headers define them (there's no published specification). It
 contains none of the driver's code, but having used it as its reference
 it is treated as derived from it. From riscos-reelhwaccel.
+
+hevcdec is GPL version 2 too: it runs Linux's rpivid HEVC driver
+(`rpivid_h265.c`, GPL-2.0-or-later) unchanged under a small shim, and
+`hevc_hwdec` uses Raspberry Pi's FFmpeg code for filling the V4L2
+controls (LGPL 2.1 or later). FFmpeg built with `--enable-libhevcdec` is
+GPL.

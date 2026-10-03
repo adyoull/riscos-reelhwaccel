@@ -74,8 +74,13 @@ showed on a Raspberry Pi 4.
 - **`ffmpeg/`**: FFmpeg 5.1.10's `h264_vchiq` decoder on top of vcdec, as
   a patch (`0001-avcodec-h264_vchiq.patch`, `--enable-vchiq`), tested in
   FFmpeg itself (libavcodec's API and the `ffmpeg` command) against the
-  fakes. **`devkit/`** packs libvcdec, vcdec.h and the patch for
-  riscos-ffmpeg (FFmpeg, Reel).
+  fakes. And `hevc_hwdec` on top of hevcdec
+  (`0002-avcodec-hevc_hwdec.patch`, `--enable-libhevcdec`): a hwaccel on
+  FFmpeg's own HEVC decoder (FFmpeg parses, the block decodes, pipelined)
+  and a decoder of that name giving YUV420P frames, tested in the `ffmpeg`
+  command against the fake HEVC block. **`devkit/`** packs libvcdec,
+  libhevcdec, their headers and both patches for riscos-ffmpeg (FFmpeg,
+  Reel).
 
 On a Pi 4 (HEVCTest 0.1.2) every picture of every clip comes out
 exactly as FFmpeg decodes it, 1080p at 230 pictures a second, now that
@@ -83,9 +88,8 @@ the block's scaling factors are always loaded (hevcdec 0.1.2). 0.1.4
 makes the output frames cacheable and converts them with NEON (it took
 29 ms a 1080p picture from memory that isn't cacheable). 0.1.5 overlaps
 the block's two phases and can decode while the program works
-(pipelined). Next: output
-frames that are quick to read (converting an uncached 1080p frame takes
-29 ms), 10-bit and 4K, and `hevc_hwdec` in FFmpeg and Reel.
+(pipelined): 1080p at 353 pictures a second (HEVCTest 0.1.6). Next:
+`hevc_hwdec` in riscos-ffmpeg and Reel (devkit 0.2.2), then 10-bit and 4K.
 
 ## Building
 
@@ -93,9 +97,10 @@ frames that are quick to read (converting an uncached 1080p frame takes
     vcdec/build.sh OUTDIR      # libvcdec.a and vcdec.h, for RISC OS
     hevcdec/build.sh OUTDIR    # libhevcdec.a and hevcdec.h, for RISC OS
     tools/hevctrace/build.sh .../ffmpeg-5.1.10.tar.xz   # the host ffmpeg that writes traces (HEVC_TRACE=file)
-    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-0.1.tgz
+    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.2)
     FFMPEG_TARBALL=.../ffmpeg-5.1.10.tar.xz tests/host/run.sh   # the host tests
-    ffmpeg/mkpatch.sh .../ffmpeg-5.1.10.tar.xz   # the patch, after vchiqdec.c changes
+    ffmpeg/mkpatch.sh .../ffmpeg-5.1.10.tar.xz   # patch 0001, after vchiqdec.c changes
+    ffmpeg/mkpatch-hevc.sh .../ffmpeg-5.1.10.tar.xz   # patch 0002, after hevc_hwdec.c changes
 
 `build.sh` needs GCCSDK GCC 10 (`CROSS=.../arm-riscos-gnueabihf-`),
 `tools/elf2aif` built (`make -C tools/elf2aif GCCSDK_SRC=<gccsdk>`), and
@@ -142,7 +147,7 @@ What it's built from, and how:
 | Linux `rpivid` (`rpivid_hw.h`, `rpivid.h`, `rpivid_hw.c`, `rpivid_video.c`) and device tree (`bcm2711*.dtsi`) | GPL-2.0 only | the reference for the HEVC block's registers, addresses, clock and interrupt, and what `rpivid_h265.c` expects of the rest of the driver: none of their code (hevcdec's `rpivid.h`, `rpivid_hw.h` and `rpivid_video.h` are our own), but treated as derived from them |
 | Linux `rpivid_h265.c` (rpi-6.6.y) | GPL-2.0-or-later | `hevcdec/rpivid_h265.c`, unchanged: the block's commands for each picture |
 | Linux `hevc-ctrls.h` (V4L2 stateless HEVC controls) | BSD-3-Clause or GPL-2.0 (uAPI) | `hevcdec/hevc_ctrls.h`, with plain types |
-| Raspberry Pi's FFmpeg (`v4l2_req_hevc_vx.c`) | LGPL-2.1-or-later | `tools/hevctrace/hevc_trace.c`: filling the controls from FFmpeg's HEVC decoder |
+| Raspberry Pi's FFmpeg (`v4l2_req_hevc_vx.c`) | LGPL-2.1-or-later | `tools/hevctrace/hevc_trace.c` and `ffmpeg/hevc_hwdec.c`: filling the controls from FFmpeg's HEVC decoder |
 | RISC OS's VCHIQ, BCMSound and BCMVideo modules (in the ROM) | - | the VCHIQ SWI conventions, learnt by running and disassembling them |
 
 Code from `mmal-vchiq.c` or rpivid's other files (GPL-2.0 only) is not

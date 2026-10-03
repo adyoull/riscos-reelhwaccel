@@ -114,6 +114,7 @@ static void *mem(uint64_t bus, size_t n, const char *what)
 uint32_t fake_hevc_hash(const uint8_t *p, size_t n)
 {
     uint32_t h = 2166136261u;
+    while (n && !p[n - 1]) n--;      /* (trailing zero bytes: an Annex B stream's, before a 4-byte start code) */
     for (size_t i = 0; i < n; i++) h = (h ^ p[i]) * 16777619u;
     return h;
 }
@@ -168,7 +169,10 @@ static void phase1_done(void)
     }
     CHECK(have_hash, "phase 1 without a bitstream");
     factors_wrong = nfactors != 4064 / 4;               /* all of them, for this picture */
-    if (fake_hevc.p1_exhaust) {                          /* the PU buffer ran out: CFSTATUS short */
+    if (fake_hevc.p1_fail && fake_hevc.phase1s == fake_hevc.p1_fail) {   /* a failure rpivid can't mend */
+        regs[0x74 / 4] = n - 1;
+        regs[0x38 / 4] = 0;
+    } else if (fake_hevc.p1_exhaust) {                   /* the PU buffer ran out: CFSTATUS short */
         fake_hevc.p1_exhaust = 0;
         regs[0x74 / 4] = n - 1;
         regs[0x38 / 4] = 16;                             /* STATUS_PU_EXHAUSTED */

@@ -59,6 +59,8 @@ grep "FAIL\|vcdec_test:" "$O/vcdec_test.out"
 
 # hevcdec/ and tools/hevctest: against a fake HEVC block, on traces from tools/hevctrace
 "$HERE/hevc/run.sh" "$O" || bad=1
+# ffmpeg/: the hevc_hwdec decoder and hwaccel built into FFmpeg 5.1.10, on hevc/'s clips
+"$HERE/ffmpeg/hevc_run.sh" "$O" || bad=1
 
 # hevchw/module: the HEVCHW module (its C, and header.s's veneers and IRQ handler) on a fake RISC OS
 arm-linux-gnueabihf-gcc -c -o "$O/hevchw_header.o" "$TOP/hevchw/module/header.s" &&
