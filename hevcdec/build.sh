@@ -1,6 +1,6 @@
 #!/bin/bash
 # hevcdec/build.sh OUTDIR - libhevcdec.a for RISC OS (GCCSDK GCC 10 at CROSS,
-# hard float), with hevcdec.h and hevc_ctrls.h beside it. rpivid_h265.c is
+# hard float), with hwhevcdec.h and hevc_ctrls.h beside it. rpivid_h265.c is
 # Raspberry Pi's file as it is, so it's built as the kernel builds it
 # (no warnings about signedness or unused parameters).
 set -e
@@ -17,4 +17,4 @@ ${CROSS}gcc $CF -Wno-pointer-sign -Wno-sign-compare -Wno-unused-parameter -Wno-u
 ${CROSS}gcc -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -c -o "$O/hevcdec_svc.o" "$HERE/hevcdec_svc.S"
 rm -f "$O/libhevcdec.a"
 ${CROSS}ar rcs "$O/libhevcdec.a" "$O/hevcdec.o" "$O/hevcdec_hw.o" "$O/hevcdec_conv.o" "$O/rpivid_h265.o" "$O/hevcdec_svc.o"
-cp "$HERE/hevcdec.h" "$HERE/hevc_ctrls.h" "$O/"
+cp "$HERE/hwhevcdec.h" "$HERE/hevc_ctrls.h" "$O/"

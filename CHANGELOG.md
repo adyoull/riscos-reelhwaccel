@@ -1,5 +1,13 @@
 # Changes
 
+## devkit 0.2.3: hevcdec's header is hwhevcdec.h (2026-10-03)
+
+- `hevcdec.h` renamed `hwhevcdec.h` (guard HWHEVCDEC_H), so it no longer
+  shares a name with FFmpeg's `libavcodec/hevcdec.h`. Patch 0002's
+  configure check and `hevc_hwdec.c`'s include follow. Nothing else
+  changes: the library is still `libhevcdec.a`, the API still `hevcdec_*`,
+  hevcdec still 0.1.5.
+
 ## hevc_hwdec in FFmpeg 5.1.10, devkit 0.2.2 (2026-10-03)
 
 HEVCTest 0.1.6 on a Pi 4: every picture right; pipelined, 1080p at 352.9

@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "hevcdec.h"
+#include "hwhevcdec.h"
 #include "fake_hevc.h"
 
 static int fails;

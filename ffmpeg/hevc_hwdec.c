@@ -58,7 +58,7 @@
 #include "hwconfig.h"
 #include "internal.h"
 #include "hevcdec.h"            /* FFmpeg's HEVC decoder */
-#include <hevcdec.h>            /* riscos-reelhwaccel's (from -I: not this directory's) */
+#include <hwhevcdec.h>          /* riscos-reelhwaccel's hevcdec (from -I) */
 
 extern const FFCodec ff_hevc_decoder;
 

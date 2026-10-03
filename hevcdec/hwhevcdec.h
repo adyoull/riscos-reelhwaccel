@@ -22,8 +22,8 @@
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
-#ifndef HEVCDEC_H
-#define HEVCDEC_H
+#ifndef HWHEVCDEC_H
+#define HWHEVCDEC_H
 
 #include <stddef.h>
 #include <stdint.h>

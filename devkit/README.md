@@ -7,7 +7,7 @@ and HEVC on the Pi 4's HEVC block, from RISC OS:
 |---|---|
 | `include/vcdec.h`, `lib/libvcdec.a` | vcdec: the VideoCore's H.264 decoder through RISC OS's VCHIQ module and the firmware's MMAL service. GCCSDK GCC 10, ARMv7, hard float. |
 | `ffmpeg/0001-avcodec-h264_vchiq.patch` | FFmpeg 5.1.10's `h264_vchiq` decoder on top of vcdec (`git am`, or `patch -p1`). It applies to plain 5.1.10 and on top of riscos-ffmpeg's series. |
-| `include/hevcdec.h`, `include/hevc_ctrls.h`, `lib/libhevcdec.a` | hevcdec: the Pi 4's HEVC block (rpivid), driven directly from user mode, fed V4L2 stateless HEVC controls. GCCSDK GCC 10, ARMv7, hard float, NEON. |
+| `include/hwhevcdec.h`, `include/hevc_ctrls.h`, `lib/libhevcdec.a` | hevcdec: the Pi 4's HEVC block (rpivid), driven directly from user mode, fed V4L2 stateless HEVC controls. GCCSDK GCC 10, ARMv7, hard float, NEON. |
 | `ffmpeg/0002-avcodec-hevc_hwdec.patch` | FFmpeg 5.1.10's `hevc_hwdec` hwaccel and decoder on top of hevcdec. Apply after 0001; it applies on top of riscos-ffmpeg's series too. |
 
 ## FFmpeg
@@ -51,7 +51,7 @@ cropping applied. Ask for it by name (`-c:v hevc_hwdec`, or
 - **Options:** `pipelined` (default on: the block decodes while FFmpeg parses the next picture; one picture is held back, so output is a picture later) and `cached_frames` (default on: the block's frames are cacheable, cleaned and invalidated before conversion, about twice as quick to convert).
 - **Threads:** the decoder runs FFmpeg's HEVC decoder single-threaded; the parallelism is the block's.
 - **Seeking:** `avcodec_flush_buffers` as for `hevc`.
-- **Headers:** FFmpeg has its own `libavcodec/hevcdec.h`; ours is included as `<hevcdec.h>` through `-I<devkit>/include`, so keep that on the include path rather than copying the header into libavcodec.
+- **Header:** hevcdec's header is `hwhevcdec.h` (devkit 0.2.3; 0.2.2 called it `hevcdec.h`, which clashed with FFmpeg's own `libavcodec/hevcdec.h`). It comes from `-I<devkit>/include`.
 - **Speed (Pi 4, 1080p):** about 350 pictures a second through the block when pipelined, about 225 when not.
 
 ## vcdec on its own

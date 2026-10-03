@@ -34,7 +34,7 @@ $CC -c "$TOP/hevcdec/hevcdec.c" -o "$O/lib/hevcdec.o" && $CC -c "$TOP/hevcdec/he
   $CC -c "$HERE/hevc_fake_env.c" -o "$O/hevc_fake_env.o" || exit 1
 rm -f "$O/lib/libhevcdec.a"
 arm-linux-gnueabihf-ar rcs "$O/lib/libhevcdec.a" "$O/lib/"*.o
-cp "$TOP/hevcdec/hevcdec.h" "$TOP/hevcdec/hevc_ctrls.h" "$O/lib/"
+cp "$TOP/hevcdec/hwhevcdec.h" "$TOP/hevcdec/hevc_ctrls.h" "$O/lib/"
 # FFmpeg, patched (again only if a patch has changed)
 stamp=$(cat "$P1" "$P2" | sha256sum | cut -c1-16)
 if [ "$(cat "$O/stamp" 2>/dev/null)" != "$stamp" ]; then

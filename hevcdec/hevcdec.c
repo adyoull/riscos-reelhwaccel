@@ -1,7 +1,7 @@
 /*
  * hevcdec.c - hevcdec's glue: the decoder, its frames and memory around
  * Raspberry Pi's rpivid_h265.c (kept as it is), and the polling that
- * stands in for the block's interrupts. See hevcdec.h.
+ * stands in for the block's interrupts. See hwhevcdec.h.
  *
  * rpivid_h265.c is driven as the V4L2 stateless request API would: for
  * each slice, setup (the slice's commands added) then trigger; after the
@@ -16,7 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "hevcdec.h"
+#include "hwhevcdec.h"
 #include "rpivid.h"
 #include "rpivid_hw.h"
 #include "hevcdec_conv.h"

@@ -89,15 +89,15 @@ makes the output frames cacheable and converts them with NEON (it took
 29 ms a 1080p picture from memory that isn't cacheable). 0.1.5 overlaps
 the block's two phases and can decode while the program works
 (pipelined): 1080p at 353 pictures a second (HEVCTest 0.1.6). Next:
-`hevc_hwdec` in riscos-ffmpeg and Reel (devkit 0.2.2), then 10-bit and 4K.
+`hevc_hwdec` in riscos-ffmpeg and Reel (devkit 0.2.3), then 10-bit and 4K.
 
 ## Building
 
     ./build.sh                 # every Pi test zip, into dist/
     vcdec/build.sh OUTDIR      # libvcdec.a and vcdec.h, for RISC OS
-    hevcdec/build.sh OUTDIR    # libhevcdec.a and hevcdec.h, for RISC OS
+    hevcdec/build.sh OUTDIR    # libhevcdec.a and hwhevcdec.h, for RISC OS
     tools/hevctrace/build.sh .../ffmpeg-5.1.10.tar.xz   # the host ffmpeg that writes traces (HEVC_TRACE=file)
-    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.2)
+    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.3)
     FFMPEG_TARBALL=.../ffmpeg-5.1.10.tar.xz tests/host/run.sh   # the host tests
     ffmpeg/mkpatch.sh .../ffmpeg-5.1.10.tar.xz   # patch 0001, after vchiqdec.c changes
     ffmpeg/mkpatch-hevc.sh .../ffmpeg-5.1.10.tar.xz   # patch 0002, after hevc_hwdec.c changes

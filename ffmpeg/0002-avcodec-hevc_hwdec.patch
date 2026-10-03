@@ -1,4 +1,4 @@
-From e1c2a03f7eebe0f3c5f7a14389320e69be79e9f1 Mon Sep 17 00:00:00 2001
+From 90bf2e1cf5b119d17e8f5a88cafff40c42e42c93 Mon Sep 17 00:00:00 2001
 From: Andrew Youll <andrewyoull86@gmail.com>
 Date: Sat, 3 Oct 2026 08:43:26 +0100
 Subject: [PATCH] avcodec: hevc_hwdec, HEVC on the Raspberry Pi 4's HEVC block
@@ -8,7 +8,7 @@ The hwaccel hevc_hwdec, on the HEVC decoder: each picture given to
 riscos-reelhwaccel's hevcdec as the V4L2 stateless HEVC controls, its
 frames hevcdec's (AV_PIX_FMT_HEVCDEC). And the decoder hevc_hwdec: the
 HEVC decoder with that hwaccel inside it, its pictures given out as
-YUV420P frames. --enable-libhevcdec (GPL), needs hevcdec.h and
+YUV420P frames. --enable-libhevcdec (GPL), needs hwhevcdec.h and
 libhevcdec.
 ---
  configure               |   8 +
@@ -23,7 +23,7 @@ libhevcdec.
  create mode 100644 libavcodec/hevc_hwdec.c
 
 diff --git a/configure b/configure
-index 60d92c4..1e59ecf 100755
+index 60d92c4..f560367 100755
 --- a/configure
 +++ b/configure
 @@ -345,6 +345,8 @@ External library support:
@@ -65,7 +65,7 @@ index 60d92c4..1e59ecf 100755
  }
  
  enabled vchiq             && require vchiq vcdec.h vcdec_open -lvcdec
-+enabled libhevcdec        && require libhevcdec hevcdec.h hevcdec_open -lhevcdec
++enabled libhevcdec        && require libhevcdec hwhevcdec.h hevcdec_open -lhevcdec
  enabled libwebp           && {
      enabled libwebp_encoder      && require_pkg_config libwebp "libwebp >= 0.2.0" webp/encode.h WebPGetEncoderVersion
      enabled libwebp_anim_encoder && check_pkg_config libwebp_anim_encoder "libwebpmux >= 0.4.0" webp/mux.h WebPAnimEncoderOptionsInit; }
@@ -95,7 +95,7 @@ index 5014510..8c7dd31 100644
  extern const FFCodec ff_hevc_v4l2m2m_decoder;
 diff --git a/libavcodec/hevc_hwdec.c b/libavcodec/hevc_hwdec.c
 new file mode 100644
-index 0000000..ed31ed5
+index 0000000..302c84a
 --- /dev/null
 +++ b/libavcodec/hevc_hwdec.c
 @@ -0,0 +1,831 @@
@@ -159,7 +159,7 @@ index 0000000..ed31ed5
 +#include "hwconfig.h"
 +#include "internal.h"
 +#include "hevcdec.h"            /* FFmpeg's HEVC decoder */
-+#include <hevcdec.h>            /* riscos-reelhwaccel's (from -I: not this directory's) */
++#include <hwhevcdec.h>          /* riscos-reelhwaccel's hevcdec (from -I) */
 +
 +extern const FFCodec ff_hevc_decoder;
 +

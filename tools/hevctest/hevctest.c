@@ -21,7 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include "hevcdec.h"
+#include "hwhevcdec.h"
 #define MAX_FRAMES 32
 
 static FILE *out2;
