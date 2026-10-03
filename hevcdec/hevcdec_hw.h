@@ -33,6 +33,11 @@ void hevcdec_hw_ictrl_write(void *hw, uint32_t value);
    the block writes invalidated, with hevcdec_hw_cache_clean_inv. */
 void *hevcdec_hw_alloc(void *hw, size_t size, uint64_t *bus, int cached);
 void hevcdec_hw_free(void *hw, void *p);
+/* why the last hevcdec_hw_alloc gave NULL */
+const char *hevcdec_hw_why(void *hw);
+/* allocations whose claim moved the program's page at &8000 to another
+   physical page (ARMEABISupport finds programs by it): should be 0 */
+unsigned hevcdec_hw_app_page_moves(void *hw);
 int hevcdec_hw_can_cache(void *hw);
 /* cached memory from p for n bytes: written back and dropped from the
    caches (whole 64-byte lines) */

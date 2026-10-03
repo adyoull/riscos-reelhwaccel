@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.5"
+#define HEVCDEC_VERSION "0.1.6"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -75,6 +75,10 @@ typedef struct {
        it, so no harm done), the most bytes past any, and which that was */
     unsigned overruns, overrun_max;
     const char *overrun_what;
+    /* (0.1.6) times claiming the block's memory moved the program's page
+       at &8000 to another physical page: should be 0 (ARMEABISupport finds
+       the program by that page) */
+    unsigned app_page_moves;
 } hevcdec_stats;
 
 void hevcdec_config_init(hevcdec_config *c);

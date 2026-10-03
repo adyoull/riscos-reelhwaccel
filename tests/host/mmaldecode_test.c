@@ -551,6 +551,18 @@ static int recommended;                      /* OS_Memory 12 answered; the claim
 static int pmp_top;                          /* a pool's last page at &3FFFF000 (the top page the VideoCore reaches) */
 static int rx_abort;                         /* this receive (counting from 1) is aborted */
 static uint32_t pmp_next_page = 0x8000;
+/* The program's page at &8000, as RISC OS: OS_Memory 12 may recommend it
+   (it's only an application page), and claiming it makes the kernel copy
+   the program to another page (Service_PagesSafe), which ARMEABISupport
+   never hears of. Physical addresses are page numbers * 4096 + 1 MB here,
+   so a page number used as an address (or the other way) shows. */
+#define FAKE_PHYS(pn) (((uint32_t)(pn) << 12) + 0x100000u)
+static uint32_t app_pn = 0x100;              /* (default: low, below the pools) */
+static uint32_t rec_first;                   /* OS_Memory 12's last recommendation */
+static int app_moves;                        /* claims that took the program's page */
+static int old_os_12;                        /* OS_Memory 12 ignores R4-R7 (before RISC OS 5.29) */
+static int rec_calls;                        /* OS_Memory 12 calls since the reset */
+static int move_on_claim;                    /* every claim moves the program's page anyway */
 static void pci_open(int rw)
 {
     for (int i = 0; i < npci_blocks; i++)
@@ -702,8 +714,10 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
                     if (l[1] == 0xFFFFFFFFu) { if (pmp_claimed[b]) pmp_claimed[b]--; continue; }
                     CHECK(recommended, "pages claimed that OS_Memory 12 didn't just recommend");
                     if (j + 1 == R[3]) recommended = 0;
-                    CHECK(l[1] == pmp_next_page - (uint32_t)pmp_pages[b] + l[0] && (l[2] & 0x8000), "claimed page %u, flags &%X",
-                          l[1], l[2]);
+                    CHECK(l[1] == rec_first + l[0] && (l[2] & 0x8000), "claimed page %u, flags &%X", l[1], l[2]);
+                    if (l[1] == app_pn) { app_moves++; app_pn = 0x200 + (uint32_t)app_moves; }   /* (copied elsewhere) */
+                    if (j + 1 == R[3]) pmp_next_page = rec_first + R[3];
+                    if (j + 1 == R[3] && move_on_claim) { app_moves++; app_pn = 0x200 + (uint32_t)app_moves; }
                     pmp_claimed[b]++;
                 } else {
                     if (l[1] == 0xFFFFFFFFu) { if (pmp_mapped[b]) pmp_mapped[b]--; continue; }
@@ -730,15 +744,27 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
     }
     case 0x68:                               /* OS_Memory */
         if ((R[0] & 0xFF) == 12) {
-            CHECK((R[0] & 0x300) == 0x300 && R[6] < 0x40000000u && R[7] == 0 && R[2] == 12, "OS_Memory 12 &%X, top &%X", R[0], R[6]);
+            uint32_t n = (R[1] + 4095) >> 12, first = pmp_next_page;
+            CHECK((R[0] & 0x300) == 0x300 && R[6] < 0x40000000u && R[5] == 0 && R[7] == 0 && R[2] == 12 && R[4] <= R[6],
+                  "OS_Memory 12 &%X, &%X-&%X", R[0], R[4], R[6]);
+            rec_calls++;
+            if (!old_os_12) {                /* the lowest free run within R4-R7 */
+                if (FAKE_PHYS(first) < R[4]) first = (R[4] - 0x100000u + 4095) >> 12;
+                if (FAKE_PHYS(first + n) - 1 > R[6]) return &err;
+            }
             recommended = 1;
-            pmp_next_page += (R[1] + 4095) >> 12;
-            R[3] = pmp_next_page - ((R[1] + 4095) >> 12);
+            rec_first = first;
+            R[3] = first;
             return NULL;
         }
         if (R[0] == 24) {                    /* access: a pool is user read/write (unless pmp_privileged) */
             int b = block_of(R[1]);
             R[1] = b >= 0 && pmp_block[b] ? (pmp_privileged ? 0x10C : 0x10F) : 0x10C;
+            return NULL;
+        }
+        if ((R[0] == 0x0A00 || R[0] == 0x2200) && R[2] == 1 && ((uint32_t *)(uintptr_t)R[1])[1] == 0x8000) {
+            uint32_t *e = (uint32_t *)(uintptr_t)R[1];   /* the program's page: its number, or its address */
+            if (R[0] == 0x0A00) e[0] = app_pn; else e[2] = FAKE_PHYS(app_pn);
             return NULL;
         }
         if (R[0] == 0x2200) {                /* logical to physical, as VCHIQ (and vcdec's check) */
@@ -909,6 +935,7 @@ static void reset_fake(void)
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
     recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
     pmp_invalidates = 0; nout_max = 0; rx_abort = 0; pmp_privileged = 0; recommended = 0; pmp_top = 0; no_armop = 0; pmp_made = 0;
+    app_pn = 0x100; app_moves = 0; old_os_12 = 0; rec_calls = 0; move_on_claim = 0;
     in_slow = nslow = slow_ticks = slow_max = 0;
 }
 

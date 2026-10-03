@@ -10,6 +10,17 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.2 (vcdec 0.4.2): vcdec's pools never take the running
+program's own page at &8000. RISC OS may offer pages a program is using
+for contiguous memory and quietly copy the program elsewhere, and
+ARMEABISupport, which recognises programs by the address of that page,
+then loses the program (stacks left behind, and later the "EMT trap" in
+another program). Each run now ends with a line saying where the page
+at &8000 was at the start and at the end; "MOVED" is a failure. Please
+restart first, run Test, Memory and ZeroCopy (send Result, ResultM
+and ResultZ), then *ARMEABISupport_Info:
+it should list no programs.
+
 New in 0.3.1 (vcdec 0.4.1): zero-copy. VCDecTest 0.3 showed that at 82
 pictures a second, copying each 1080p picture out of vcdec's buffer took
 9 ms of its 12 while the VideoCore decoded and sent the next one (1.4 ms

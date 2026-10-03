@@ -91,6 +91,11 @@ the block's two phases and can decode while the program works
 (pipelined): 1080p at 353 pictures a second (HEVCTest 0.1.6). Next:
 `hevc_hwdec` in riscos-ffmpeg and Reel (devkit 0.2.3), then 10-bit and 4K.
 
+Both libraries' contiguous memory (`common/contig.h`) avoids the running
+program's page at &8000: taking it moves the program to another page,
+which ARMEABISupport doesn't notice (the "EMT trap" seen after hardware
+runs; vcdec 0.4.2, hevcdec 0.1.6).
+
 ## Building
 
     ./build.sh                 # every Pi test zip, into dist/

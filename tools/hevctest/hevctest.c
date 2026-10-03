@@ -22,6 +22,11 @@
 #include <string.h>
 #include <time.h>
 #include "hwhevcdec.h"
+#ifndef PROBE_TEST
+#include "kernel.h"
+static _kernel_oserror *ht_swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
+#include "../../common/contig.h"           /* (the page at &8000, read before and after) */
+#endif
 #define MAX_FRAMES 32
 
 static FILE *out2;
@@ -203,6 +208,10 @@ int probe_main(int argc, char **argv)
     uint64_t holds[MAX_FRAMES];
     uint32_t t0, t_dec = 0, t_conv = 0;
     hevcdec_stats st;
+    int page_moved = 0;                    /* the program's page at &8000 moved (ARMEABISupport loses it) */
+#ifndef PROBE_TEST
+    contig_app_page page0 = { 0, 0, 0, 0 };
+#endif
 
     out2 = NULL; pics = NULL; npics = 0; shown = 0;
     for (i = 1; i < argc; i++) {
@@ -268,6 +277,9 @@ int probe_main(int argc, char **argv)
     if (uncached) c.cached_frames = 0;
     c.pipelined = pipelined;
     if (verbose) c.log = log_line;
+#ifndef PROBE_TEST
+    page0 = contig_read_app_page(ht_swi);
+#endif
     t0 = now_cs();
     if ((r = hevcdec_open(&d, &c)) != HEVCDEC_OK) {
         say("hevcdec_open: %s%s\n", r == HEVCDEC_UNSUPPORTED ? "not for the block: " : "", hevcdec_open_error());
@@ -369,10 +381,24 @@ int probe_main(int argc, char **argv)
     } else {
         say("hevcdec: nothing written past any buffer's end\n");
     }
+    if (st.app_page_moves) {
+        say("hevcdec: claiming memory moved the program's page at &8000 %u times\n", st.app_page_moves);
+        page_moved = 1;
+    }
 out:
     if (d) hevcdec_close(d);
+#ifndef PROBE_TEST
+    if (page0.have_pn || page0.have_pa) {
+        contig_app_page p1 = contig_read_app_page(ht_swi);
+        int moved = contig_app_page_moved(ht_swi, &page0);
+        say("The program's page at &8000: &%08X (page %u) at the start, &%08X (page %u) at the end: %s\n",
+            (unsigned)page0.pa, (unsigned)page0.pn, (unsigned)p1.pa, (unsigned)p1.pn,
+            moved ? "MOVED - ARMEABISupport has lost this program (reboot before the next test)" : "not moved");
+        if (moved) page_moved = 1;
+    }
+#endif
     {
-        int ok = d && !fatal && !wrong && !overran && done == npics && npics > 0;
+        int ok = d && !fatal && !wrong && !overran && !page_moved && done == npics && npics > 0;
         say("\nResult: %s\n", ok ? (timing ? "OK - timed (the pictures weren't checked)" :
                                     "OK - every picture exactly as FFmpeg decodes it")
                                  : "FAILED");

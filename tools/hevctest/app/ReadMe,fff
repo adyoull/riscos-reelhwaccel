@@ -79,6 +79,23 @@ it's fixed, wait a moment before starting the next Obey file.
 the bitstream) of the next picture runs while phase 2 (making the
 picture) of the last does, and the program can carry on while the block
 works, as a player would.
+0.1.7 (hevcdec 0.1.6): the EMT trap, found. riscos-unixlib traced it
+to the contiguous memory the block needs. RISC OS may hand over pages
+that are in use by the running program, its page at &8000 included;
+when that page is taken, RISC OS quietly copies the program to another
+page. ARMEABISupport recognises each program by the physical address of
+its page at &8000, and isn't told of the move, so it loses the program:
+its stacks are never freed, and a later program that is given the old
+page gets no stack handling and stops with the EMT trap. hevcdec now
+never takes the page at &8000 (it asks for memory wholly below it or
+wholly above it). Each run now ends with a line saying where the
+program's page at &8000 was at the start and at the end; "MOVED" there
+is a failure.
+Please restart the Pi first, then run Test, Speed, Pipelined and
+Repeat, then *ARMEABISupport_Info: it should list no programs (none of
+these left a record behind). And please send Result, ResultT, ResultP
+and ResultR.
+
 If a run says a phase "didn't finish", restart before running anything
 else; if the machine locks up, switch it off and on again.
 

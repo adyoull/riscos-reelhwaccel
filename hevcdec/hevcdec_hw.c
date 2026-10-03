@@ -13,6 +13,8 @@
  *    physical address (the SCB's dma-ranges map bus 0-16 GB to physical
  *    0-16 GB: Raspberry Pi Linux's bcm2711-rpi-ds.dtsi);
  *  - the time: OS_ReadMonotonicTime.
+ * The pages never include the program's page at &8000 (../common/contig.h:
+ * ARMEABISupport finds the program by that page).
  * PRM: OS_Memory 0/12/13, OS_DynamicArea 0/1/21/22, OS_MMUControl 2.
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
@@ -22,6 +24,7 @@
 #include <string.h>
 #include "kernel.h"
 #include "hevcdec_hw.h"
+#include "../common/contig.h"
 
 #define OS_Module             0x1E
 #define OS_ReadMonotonicTime  0x42
@@ -62,6 +65,8 @@ struct hevcdec_hw {
     pool_t pools[MAX_POOLS];
     int stuck;                        /* a pool wouldn't go: the handler stays */
     uint32_t armop_cci;               /* Cache_CleanInvalidateRange (0: none) */
+    unsigned app_page_moves;          /* claims that moved the page at &8000 (should be none) */
+    char why[320];                    /* why the last hevcdec_hw_alloc gave NULL */
 };
 
 static _kernel_oserror *swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
@@ -208,8 +213,12 @@ void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus, int cached)
     _kernel_swi_regs r;
     uint32_t pages = (uint32_t)((size + 4095) >> 12), first, *l, phys[2];
     pool_t *p = NULL;
+    const char *no;
+    contig_app_page app = contig_read_app_page(swi);
+    snprintf(hw->why, sizeof hw->why, "a pool, or its pages, couldn't be made");
     for (int i = 0; i < MAX_POOLS && !p; i++) if (!hw->pools[i].base) p = &hw->pools[i];
-    if (!p || !pages || !(l = malloc(pages * 12))) return NULL;
+    if (!p) { snprintf(hw->why, sizeof hw->why, "all %d pools in use", MAX_POOLS); return NULL; }
+    if (!pages || !(l = malloc(pages * 12))) { snprintf(hw->why, sizeof hw->why, "out of memory"); return NULL; }
     memset(&r, 0, sizeof r);                           /* the pool (no pages yet) */
     r.r[0] = 0; r.r[1] = -1; r.r[2] = 0; r.r[3] = -1;
     r.r[4] = (int)(DA_SPECIFIC_PAGES | DA_PMP | DA_NOT_DRAGGABLE);
@@ -219,11 +228,11 @@ void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus, int cached)
     p->area = (uint32_t)r.r[1];
     p->base = (void *)(uintptr_t)(uint32_t)r.r[3];
     p->pages = 0;
-    memset(&r, 0, sizeof r);                           /* contiguous pages (claimed straight after: PRM), */
-    r.r[0] = 12 | 1 << 8 | 1 << 9; r.r[1] = (int)(pages << 12); r.r[2] = 12;   /* below PHYS_TOP (R4-R7) */
-    r.r[4] = 0; r.r[5] = 0; r.r[6] = (int)(PHYS_TOP - 1); r.r[7] = 0;
-    if (swi(OS_Memory, &r)) { free(l); pool_free(hw, p); return NULL; }
-    first = (uint32_t)r.r[3];
+    /* contiguous pages below PHYS_TOP (claimed straight after: PRM), not the program's page at &8000 */
+    if ((no = contig_recommend(swi, pages, PHYS_TOP - 1, &app, &first)) != NULL) {
+        snprintf(hw->why, sizeof hw->why, "%s", no);
+        free(l); pool_free(hw, p); return NULL;
+    }
     for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = first + j; l[3 * j + 2] = PAGE_LOCK; }
     memset(&r, 0, sizeof r);
     r.r[0] = 21; r.r[1] = (int)p->area; r.r[2] = (int)(uintptr_t)l; r.r[3] = (int)pages;
@@ -237,6 +246,8 @@ void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus, int cached)
     r.r[0] = 22; r.r[1] = (int)p->area; r.r[2] = (int)(uintptr_t)l; r.r[3] = (int)pages;
     if (swi(OS_DynamicArea, &r)) { free(l); pool_free(hw, p); return NULL; }
     free(l);
+    if (contig_app_page_moved(swi, &app)) hw->app_page_moves++;
+    snprintf(hw->why, sizeof hw->why, "the pages weren't as asked for");
     for (int k = 0; k < 2; k++) {                       /* (contiguous, checked: first and last pages) */
         uint32_t blk[3] = { 0, (uint32_t)(uintptr_t)p->base + (k ? (pages - 1) << 12 : 0), 0 };
         memset(&r, 0, sizeof r);
@@ -255,6 +266,9 @@ void *hevcdec_hw_alloc(void *h, size_t size, uint64_t *bus, int cached)
     *bus = phys[0];
     return p->base;
 }
+
+const char *hevcdec_hw_why(void *h) { return ((hevcdec_hw *)h)->why; }
+unsigned hevcdec_hw_app_page_moves(void *h) { return ((hevcdec_hw *)h)->app_page_moves; }
 
 void hevcdec_hw_free(void *h, void *ptr)
 {

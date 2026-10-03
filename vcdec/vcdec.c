@@ -39,6 +39,7 @@
 #include <string.h>
 #include "kernel.h"
 #include "vcdec.h"
+#include "../common/contig.h"
 
 #define OS_Module                 0x1E
 #define OS_SWINumberFromString    0x39
@@ -386,6 +387,8 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
     _kernel_oserror *e;
     char name[32];
     void *base;
+    const char *no;
+    contig_app_page app = contig_read_app_page(vc_swi);   /* (never claim the program's page at &8000: contig.h) */
     /* the pool and the page list first: OS_Memory 12's pages are only sure
        to be free if claiming them is the next thing that takes pages */
     if (!(l = malloc(pages * 12))) { why(d, "Out of memory"); return NULL; }
@@ -398,15 +401,12 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
     if ((e = vc_swi(OS_DynamicArea, &r)) != NULL) { free(l); why(d, "A Physical Memory Pool: %s", e->errmess); return NULL; }
     *area_out = (uint32_t)r.r[1];
     base = (void *)(uintptr_t)(uint32_t)r.r[3];
-    memset(&r, 0, sizeof r);               /* contiguous pages for DMA below 1 GB (R4-R7: RISC OS 5.29+) */
-    r.r[0] = 12 | 1 << 8 | 1 << 9; r.r[1] = (int)(pages << 12); r.r[2] = 12;
-    r.r[4] = 0; r.r[5] = 0; r.r[6] = (int)(VC_RAM_TOP - 1); r.r[7] = 0;
-    if ((e = vc_swi(OS_Memory, &r)) != NULL) {
+    /* contiguous pages for DMA below 1 GB (R4-R7: RISC OS 5.29+), not the program's page at &8000 */
+    if ((no = contig_recommend(vc_swi, pages, VC_RAM_TOP - 1, &app, &first)) != NULL) {
         free(l); pmp_free(d, *area_out, 0);
-        why(d, "OS_Memory 12 (%u pages): %s", (unsigned)pages, e->errmess);
+        why(d, "%s", no);
         return NULL;
     }
-    first = (uint32_t)r.r[3];
     for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = first + j; l[3 * j + 2] = PAGE_LOCK; }
     if ((e = pmp_op(d, 21, *area_out, l, pages)) != NULL) {
         free(l); pmp_free(d, *area_out, pages);
@@ -424,6 +424,10 @@ static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
         return NULL;
     }
     free(l);
+    if (contig_app_page_moved(vc_swi, &app)) {
+        d->stats.app_page_moves++;
+        logf_(d, "Claiming a pool's pages moved the program's page at &8000 (ARMEABISupport will lose the program)");
+    }
     /* (checked: the first and last pages' physical addresses, as VCHIQ will see them) */
     for (int k = 0; k < 2; k++) {
         uint32_t blk[3] = { 0, (uint32_t)(uintptr_t)base + (k ? (pages - 1) << 12 : 0), 0 };

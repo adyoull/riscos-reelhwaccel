@@ -141,7 +141,10 @@ static void *dma_get(hevcdec *d, size_t size, uint64_t *bus, const char *what, i
     for (k = 0; k < MAX_GUARDED && d->guarded[k].p; k++) {}
     if (k == MAX_GUARDED) return NULL;
     size = (size + 63) & ~(size_t)63;
-    if (!(p = hevcdec_hw_alloc(d->hw, size + GUARD, bus, cached))) return NULL;
+    if (!(p = hevcdec_hw_alloc(d->hw, size + GUARD, bus, cached))) {
+        logf_(d, "No contiguous memory for %s (%u bytes): %s", what, (unsigned)size, hevcdec_hw_why(d->hw));
+        return NULL;
+    }
     memset((uint8_t *)p + size, GUARD_BYTE, GUARD);
     if (cached) hevcdec_hw_cache_clean_inv(d->hw, (uint8_t *)p + size, GUARD);   /* (out to memory) */
     d->guarded[k].p = p; d->guarded[k].size = size; d->guarded[k].what = what; d->guarded[k].reported = 0;
@@ -246,6 +249,7 @@ void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s)
     s->overruns = d->overruns;
     s->overrun_max = d->overrun_max;
     s->overrun_what = d->overrun_what;
+    s->app_page_moves = hevcdec_hw_app_page_moves(d->hw);
 }
 
 int hevcdec_open(hevcdec **out, const hevcdec_config *c)

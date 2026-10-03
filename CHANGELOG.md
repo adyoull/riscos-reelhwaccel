@@ -1,5 +1,36 @@
 # Changes
 
+## vcdec 0.4.2, hevcdec 0.1.6, devkit 0.2.4: never the program's page at &8000 (test zips, 2026-10-03)
+
+riscos-unixlib traced the "code 6" EMT trap to our contiguous memory:
+OS_Memory 12 may recommend pages an application slot is using, the
+running program's own page at &8000 included. Claiming them makes the
+kernel copy the program to another page, so its page at &8000 changes
+physical address. ARMEABISupport 1.08 finds programs by that address and
+has no service handler (it never sees Service_PagesSafe), so it loses
+the program: its stacks are never freed, and a later program given the
+old page has no abort handlers and traps at its first stack extension.
+
+- `common/contig.h` (new, shared): reads the page at &8000 (OS_Memory 0:
+  page number and physical address), and asks OS_Memory 12 for pages
+  wholly below it, else wholly above it (R4-R7). A RISC OS before 5.29
+  ignores R4-R7, so the recommendation is also checked by page number,
+  and refused if it holds the program's page.
+- vcdec 0.4.2 (pools) and hevcdec 0.1.6 (all its buffers) use it, and
+  count claims after which the page at &8000 moved anyway
+  (`vcdec_stats.app_page_moves`, `hevcdec_stats.app_page_moves`: should
+  be 0). hevcdec logs why contiguous memory couldn't be had.
+- HEVCTest 0.1.7 and VCDecTest 0.3.2 report the program's page at &8000
+  at the start and the end of each run; a move is a failure.
+- Host tests: the fake RISC OS has an application page that OS_Memory 12
+  will recommend and that a claim moves (with page numbers and addresses
+  that differ, so mixing them up shows), honours R4-R7 or (as before
+  5.29) ignores them. vcdec_test: the page in the way, near the top
+  (room only below), an old RISC OS with it in the way (refused) and out
+  of the way, and a move counted; VCDecTest fails on a move. Mutations
+  caught: one range only, above only, the page-number check
+  dropped, above off by one, the count dropped, the move not a failure.
+
 ## devkit 0.2.3: hevcdec's header is hwhevcdec.h (2026-10-03)
 
 - `hevcdec.h` renamed `hwhevcdec.h` (guard HWHEVCDEC_H), so it no longer

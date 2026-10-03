@@ -76,6 +76,9 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r);   /* the host tests' fak
 static _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
 #endif
 
+#include "../../common/contig.h"           /* (the page at &8000, read before and after) */
+static contig_app_page page0;              /* the program's page at &8000 before vcdec_open */
+
 static uint32_t now_cs(void)
 {
     _kernel_swi_regs r;
@@ -561,7 +564,7 @@ int probe_main(int argc, char **argv)
     int missing = 0, missing2 = 0, pass1_frames = 0, pass1_ok = 0;
     vcdec *d = NULL;
     vcdec_config cfg;
-    vcdec_stats stats;
+    vcdec_stats stats = { 0 };
     uint8_t *planes[3];
     int strides[3];
 
@@ -666,6 +669,7 @@ int probe_main(int argc, char **argv)
             say("(the RAM disc's dynamic area can't be read)\n");
     }
     cfg.log = log_line;
+    page0 = contig_read_app_page(probe_swi);
     {
         uint32_t t0 = now_cs();
         if ((r = vcdec_open(&d, &cfg)) != VCDEC_OK) {
@@ -867,8 +871,16 @@ done:
     if (zero) say("Zero-copy: %u pictures held, %d copied instead (not holdable)%s\n", stats.holds, unholdable,
                   read_all ? (read_sum ? "; all read" : "; all read (sum 0)") : "");
     {
+        int moved = contig_app_page_moved(probe_swi, &page0);
+        if (page0.have_pn || page0.have_pa) {
+            contig_app_page p1 = contig_read_app_page(probe_swi);
+            say("The program's page at &8000: &%08X (page %u) at the start, &%08X (page %u) at the end: %s\n",
+                (unsigned)page0.pa, (unsigned)page0.pn, (unsigned)p1.pa, (unsigned)p1.pn,
+                moved ? "MOVED - ARMEABISupport has lost this program (reboot before the next test)" : "not moved");
+        }
+        if (stats.app_page_moves) say("vcdec: claiming pools moved the program's page at &8000 %u times\n", stats.app_page_moves);
         int complete = seek_end ? pass1_ok && !missing2 : !missing;
-        int ok = eof && !fatal && !wrong && complete && !disorder && !dups && (!seek_after || seeked);
+        int ok = eof && !fatal && !wrong && complete && !disorder && !dups && (!seek_after || seeked) && !moved;
         (void)pass1_frames; (void)extra;
         if (seek_after && !seeked && eof) say("The flush and seek never happened (the clip ended first)\n");
         if (nsig && !timing) say("Not bit-exact but close to FFmpeg's (block means within 1): %d; not close: %d\n", close_n, far_n);
@@ -879,7 +891,8 @@ done:
                               eof && disorder ? "pictures came back out of display order" :
                               eof && dups ? "a picture came back twice" :
                               eof && !complete ? "the decoder finished, but pictures are missing" :
-                              eof && seek_after && !seeked ? "the seek wasn't tried" : "the decode didn't finish (see above)");
+                              eof && seek_after && !seeked ? "the seek wasn't tried" :
+                              moved ? "the program's page at &8000 moved (see above)" : "the decode didn't finish (see above)");
         if (out2) fclose(out2);
         free(stream);
         return ok ? 0 : 1;

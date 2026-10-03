@@ -353,6 +353,8 @@ static void whole(unsigned flags, int late, int skew, int extra, const char *wha
 
 int probe_main(int argc, char **argv);        /* tools/vcdectest */
 
+static int app_move_next_run;                 /* the next VCDecTest run: every pool claim moves the page at &8000 */
+
 /* VCDecTest on the fake's MP4, with up to three options */
 static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
 {
@@ -369,6 +371,7 @@ static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
     argv[n] = NULL;
     reset_fake();
     mp4_mode = 1;
+    move_on_claim = app_move_next_run; app_move_next_run = 0;
     remove("/tmp/vcdec_test.out");
     *ret = probe_main(n, argv);
     mp4_mode = 0;
@@ -394,6 +397,7 @@ static char *run_apps(int *ret, const char *opts)
     argv[n] = NULL;
     reset_fake();
     mp4_mode = 1;
+    move_on_claim = app_move_next_run; app_move_next_run = 0;
     remove("/tmp/vcdec_test.out");
     *ret = probe_main(n, argv);
     mp4_mode = 0;
@@ -415,6 +419,12 @@ static void app_tests(void)
           strstr(o, "12 checked against FFmpeg: 0 wrong") && strstr(o, "Result: OK - every picture exactly"),
           "VCDecTest (%d):\n%s", ret, o);
     cleaned("app");
+    CHECK(strstr(o, "page at &8000") && strstr(o, ": not moved"), "VCDecTest: the page at &8000 not reported:\n%s", o);
+    app_move_next_run = 1;                    /* (0.4.2) a moved page at &8000 is a failure, said */
+    o = run_app(&ret, "-m", "pmp", NULL);
+    CHECK(ret != 0 && strstr(o, "MOVED - ARMEABISupport") && strstr(o, "claiming pools moved the program's page at &8000 3 times") &&
+          strstr(o, "Result: the program's page at &8000 moved"), "VCDecTest, the page at &8000 moved (%d):\n%s", ret, o);
+    cleaned("app, page moved");
     rx_late = 1;
     o = run_app(&ret, "-S", NULL, NULL);
     CHECK(ret == 0 && strstr(o, "-S: each bulk") && strstr(o, "Result: OK"), "VCDecTest -S (%d):\n%s", ret, o);
@@ -725,6 +735,42 @@ int main(int argc, char **argv)
         }
         pmp_top = 0;
     }
+
+    /* (0.4.2) the program's page at &8000 never among a pool's pages: below
+       it, above it, or (a RISC OS ignoring OS_Memory 12's R4-R7) refused */
+    for (int k = 0; k < 5; k++) {
+        static const char *what[] = { "in the way", "near the top (only room below)", "in the way, an old RISC OS",
+                                      "out of the way, an old RISC OS", "moved anyway (counted)" };
+        vcdec_config cc;
+        vcdec *dd = NULL;
+        vcdec_stats st;
+        vcdec_config_init(&cc);
+        reset_fake();
+        mp4_mode = 1;
+        app_pn = k == 1 ? 0x3FEFE : k == 3 ? 0x100 : pmp_next_page + 1;
+        old_os_12 = k == 2 || k == 3;
+        move_on_claim = k == 4;
+        cc.width = W; cc.height = H; cc.flags = VCDEC_OUT_PMP;
+        r = vcdec_open(&dd, &cc);
+        if (k == 2) {
+            CHECK(r == VCDEC_ERROR && strstr(vcdec_open_error(), "page at &8000") && !pmp_live && !app_moves,
+                  "the page at &8000 %s: %d %s (%d moves)", what[k], r, vcdec_open_error(), app_moves);
+            if (dd) vcdec_close(dd);
+            npci_blocks = 0;
+            continue;
+        }
+        CHECK(r == VCDEC_OK, "the page at &8000 %s: %d %s", what[k], r, vcdec_open_error());
+        if (!dd) continue;
+        setup_planes(0, 0);
+        ngot = 0;
+        CHECK(feed(dd, 0, 12, 1) == VCDEC_EOF && got_is(0, 12), "the page at &8000 %s: decode", what[k]);
+        vcdec_get_stats(dd, &st);
+        CHECK(st.pool_buffers > 0 && rec_calls > 0, "the page at &8000 %s: %u pools", what[k], st.pool_buffers);
+        CHECK(k == 4 ? app_moves > 0 && st.app_page_moves == (unsigned)app_moves : !app_moves && !st.app_page_moves,
+              "the page at &8000 %s: moved %d times (vcdec says %u)", what[k], app_moves, st.app_page_moves);
+        close70(dd, what[k]);
+    }
+    move_on_claim = old_os_12 = 0; app_pn = 0x100;
 
     /* pools refused, or not contiguous: said, nothing left */
     no_pmp = 1;

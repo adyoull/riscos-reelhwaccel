@@ -424,6 +424,9 @@ static void evict_dirty(void)                            /* (lines the program w
         }
 }
 
+const char *hevcdec_hw_why(void *hw) { (void)hw; return "the fake's memory is used up"; }
+unsigned hevcdec_hw_app_page_moves(void *hw) { (void)hw; return 0; }
+
 void hevcdec_hw_free(void *hw, void *p)
 {
     (void)hw;
