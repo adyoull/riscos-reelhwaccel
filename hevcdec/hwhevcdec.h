@@ -15,6 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
+ * 0.1.8: the block kept busy while frames are converted (phases seen
+ * finishing between columns); 10-bit rows unpacked straight into the
+ * planes; hevcdec_convert_benchmark.
  * 0.1.7: 10-bit too (config.bit_depth; frames NV12_10_COL128, converted to
  * 16-bit samples by hevcdec_frame_to_i420_16, or to 8-bit), and sizes up
  * to 4096x4096 (4K) tested.
@@ -32,7 +35,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.7"
+#define HEVCDEC_VERSION "0.1.8"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -82,6 +85,8 @@ typedef struct {
        at &8000 to another physical page: should be 0 (ARMEABISupport finds
        the program by that page) */
     unsigned app_page_moves;
+    /* (0.1.8) times the program had to wait for the block (cs_wait's count) */
+    unsigned waits;
 } hevcdec_stats;
 
 void hevcdec_config_init(hevcdec_config *c);
@@ -117,6 +122,18 @@ void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const pl
    2-byte aligned): a 10-bit decoder only (else HEVCDEC_UNSUPPORTED) */
 int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const planes[3], const int strides[3], int x,
                              int y, int w, int h);
+/* (0.1.8) While a frame is converted, hevcdec sees phases finish and
+   starts the next (pipelined: the block decodes the next picture while
+   the program copies this one).
+   For measuring (HEVCTest -K): f converted n times the given way (0
+   column by column, the default; 1 row by row; 2 column by column with
+   preloading; 3 10-bit through a row buffer, as 0.1.7), to bits 8 or 16
+   (16: a 10-bit decoder), each time as hevcdec_frame_to_i420(_16) does it
+   (the cache cleaned and invalidated first); the centiseconds taken in
+   *cs. HEVCDEC_OK, or HEVCDEC_UNSUPPORTED. */
+#define HEVCDEC_CONVERT_WAYS 4
+int hevcdec_convert_benchmark(hevcdec *d, const hevcdec_frame *f, void *const planes[3], const int strides[3], int bits,
+                              int x, int y, int w, int h, int way, int n, unsigned *cs);
 
 const char *hevcdec_error(const hevcdec *d);
 void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s);

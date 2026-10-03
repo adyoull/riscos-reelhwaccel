@@ -1,0 +1,16 @@
+| Convert: the last of the first three pictures of each 1080p and 4K
+| clip converted 30 times each way (-K): column by column (the default),
+| row by row, column by column with preloading, and for 10-bit through a
+| row buffer (hevcdec 0.1.7's way), to 8-bit and (10-bit) to 16-bit, timed, each
+| checked against the default's. Reports to ResultC.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 98304K -max 98304K
+Remove <Obey$Dir>.ResultC
+Run <Obey$Dir>.hevctest -K -c 3 -o <Obey$Dir>.ResultC <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -K -c 3 -o <Obey$Dir>.ResultC <Obey$Dir>.clips.hd10.trace
+Run <Obey$Dir>.hevctest -K -c 3 -f 10 -o <Obey$Dir>.ResultC <Obey$Dir>.clips.uhd.trace
+Run <Obey$Dir>.hevctest -K -c 3 -f 10 -o <Obey$Dir>.ResultC <Obey$Dir>.clips.uhd10.trace

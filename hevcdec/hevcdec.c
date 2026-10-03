@@ -418,6 +418,7 @@ static int wait_for(hevcdec *d, int (*done)(hevcdec *, void *), void *arg)
 {
     uint32_t t0 = hevcdec_hw_now_cs();
     int r = HEVCDEC_OK;
+    if (!done(d, arg)) d->stats.waits++;
     while (!done(d, arg)) {
         if (d->dead || poll_phases(d)) { r = HEVCDEC_ERROR; break; }
         if (!done(d, arg) && idle(d)) { r = fail(d, "The decode stopped: no phase running"); break; }
@@ -549,21 +550,54 @@ static const uint8_t *frame_ready(hevcdec *d, const hevcdec_frame *f)
     return b;
 }
 
+/* (between columns of a conversion: a phase that has finished is seen, and
+   the next one started, so the block works on while the program copies) */
+static void conv_tick(void *arg)
+{
+    hevcdec *d = arg;
+    if (!d->dead) poll_phases(d);
+}
+
+static void convert(hevcdec *d, const hevcdec_frame *f, void *const planes[3], const int strides[3], int bits, int x0,
+                    int y0, int w, int h, int way)
+{
+    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
+    hevcdec_conv_opts o;
+    const uint8_t *b = frame_ready(d, f);
+    o.way = way;
+    o.tick = conv_tick;
+    o.arg = d;
+    if (!d->dead) poll_phases(d);
+    hevcdec_conv(b, col, c_off, d->cfg.bit_depth == 10, planes, strides, bits, x0, y0, w, h, &o);
+}
+
 void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
                            int y0, int w, int h)
 {
-    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
-    const uint8_t *b = frame_ready(d, f);
-    if (d->cfg.bit_depth == 10) hevcdec_col30_to_i420(b, col, c_off, planes, strides, x0, y0, w, h);
-    else hevcdec_col128_to_i420(b, col, c_off, planes, strides, x0, y0, w, h);
+    void *p[3] = { planes[0], planes[1], planes[2] };
+    convert(d, f, p, strides, 8, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
 }
 
 int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const planes[3], const int strides[3], int x0,
                              int y0, int w, int h)
 {
-    const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
+    void *p[3] = { planes[0], planes[1], planes[2] };
     if (d->cfg.bit_depth != 10) return fail(d, "16-bit samples are for a 10-bit decoder"), HEVCDEC_UNSUPPORTED;
-    hevcdec_col30_to_planar16(frame_ready(d, f), col, c_off, planes, strides, x0, y0, w, h);
+    convert(d, f, p, strides, 16, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
+    return HEVCDEC_OK;
+}
+
+int hevcdec_convert_benchmark(hevcdec *d, const hevcdec_frame *f, void *const planes[3], const int strides[3], int bits,
+                              int x0, int y0, int w, int h, int way, int n, unsigned *cs)
+{
+    uint32_t t0;
+    if (way < 0 || way >= HEVCDEC_CONV_WAYS || (way == HEVCDEC_CONV_TEMP && d->cfg.bit_depth != 10) ||
+        (bits != 8 && bits != 16) || (bits == 16 && d->cfg.bit_depth != 10) || n < 1)
+        return HEVCDEC_UNSUPPORTED;
+    hevcdec_frame_wait(d, (hevcdec_frame *)f);
+    t0 = hevcdec_hw_now_cs();
+    for (int i = 0; i < n; i++) convert(d, f, planes, strides, bits, x0, y0, w, h, way);
+    *cs = hevcdec_hw_now_cs() - t0;
     return HEVCDEC_OK;
 }
 

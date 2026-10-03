@@ -28,11 +28,14 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   and 4K (new in 0.1.8): uhd and uhd10, 3840x2160, 30 pictures, 8-bit and
   10-bit
 
-Running it (please send back Result, ResultT, ResultP and ResultK):
+Running it (please send back Result, ResultT, ResultP, ResultK and ResultC):
   Test     Every clip but the 4K ones, every picture checked. Writes
            Result.
   Speed    The 1080p clips (8-bit, 10-bit) without checks: pictures a
            second. Writes ResultT.
+  Convert  (0.1.9) The 1080p and 4K clips' third picture converted 30
+           times each way, timed: which order of copying is quickest on
+           the Pi. Writes ResultC.
   UHD      The 4K clips (8-bit, 10-bit): every picture checked, then
            timed, then timed pipelined. Writes ResultK. Needs about 100
            MB for hevctest and about 170 MB for the block's frames.
@@ -84,6 +87,17 @@ error and address first ("hevctest: signal ...").
 That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
+
+0.1.9 (hevcdec 0.1.8): quicker with a player. Until now hevcdec only
+noticed the block had finished a phase when the program next called it,
+so while the program converted one picture the block finished the first
+phase of the next and then sat idle, and the program waited for the
+second phase afterwards. Now hevcdec looks between columns of every
+conversion and starts the next phase at once. Pipelined, with the
+pictures checked, "the program waited for the block" should now be
+close to 0 cs (and its count, in brackets, close to 0), and "In all"
+shorter than 0.1.8's. 10-bit rows are now unpacked straight into the
+planes. Convert times the ways the copy could be done.
 
 0.1.8 (hevcdec 0.1.7): 10-bit and 4K. For 10-bit streams the block
 writes three samples to each 32-bit word (96 to a column's row instead

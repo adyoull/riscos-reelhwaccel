@@ -1,6 +1,7 @@
 | UHD: the 4K clips (3840x2160, 30 pictures, 8-bit and 10-bit) through the
-| block: every picture checked, then timed (-t), then timed pipelined
-| (-p). Ten frames (-f 10: a 4K frame is 12 MB, 16 MB at 10-bit). Reports
+| block: every picture checked, then checked pipelined (-p: converting
+| one picture while the block decodes the next), then timed (-t), then
+| timed pipelined. Ten frames (-f 10: a 4K frame is 12 MB, 16 MB at 10-bit). Reports
 | to ResultK.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
@@ -11,6 +12,8 @@ WimpSlot -min 98304K -max 98304K
 Remove <Obey$Dir>.ResultK
 Run <Obey$Dir>.hevctest -f 10 -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd.trace
 Run <Obey$Dir>.hevctest -f 10 -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd10.trace
+Run <Obey$Dir>.hevctest -f 10 -p -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd.trace
+Run <Obey$Dir>.hevctest -f 10 -p -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd10.trace
 Run <Obey$Dir>.hevctest -f 10 -t -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd.trace
 Run <Obey$Dir>.hevctest -f 10 -t -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd10.trace
 Run <Obey$Dir>.hevctest -f 10 -p -t -o <Obey$Dir>.ResultK <Obey$Dir>.clips.uhd.trace

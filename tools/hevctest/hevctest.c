@@ -210,6 +210,50 @@ static int check_one(hevcdec *d, const pic_t *p, hevcdec_frame *f, uint8_t *cons
     return 0;
 }
 
+/* -K: picture p (in frame f) converted each way, BENCH_N times, timed, and
+   each way's pictures compared with the default's: 0, or 1 if one differs */
+#define BENCH_N 30
+static int benchmark(hevcdec *d, hevcdec_frame *f, const pic_t *p, uint8_t *const planes[3], const int strides[3])
+{
+    static const char *const names[HEVCDEC_CONVERT_WAYS] = { "column by column (the default)", "row by row",
+                                                          "column by column, preloading", "through a row buffer (0.1.7)" };
+    int bad = 0, cw = ((int)p->out_w + 1) / 2, ch = ((int)p->out_h + 1) / 2;
+    say("\n-K: picture %u (%ux%u) converted %d times each way:\n", (unsigned)p->number, (unsigned)p->out_w,
+        (unsigned)p->out_h, BENCH_N);
+    for (int bits = 8; bits <= 16; bits += 8) {
+        uint8_t *const *pl = bits == 16 || p->depth == 8 ? planes : planes8;
+        const int *st = bits == 16 || p->depth == 8 ? strides : strides8;
+        int bps = bits == 16 ? 2 : 1;
+        uint8_t *ref[3] = { NULL, NULL, NULL };
+        size_t sz[3];
+        if (bits == 16 && p->depth == 8) break;
+        sz[0] = (size_t)st[0] * p->out_h; sz[1] = (size_t)st[1] * ch; sz[2] = (size_t)st[2] * ch;
+        for (int way = 0; way < HEVCDEC_CONVERT_WAYS; way++) {
+            unsigned cs = 0;
+            int same = 1;
+            void *pv[3] = { pl[0], pl[1], pl[2] };
+            for (int k = 0; k < 3; k++) memset(pl[k], 0x5A, sz[k]);
+            if (hevcdec_convert_benchmark(d, f, pv, st, bits, (int)p->left, (int)p->top, (int)p->out_w, (int)p->out_h, way,
+                                          BENCH_N, &cs) != HEVCDEC_OK)
+                continue;
+            if (way == 0) {
+                for (int k = 0; k < 3; k++) { ref[k] = malloc(sz[k]); if (ref[k]) memcpy(ref[k], pl[k], sz[k]); }
+            } else {
+                for (int k = 0; k < 3; k++) {
+                    int rw = (k ? cw : (int)p->out_w) * bps, rh = k ? ch : (int)p->out_h;
+                    for (int y = 0; y < rh && same && ref[k]; y++)
+                        same = !memcmp(pl[k] + (size_t)y * st[k], ref[k] + (size_t)y * st[k], (size_t)rw);
+                }
+            }
+            say("  to %d-bit, %-32s %u.%02u ms a picture%s\n", bits == 16 ? 10 : 8, names[way], cs * 10 / BENCH_N,
+                cs * 1000 / BENCH_N % 100, same ? "" : " - WRONG (not the default's pictures)");
+            bad |= !same;
+        }
+        for (int k = 0; k < 3; k++) free(ref[k]);
+    }
+    return bad;
+}
+
 int probe_main(int argc, char **argv)
 {
     const char *name = NULL;
@@ -227,6 +271,10 @@ int probe_main(int argc, char **argv)
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     int no_wait = 0;                       /* (host tests: -w, the picture converted without waiting first) */
     int force_depth = 0;                   /* (host tests: -D n, a decoder for n-bit whatever the trace) */
+    int bench = 0;                         /* -K: the last picture converted each way, timed */
+    int last_fs = -1;                      /* (the last picture decoded: its frame and picture) */
+    const pic_t *last_p = NULL;
+    int bench_bad = 0;                     /* -K: a way gave other pictures than the default's */
     uint8_t *file = NULL, *planes[3] = { NULL, NULL, NULL };
     int strides[3];
     hevcdec *d = NULL;
@@ -251,6 +299,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-s")) flat = 1;
         else if (!strcmp(argv[i], "-u")) uncached = 1;
         else if (!strcmp(argv[i], "-q")) quick = 1;
+        else if (!strcmp(argv[i], "-K")) bench = 1;
         else if (!strcmp(argv[i], "-p")) pipelined = 1;
         else if (!strcmp(argv[i], "-P") && i + 1 < argc) pipelined = 1, lag = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
@@ -369,6 +418,7 @@ int probe_main(int argc, char **argv)
                 if (!keep_going) fatal = 1;
             } else if (!pipelined) {
                 done++;
+                last_fs = slot; last_p = p;
                 if (!timing && check_one(d, p, frames[slot], planes, strides, dump, verbose, &t_conv)) {
                     wrong++;
                     if (!keep_going) fatal = 1;
@@ -393,6 +443,7 @@ int probe_main(int argc, char **argv)
                 if (!keep_going) fatal = 1;
             } else {
                 done++;
+                last_fs = fs; last_p = p;
                 if (!timing && check_one(d, p, frames[fs], planes, strides, dump, verbose, &t_conv)) {
                     wrong++;
                     if (!keep_going) fatal = 1;
@@ -401,12 +452,13 @@ int probe_main(int argc, char **argv)
         }
     }
     t_all = now_cs() - t_all;
+    if (bench && last_fs >= 0 && !fatal) bench_bad = benchmark(d, frames[last_fs], last_p, planes, strides);
     hevcdec_get_stats(d, &st);
     say("\n%d of %d pictures decoded in %u.%02u s (%u.%u a second); converting them %u cs\n", done, npics,
         (unsigned)(t_dec / 100), (unsigned)(t_dec % 100), t_dec ? (unsigned)(done * 100 / t_dec) : 0,
         t_dec ? (unsigned)(done * 1000 / t_dec % 10) : 0, (unsigned)t_conv);
-    say("In all %u.%02u s%s; the program waited for the block %u cs\n", (unsigned)(t_all / 100), (unsigned)(t_all % 100),
-        pipelined ? " (pipelined: -p)" : "", st.cs_wait);
+    say("In all %u.%02u s%s; the program waited for the block %u cs (%u times)\n", (unsigned)(t_all / 100),
+        (unsigned)(t_all % 100), pipelined ? " (pipelined: -p)" : "", st.cs_wait, st.waits);
     say("hevcdec: phase 1 ran %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
         st.cs_phase2, st.phase1_retries);
     say("hevcdec: output frames %s%s", st.cached_frames ? "cacheable" : "not cacheable",
@@ -437,7 +489,7 @@ out:
     }
 #endif
     {
-        int ok = d && !fatal && !wrong && !overran && !page_moved && done == npics && npics > 0;
+        int ok = d && !fatal && !wrong && !overran && !page_moved && !bench_bad && done == npics && npics > 0;
         say("\nResult: %s\n", ok ? (timing ? "OK - timed (the pictures weren't checked)" :
                                     "OK - every picture exactly as FFmpeg decodes it")
                                  : "FAILED");

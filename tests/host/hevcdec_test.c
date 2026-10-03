@@ -370,6 +370,31 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
         cleaned("-p a slice refused");
     }
 
+    {                                           /* (0.1.8) the block kept busy while a picture is converted: */
+        unsigned waits = 99, cs = 0;            /* the next one decoded meanwhile, so hardly ever waited for */
+        const char *q;
+        fake_hevc_reset();
+        fake_hevc.p1_ticks = 2;
+        fake_hevc.p2_ticks = 3;
+        o = run_app(&ret, trace, "-p");
+        if ((q = strstr(o, "the program waited for the block "))) sscanf(q, "the program waited for the block %u cs (%u times)", &cs, &waits);
+        CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && waits <= 2 && fake_hevc.overlaps > 0,
+              "hevctest -p %s, phases noticed while converting: waited %u times (%d pictures):\n%s", trace, waits, nmap, o);
+        cleaned("-p busy while converting");
+    }
+
+    fake_hevc_reset();                          /* (0.1.8) -K: every way of converting gives the same pictures */
+    o = run_app(&ret, trace, "-K -c 4");
+    {
+        int lines = 0;
+        for (const char *q = o; (q = strstr(q, " ms a picture")); q++) lines++;
+        CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !strstr(o, "WRONG") &&
+              lines == (map_bytes == 2 ? 8 : 3) && strstr(o, "column by column (the default)") && strstr(o, "row by row") &&
+              strstr(o, "column by column, preloading") && (map_bytes == 1 || strstr(o, "through a row buffer")),
+              "hevctest -K %s (%d, %d ways timed):\n%s", trace, ret, lines, o);
+    }
+    cleaned("-K");
+
     fake_hevc_reset();                          /* -q: starts and stops, the block untouched */
     o = run_app(&ret, trace, "-q");
     CHECK(ret == 0 && strstr(o, "started and wrote this (-q") && !strstr(o, "Trace:") && fake_hevc.opens == 0,

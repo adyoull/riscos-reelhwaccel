@@ -1,5 +1,37 @@
 # Changes
 
+## hevcdec 0.1.8, HEVCTest 0.1.9, devkit 0.2.6: the block kept busy during conversion (test zip, 2026-10-03)
+
+The hot paths, looked at (project doc reelhwaccel-hevc-hotpaths.md):
+hevcdec saw a phase finish only when the program next called it, so in
+a player (hevc_hwdec, pipelined) phase 1 of the next picture finished
+early in the conversion of this one, phase 2 didn't start until after
+it, and the program then waited all of phase 2: each picture cost the
+conversion plus phase 2 rather than the longer of the two. HEVCTest
+0.1.8's pipelined checked runs showed it (phase times of 112/126 cs per
+60 1080p 10-bit pictures against 11/19 cs unchecked).
+
+- hevcdec: the conversions call back between columns (or every 64
+  rows), and hevcdec polls the block there and once before, so the next
+  phase starts during the copy. `hevcdec_stats.waits`: how many times
+  the program had to wait.
+- hevcdec_conv.c rewritten as one function with an order: column by
+  column (the default), row by row, column by column with PLD 8 rows
+  ahead, or (10-bit) through a row buffer (0.1.7's). Whole 10-bit rows
+  are unpacked straight into the planes: luma to 8-bit with VST3 of the
+  narrowed fields; chroma with VLD2 of the word pairs (U = a0 a2 b1, V =
+  a1 b0 b2) and VST3 into U and V, 16-bit or 8-bit.
+- `hevcdec_convert_benchmark` and HEVCTest -K: a picture converted 30
+  times each way, timed, each way's output compared with the default's;
+  the Convert Obey file (1080p and 4K, 8-bit and 10-bit; ResultC).
+  HEVCTest prints how many times the program waited.
+- Host tests: pipelined with phases of 2 and 3 polls, the program waits
+  at most twice a clip (without the polling, every picture); -K on every
+  clip (cropped ones included) gives the same pictures every way.
+  Mutations caught: no polling during conversion, V's fields in the
+  wrong order, 8-bit luma or chroma narrowed wrongly, row order reading
+  the wrong row.
+
 ## hevcdec 0.1.7, HEVCTest 0.1.8, devkit 0.2.5: 10-bit and 4K (test zip, 2026-10-03)
 
 - hevcdec: `config.bit_depth` 10 (Main 10). Frames are
