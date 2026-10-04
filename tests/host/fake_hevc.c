@@ -4,7 +4,7 @@
  *
  * Phase 1 (started by the write to CFBASE) reads the command list from
  * memory and checks it: every write to a phase-1 register or table, the
- * bitstream the BFBASE/BFNUM pairs point at (the first slice's bytes are
+ * bitstream the BFBASE/BFNUM pairs point at (every slice's bytes are
  * hashed: that names the picture), and each slice's commands (its
  * references: DPB slot and POC). Then CFSTATUS = CFNUM and ACTIVE1 latches
  * (if it's enabled - rpivid's notes: it isn't latched otherwise).
@@ -150,7 +150,11 @@ static void phase1_done(void)
         else if (a == 72 && !(v & 0x80)) {               /* BFCONTROL, not the stop: the bitstream starts */
             const uint8_t *b = mem(((uint64_t)bfbase << 6) + (v & 63), bfnum, "a slice's bitstream");
             CHECK((v & 0x40) != 0, "bitstream without emulation prevention removal");
-            if (b && !have_hash) { pic_hash = fake_hevc_hash(b, bfnum); have_hash = 1; }
+            if (b) {                                     /* (every slice's: the picture's, as read now) */
+                if (!have_hash) pic_hash = 2166136261u;
+                pic_hash = (pic_hash ^ fake_hevc_hash(b, bfnum)) * 16777619u;
+                have_hash = 1;
+            }
             fake_hevc.slices++;
         } else if (a == 96) {                            /* SLICECMDS: then its messages */
             slicecmds = v & 0xFF;
@@ -315,6 +319,15 @@ static void phase2_done(void)
         fake_hevc.unknown_pictures++;
         CHECK(!bytes || bytes == (ten ? 2 : 1), "a %d-bit frame for a picture of %d bytes a sample", ten ? 10 : 8, bytes);
         memset(out, 0x10, fsize);
+    }
+    {   /* the motion vectors: this picture's written at MVBASE for later ones, a collocated picture's read
+           at COLBASE; MVSTRIDE (COLSTRIDE) x 16-row bands of the height to 64 (rpivid's colmv_picsize) */
+        uint64_t mv = (uint64_t)s2[0x8030 / 4] << 6, colb = (uint64_t)s2[0x8038 / 4] << 6;
+        size_t bands = (size_t)(((h + 63) & ~63) >> 4);
+        size_t mvn = ((size_t)s2[0x8034 / 4] << 6) * bands, coln = ((size_t)s2[0x803C / 4] << 6) * bands;
+        uint8_t *m;
+        if (colb) mem(colb, coln, "the collocated picture's motion vectors");
+        if (mv && (m = mem(mv, mvn, "the motion vectors written"))) memset(m, 0x3C, mvn);
     }
     if (fake_hevc.overrun) {                             /* (a block writing past the frame's end) */
         uint8_t *past = mem(y, fsize + (size_t)fake_hevc.overrun, "past the frame");

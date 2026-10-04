@@ -88,6 +88,14 @@ That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
 
+0.1.11 (hevcdec 0.1.10): fixes from a code audit. Halving 10-bit
+pictures no longer turns the brightest pixels black, and halving down
+to the frame's last row no longer reads past it; a stream whose
+picture size changes part way restarts the decoder's buffers; a
+refused picture no longer lets the next overwrite one the block is
+still reading; damaged pictures are refused before the block sees
+them. Every picture should still come out exactly as before.
+
 0.1.10 (hevcdec 0.1.9): a halved conversion, for a player showing a 4K
 picture in an HD-sized overlay in one pass (each output sample the mean
 of a 2x2 block). Every picture is now also converted halved and checked

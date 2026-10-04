@@ -28,7 +28,8 @@ void hevcdec_conv(const uint8_t *b, size_t col, size_t c_off, int ten, void *con
                   int bits, int x0, int y0, int w, int h, const hevcdec_conv_opts *o);
 /* Halved: ow x oh output samples (U and V (ow+1)/2 x (oh+1)/2), each the
    rounded mean of a 2x2 block of the frame from (x0, y0) (x0 a multiple of
-   4, y0 even), 8-bit (10-bit frames: rounded to 8 bits) */
+   4, y0 even), 8-bit (10-bit frames: rounded to 8 bits, at most 255). A
+   block on the frame's last chroma row (oh odd) uses that row twice. */
 void hevcdec_conv_half(const uint8_t *b, size_t col, size_t c_off, int ten, uint8_t *const planes[3], const int strides[3],
                        int x0, int y0, int ow, int oh, const hevcdec_conv_opts *o);
 #endif

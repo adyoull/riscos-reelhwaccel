@@ -1,5 +1,56 @@
 # Changes
 
+## hevcdec 0.1.10, HEVCTest 0.1.11, devkit 0.2.9: fixes from a code audit (2026-10-04)
+
+A code audit of the HEVC side (also reported by riscos-ffmpeg's own
+audit: FFmpeg/handoffs/2026-10-04-reelhwaccel-hevc_hwdec-audit) found:
+
+- hevc_hwdec: hevcdec logged through the outer AVCodecContext, which is
+  freed before hevcdec closes when a caller keeps output_hw frames (as
+  Reel does): a use-after-free on every such close. hevcdec's messages
+  now go through the shared object, without a context once the decoder
+  is closed.
+- hevc_hwdec: fill_dpb_entries took every one of FFmpeg's 32 DPB places
+  marked as a reference into V4L2's 16-entry list; a damaged stream could
+  overrun it into the decoder's own pointers. More than 16 now refuses
+  the picture (AVERROR_INVALIDDATA).
+- hevc_hwdec: the slices of a picture whose header failed after
+  start_frame stayed for the next end_frame, which could send a freed
+  packet's slices with another picture. Slices and end_frame are now
+  taken only for start_frame's own picture (by its number); otherwise
+  the picture is refused and FFmpeg lets go of its frame. A frame never
+  given to the block is flagged, not given out as decoded. Flush resets
+  the picture in hand.
+- hevc_hwdec: weighted prediction tables filled for 16 references (15).
+- hevcdec: rpivid reuses its motion-vector buffers (per frame slot) and
+  bitstream copies at the size they were made for; a stream getting
+  smaller then bigger again (with the decoder kept: its frames fit) had
+  the block write past them. A size change now restarts rpivid after
+  the pictures in flight finish, as Linux's driver does.
+- hevcdec: the slice buffer ring moved on before a picture was
+  accepted, so a picture refused in pipelined mode let the next one take
+  the buffer of a picture phase 1 had still to read.
+- hevcdec: pictures are checked as Linux's control core would (at most
+  16 DPB entries and references, references inside the DPB, slices no
+  longer than their data) before rpivid indexes its arrays with them.
+- hevcdec: hevcdec_frame_to_i420 (now returning a result) and _16 check
+  their window as _half does; _half's check can't overflow; a frame the
+  block may still be writing (the decoder stopped) isn't converted.
+- hevcdec_conv: halving 10-bit, a 2x2 sum of 4088 or more rounded to
+  256 and wrapped to 0 (the brightest pixels black): saturated now
+  (VQRSHRN, and a clamp). Halving with an odd height to the frame's last
+  chroma row read the row below it (past the frame in the last column):
+  that row is used twice.
+- Tests: hevcdec_conv_test (from the audit's harness: random windows
+  against a reference, NEON under qemu and plain C, frames ending at an
+  unreadable page, guard bytes); the fake identifies pictures by all
+  their slices and writes the motion vectors phase 2 would; hevcdec_test
+  with a slow phase 1 and a refused picture, window and picture checks;
+  FFmpeg: a size change part way (new tiny clip), damaged streams, and
+  nothing logged through a freed context. Each caught its mutant (the
+  old code for the ring and the size change; NEON and scalar wrapping;
+  the row below; the log context kept).
+
 ## Release 0.2.8 (2026-10-04)
 
 The first release on GitHub: devkit 0.2.8 (vcdec 0.4.2, hevcdec 0.1.9,

@@ -67,6 +67,7 @@ struct hevcdec {
     struct vb2_v4l2_buffer srcs[RPIVID_P1BUF_COUNT];
     size_t src_caps[RPIVID_P1BUF_COUNT];
     unsigned src_next;
+    unsigned pic_w, pic_h;               /* (0.1.10) the last picture's size (a change restarts rpivid) */
     struct vb2_v4l2_buffer *cur_src, *cur_dst;
     int job_state;                       /* trigger's verdict on the last slice sent */
     /* phase 1's command lists, each picture's copied for the block and kept
@@ -446,6 +447,44 @@ int hevcdec_finish(hevcdec *d)
     return wait_for(d, all_done, NULL);
 }
 
+/* (0.1.10) What Linux's control core and the V4L2 request API check
+   before rpivid sees a picture (rpivid indexes 16-entry arrays with these,
+   and reads each slice's bytes): NULL, or why the picture is refused */
+static const char *bad_picture(const hevcdec_picture *pic)
+{
+    static char why[96];
+    const struct v4l2_ctrl_hevc_decode_params *dec = pic->dec;
+    if (dec->num_active_dpb_entries > V4L2_HEVC_DPB_ENTRIES_NUM_MAX || dec->num_poc_st_curr_before > V4L2_HEVC_DPB_ENTRIES_NUM_MAX ||
+        dec->num_poc_st_curr_after > V4L2_HEVC_DPB_ENTRIES_NUM_MAX || dec->num_poc_lt_curr > V4L2_HEVC_DPB_ENTRIES_NUM_MAX) {
+        snprintf(why, sizeof why, "%u references (DPB entries; at most %d)", dec->num_active_dpb_entries,
+                 V4L2_HEVC_DPB_ENTRIES_NUM_MAX);
+        return why;
+    }
+    for (unsigned i = 0; i < pic->nslices; i++) {
+        const struct v4l2_ctrl_hevc_slice_params *sp = pic->slices[i].params;
+        unsigned n0 = sp->num_ref_idx_l0_active_minus1 + 1u, n1 = sp->num_ref_idx_l1_active_minus1 + 1u;
+        /* (a data_byte_offset past bit_size rpivid refuses itself) */
+        if (!pic->slices[i].data || (sp->bit_size + 7) / 8 > pic->slices[i].size) {
+            snprintf(why, sizeof why, "slice %u: %u bits in %u bytes", i, (unsigned)sp->bit_size,
+                     (unsigned)pic->slices[i].size);
+            return why;
+        }
+        if (sp->slice_type == V4L2_HEVC_SLICE_TYPE_I) continue;
+        if (n0 > V4L2_HEVC_DPB_ENTRIES_NUM_MAX || n1 > V4L2_HEVC_DPB_ENTRIES_NUM_MAX ||
+            sp->collocated_ref_idx >= V4L2_HEVC_DPB_ENTRIES_NUM_MAX) {
+            snprintf(why, sizeof why, "slice %u: %u and %u references (at most %d)", i, n0, n1, V4L2_HEVC_DPB_ENTRIES_NUM_MAX);
+            return why;
+        }
+        for (unsigned k = 0; k < n0 || (sp->slice_type == V4L2_HEVC_SLICE_TYPE_B && k < n1); k++)
+            if ((k < n0 && sp->ref_idx_l0[k] >= dec->num_active_dpb_entries) ||
+                (sp->slice_type == V4L2_HEVC_SLICE_TYPE_B && k < n1 && sp->ref_idx_l1[k] >= dec->num_active_dpb_entries)) {
+                snprintf(why, sizeof why, "slice %u: a reference not among the %u DPB entries", i, dec->num_active_dpb_entries);
+                return why;
+            }
+    }
+    return NULL;
+}
+
 int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uint64_t number)
 {
     struct vb2_v4l2_buffer *src;
@@ -463,6 +502,10 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         return fail(d, "%ux%u is bigger than the frames (%ux%u)", sps->pic_width_in_luma_samples,
                     sps->pic_height_in_luma_samples, d->ctx.dst_fmt.width, d->ctx.dst_fmt.height), HEVCDEC_UNSUPPORTED;
     if (!pic->nslices) return fail(d, "A picture with no slices");
+    {
+        const char *why = bad_picture(pic);
+        if (why) return fail(d, "Not a picture the block can be given: %s", why);
+    }
     if ((sps->flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED) && !pic->scaling)
         return fail(d, "Scaling lists enabled but none given");
     if (!(sps->flags & V4L2_HEVC_SPS_FLAG_SCALING_LIST_ENABLED)) {
@@ -475,11 +518,25 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
        more picture (as Linux's driver: each of rpivid's bitstream copies,
        and so each of our slice buffers, free again) */
     if (hevcdec_frame_wait(d, f) != HEVCDEC_OK && d->dead) return HEVCDEC_ERROR;
+    if (d->pic_w && (sps->pic_width_in_luma_samples != d->pic_w || sps->pic_height_in_luma_samples != d->pic_h)) {
+        /* (0.1.10) a new picture size (at an IRAP picture: nothing earlier is referred to): rpivid's
+           buffers for the motion vectors and the bitstream copies are sized for the size they were
+           made at, and reused, so it's restarted - as Linux's driver is (streaming off and on) */
+        if (hevcdec_finish(d) != HEVCDEC_OK) return HEVCDEC_ERROR;
+        logf_(d, "The picture size changed (%ux%u to %ux%u): rpivid restarted", d->pic_w, d->pic_h,
+              (unsigned)sps->pic_width_in_luma_samples, (unsigned)sps->pic_height_in_luma_samples);
+        rpivid_dec_ops_h265.stop(&d->ctx);
+        d->started = 0;
+        if (rpivid_dec_ops_h265.start(&d->ctx))
+            return fail(d, "%s", d->err[0] ? d->err : "No memory for the block's buffers"), HEVCDEC_ERROR;
+        d->started = 1;
+    }
+    d->pic_w = sps->pic_width_in_luma_samples;
+    d->pic_h = sps->pic_height_in_luma_samples;
     if (wait_for(d, room_for_one, NULL) != HEVCDEC_OK) return HEVCDEC_ERROR;
     d->err[0] = 0;
-    src = &d->srcs[d->src_next];
-    cap_p = &d->src_caps[d->src_next];
-    d->src_next = (d->src_next + 1) % RPIVID_P1BUF_COUNT;
+    src = &d->srcs[d->src_next];             /* (the next slot only once this picture is the block's: a */
+    cap_p = &d->src_caps[d->src_next];       /* picture refused here never reaches phase 1, so keeps none) */
     f->used = 1;
     f->submitted = 0;
     f->err[0] = 0;
@@ -528,6 +585,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         }
     }
     f->submitted = 1;
+    d->src_next = (d->src_next + 1) % RPIVID_P1BUF_COUNT;
     d->stats.pictures++;
     if (d->cfg.pipelined) return poll_phases(d) ? HEVCDEC_ERROR : HEVCDEC_OK;
     return hevcdec_frame_wait(d, f);
@@ -544,6 +602,10 @@ static const uint8_t *frame_ready(hevcdec *d, const hevcdec_frame *f)
 {
     const uint8_t *b = f->vb.vaddr;
     if (f->submitted && !f->vb.state) hevcdec_frame_wait(d, (hevcdec_frame *)f);   /* (still being decoded) */
+    if (f->submitted && !f->vb.state) {      /* (0.1.10) the decoder stopped with the block still at it: the */
+        fail(d, "The picture wasn't finished: not converted");   /* frame may still be being written */
+        return NULL;
+    }
     if (f->cached) {
         uint32_t t0 = hevcdec_hw_now_cs();
         hevcdec_hw_cache_clean_inv(d->hw, b, f->vb.planes[0].length);
@@ -560,24 +622,38 @@ static void conv_tick(void *arg)
     if (!d->dead) poll_phases(d);
 }
 
-static void convert(hevcdec *d, const hevcdec_frame *f, void *const planes[3], const int strides[3], int bits, int x0,
-                    int y0, int w, int h, int way)
+/* (0.1.10) the window inside the frame: x, y even (halved: x a multiple of
+   4), w x h (halved: 2w x 2h) from it; 0, or HEVCDEC_UNSUPPORTED (said) */
+static int window_bad(hevcdec *d, int x0, int y0, int w, int h, int half)
+{
+    const long long fw = d->ctx.dst_fmt.width, fh = d->ctx.dst_fmt.height, k = half ? 2 : 1;   /* (64-bit: no wrapping) */
+    if (x0 < 0 || y0 < 0 || w < 1 || h < 1 || (x0 & (half ? 3 : 1)) || (y0 & 1) || x0 + k * w > fw || y0 + k * h > fh)
+        return fail(d, "%s %dx%d from %d,%d: outside the %lldx%lld frame, or not from an even place (halving: x a "
+                    "multiple of 4)", half ? "Halving" : "Converting", w, h, x0, y0, fw, fh), HEVCDEC_UNSUPPORTED;
+    return 0;
+}
+
+static int convert(hevcdec *d, const hevcdec_frame *f, void *const planes[3], const int strides[3], int bits, int x0,
+                   int y0, int w, int h, int way)
 {
     const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
     hevcdec_conv_opts o;
-    const uint8_t *b = frame_ready(d, f);
+    const uint8_t *b;
+    if (window_bad(d, x0, y0, w, h, 0)) return HEVCDEC_UNSUPPORTED;
+    if (!(b = frame_ready(d, f))) return HEVCDEC_ERROR;
     o.way = way;
     o.tick = conv_tick;
     o.arg = d;
     if (!d->dead) poll_phases(d);
     hevcdec_conv(b, col, c_off, d->cfg.bit_depth == 10, planes, strides, bits, x0, y0, w, h, &o);
+    return HEVCDEC_OK;
 }
 
-void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
-                           int y0, int w, int h)
+int hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
+                          int y0, int w, int h)
 {
     void *p[3] = { planes[0], planes[1], planes[2] };
-    convert(d, f, p, strides, 8, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
+    return convert(d, f, p, strides, 8, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
 }
 
 int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const planes[3], const int strides[3], int x0,
@@ -585,8 +661,7 @@ int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const
 {
     void *p[3] = { planes[0], planes[1], planes[2] };
     if (d->cfg.bit_depth != 10) return fail(d, "16-bit samples are for a 10-bit decoder"), HEVCDEC_UNSUPPORTED;
-    convert(d, f, p, strides, 16, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
-    return HEVCDEC_OK;
+    return convert(d, f, p, strides, 16, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
 }
 
 hevcdec *hevcdec_frame_decoder(const hevcdec_frame *f) { return f ? f->d : NULL; }
@@ -597,11 +672,8 @@ int hevcdec_frame_to_i420_half(hevcdec *d, const hevcdec_frame *f, uint8_t *cons
     const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
     hevcdec_conv_opts o;
     const uint8_t *b;
-    if ((x0 & 3) || (y0 & 1) || x0 < 0 || y0 < 0 || w < 1 || h < 1 || (unsigned)(x0 + 2 * w) > d->ctx.dst_fmt.width ||
-        (unsigned)(y0 + 2 * h) > d->ctx.dst_fmt.height)
-        return fail(d, "Halving %dx%d from %d,%d: outside the frame, or not from a multiple of 4 across", w, h, x0, y0),
-               HEVCDEC_UNSUPPORTED;
-    b = frame_ready(d, f);
+    if (window_bad(d, x0, y0, w, h, 1)) return HEVCDEC_UNSUPPORTED;
+    if (!(b = frame_ready(d, f))) return HEVCDEC_ERROR;
     o.way = HEVCDEC_CONV_COLUMNS;
     o.tick = conv_tick;
     o.arg = d;
@@ -614,12 +686,14 @@ int hevcdec_convert_benchmark(hevcdec *d, const hevcdec_frame *f, void *const pl
                               int x0, int y0, int w, int h, int way, int n, unsigned *cs)
 {
     uint32_t t0;
+    int r;
     if (way < 0 || way >= HEVCDEC_CONV_WAYS || (way == HEVCDEC_CONV_TEMP && d->cfg.bit_depth != 10) ||
         (bits != 8 && bits != 16) || (bits == 16 && d->cfg.bit_depth != 10) || n < 1)
         return HEVCDEC_UNSUPPORTED;
     hevcdec_frame_wait(d, (hevcdec_frame *)f);
     t0 = hevcdec_hw_now_cs();
-    for (int i = 0; i < n; i++) convert(d, f, planes, strides, bits, x0, y0, w, h, way);
+    for (int i = 0; i < n; i++)
+        if ((r = convert(d, f, planes, strides, bits, x0, y0, w, h, way)) != HEVCDEC_OK) return r;
     *cs = hevcdec_hw_now_cs() - t0;
     return HEVCDEC_OK;
 }

@@ -25,7 +25,8 @@ typedef struct {
 } fake_hevc_state;
 extern fake_hevc_state fake_hevc;
 
-/* the picture for a first slice's bitstream hash: 0, its planes (I420,
+/* the picture for its slices' bitstream hash (each slice's fake_hevc_hash,
+   combined FNV-1a fashion from 2166136261): 0, its planes (I420,
    packed: strides w and (w+1)/2 samples; *bytes a sample: 1 for 8-bit, 2
    (uint16_t) for 10-bit) and size (FFmpeg's output: the SPS's output
    window, here always from 0,0), or -1 */

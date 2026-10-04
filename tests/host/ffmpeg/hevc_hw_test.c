@@ -4,7 +4,8 @@
  * converted when "shown" straight into the caller's planes, 1:1
  * (hevcdec_frame_to_i420, or _16 for 10-bit) and halved
  * (hevcdec_frame_to_i420_half); the last frames kept past
- * avcodec_free_context and converted after it.
+ * avcodec_free_context and converted after it, nothing logged through the
+ * freed context (hevcdec closes with the last frame, and says so).
  *
  *   hevc_hw_test IN.mp4 OUT.yuv HALF.yuv [queue [drop_before]]
  * OUT: the 1:1 pictures (yuv420p, or yuv420p10le for 10-bit); HALF: the
@@ -20,6 +21,8 @@
 #include "libavformat/avformat.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/log.h"
+#include <stdarg.h>
 #include <hwhevcdec.h>
 
 #define QMAX 16
@@ -27,6 +30,15 @@
 static AVFrame *q[QMAX];
 static int nq, shown, depth;
 static FILE *out1, *outh;
+static const void *freed_ctx;              /* (the decoder's context, once freed) */
+static int logged_freed, logged_after;
+
+static void log_cb(void *avcl, int level, const char *fmt, va_list vl)
+{
+    if (freed_ctx) logged_after++;
+    if (freed_ctx && avcl == freed_ctx) logged_freed++;
+    if (level <= AV_LOG_ERROR) av_log_default_callback(avcl, level, fmt, vl);
+}
 
 static int show(AVFrame *f)
 {
@@ -97,11 +109,18 @@ int main(int argc, char **argv)
         }
     }
     /* the decoder closed with frames still held: they stay convertible */
+    av_log_set_level(AV_LOG_DEBUG);
+    av_log_set_callback(log_cb);
+    freed_ctx = c;
     avcodec_free_context(&c);
     for (int i = 0; i < nq; i++) { if (show(q[i])) return 1; av_frame_free(&q[i]); }
     avformat_close_input(&fc);
     av_packet_free(&pkt);
     fclose(out1); fclose(outh);
+    if (logged_freed || !logged_after) {        /* (hevcdec's closing message, but not through the freed context) */
+        fprintf(stderr, "FAIL: %d messages through the freed context (%d after it was freed)\n", logged_freed, logged_after);
+        return 1;
+    }
     printf("hevc_hw_test: %d pictures shown, %d-bit\n", shown, depth);
     return 0;
 }

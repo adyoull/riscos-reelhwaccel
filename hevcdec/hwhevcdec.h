@@ -15,6 +15,13 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
+ * 0.1.10 (from a code audit): halving 10-bit no longer turns the brightest
+ * pixels black; halving to the frame's last chroma row doesn't read below
+ * it; a picture size change restarts rpivid (its motion-vector buffers
+ * were reused at the old size); a refused picture no longer gives its
+ * slice buffer to the next while phase 1 may still read it; pictures with
+ * more than 16 references, or slices longer than their data, refused;
+ * conversions check their window and return a result.
  * 0.1.9: hevcdec_frame_to_i420_half (straight into a half-size overlay)
  * and hevcdec_frame_decoder (frames handed out unconverted by hevc_hwdec).
  * 0.1.8: the block kept busy while frames are converted (phases seen
@@ -37,7 +44,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.9"
+#define HEVCDEC_VERSION "0.1.10"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -116,9 +123,12 @@ int hevcdec_finish(hevcdec *d);
 /* Part of the frame's picture as planar 8-bit 4:2:0: w x h from (x, y) in
    luma samples (the SPS's output window; x and y even), U and V
    (w+1)/2 x (h+1)/2. From a 10-bit decoder: each sample's top 8 bits
-   (truncated, not rounded or dithered). */
-void hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x,
-                           int y, int w, int h);
+   (truncated, not rounded or dithered). (0.1.10) HEVCDEC_OK;
+   HEVCDEC_UNSUPPORTED for a window outside the frame or x or y odd;
+   HEVCDEC_ERROR if the picture can't be finished (the decoder stopped).
+   (Before 0.1.10 it returned nothing and didn't check.) */
+int hevcdec_frame_to_i420(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x,
+                          int y, int w, int h);
 /* (0.1.7) The same as 10-bit samples in 16-bit words (FFmpeg's
    AV_PIX_FMT_YUV420P10 on a little-endian machine; strides in bytes, planes
    2-byte aligned): a 10-bit decoder only (else HEVCDEC_UNSUPPORTED) */

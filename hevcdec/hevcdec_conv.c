@@ -285,6 +285,14 @@ void hevcdec_conv(const uint8_t *b, size_t col, size_t c_off, int ten, void *con
 
 /* ---- halved: 2x2 means, to 8-bit ---- */
 
+/* four 10-bit samples' rounded mean in 8 bits: (sum + 8) >> 4, at most
+   255 (four samples of 1022 or more would round to 256) */
+static inline uint8_t mean10(unsigned sum)
+{
+    sum = (sum + 8) >> 4;
+    return (uint8_t)(sum > 255 ? 255 : sum);
+}
+
 /* luma: output samples [ox, ox+n) (n of them within one column), output row oy */
 static void luma_half_row(const job_t *j, int ox, int n, int oy)
 {
@@ -313,10 +321,10 @@ static void luma_half_row(const job_t *j, int ox, int n, int oy)
         for (; i + 8 <= n; i += 8) {
             uint16x8x2_t x = vld2q_u16(pa + 2 * i), y = vld2q_u16(pb + 2 * i);
             uint16x8_t sum = vaddq_u16(vaddq_u16(x.val[0], x.val[1]), vaddq_u16(y.val[0], y.val[1]));
-            vst1_u8(d + i, vrshrn_n_u16(sum, 4));
+            vst1_u8(d + i, vqrshrn_n_u16(sum, 4));
         }
 #endif
-        for (; i < n; i++) d[i] = (uint8_t)((pa[2 * i] + pa[2 * i + 1] + pb[2 * i] + pb[2 * i + 1] + 8) >> 4);
+        for (; i < n; i++) d[i] = mean10(pa[2 * i] + pa[2 * i + 1] + pb[2 * i] + pb[2 * i + 1]);
     }
 }
 
@@ -324,7 +332,9 @@ static void luma_half_row(const job_t *j, int ox, int n, int oy)
 static void chroma_half_row(const job_t *j, int ox, int n, int oy)
 {
     int sx = j->x0 / 2 + 2 * ox, per = j->ten ? 48 : 64, off = sx % per;
-    const uint8_t *a = j->b + (size_t)(sx / per) * j->col + j->c_off + (size_t)(j->y0 / 2 + 2 * oy) * 128, *b = a + 128;
+    const int sy = j->y0 / 2 + 2 * oy;          /* (the frame's last chroma row: no row below it to read) */
+    const uint8_t *a = j->b + (size_t)(sx / per) * j->col + j->c_off + (size_t)sy * 128,
+                  *b = (size_t)sy + 1 < j->c_off / 256 ? a + 128 : a;
     uint8_t *u = (uint8_t *)j->planes[1] + (size_t)oy * (size_t)j->strides[1] + (size_t)ox;
     uint8_t *v = (uint8_t *)j->planes[2] + (size_t)oy * (size_t)j->strides[2] + (size_t)ox;
     int i = 0;
@@ -361,13 +371,13 @@ static void chroma_half_row(const job_t *j, int ox, int n, int oy)
             uint16x8x4_t x = vld4q_u16(pa + 4 * i), y = vld4q_u16(pb + 4 * i);
             uint16x8_t su = vaddq_u16(vaddq_u16(x.val[0], x.val[2]), vaddq_u16(y.val[0], y.val[2]));
             uint16x8_t sv = vaddq_u16(vaddq_u16(x.val[1], x.val[3]), vaddq_u16(y.val[1], y.val[3]));
-            vst1_u8(u + i, vrshrn_n_u16(su, 4));
-            vst1_u8(v + i, vrshrn_n_u16(sv, 4));
+            vst1_u8(u + i, vqrshrn_n_u16(su, 4));
+            vst1_u8(v + i, vqrshrn_n_u16(sv, 4));
         }
 #endif
         for (; i < n; i++) {
-            u[i] = (uint8_t)((pa[4 * i] + pa[4 * i + 2] + pb[4 * i] + pb[4 * i + 2] + 8) >> 4);
-            v[i] = (uint8_t)((pa[4 * i + 1] + pa[4 * i + 3] + pb[4 * i + 1] + pb[4 * i + 3] + 8) >> 4);
+            u[i] = mean10(pa[4 * i] + pa[4 * i + 2] + pb[4 * i] + pb[4 * i + 2]);
+            v[i] = mean10(pa[4 * i + 1] + pa[4 * i + 3] + pb[4 * i + 1] + pb[4 * i + 3]);
         }
     }
 }

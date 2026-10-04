@@ -81,7 +81,7 @@ extern const FFCodec ff_hevc_decoder;
 typedef struct PoolEntry {
     hevcdec_frame *f;
     int in_use;                 /* a frame of FFmpeg's holds it */
-    int failed;                 /* hevcdec refused its picture */
+    int failed;                 /* not (yet) decoded by the block: refused, or never given to it */
 } PoolEntry;
 
 /* hevcdec and its frames, kept until the decoder is closed and the last
@@ -92,6 +92,8 @@ typedef struct HWDecShared {
     PoolEntry pool[MAX_POOL];
     int npool;
     int refs;                   /* the decoder's, and one a frame in use */
+    AVCodecContext *log;        /* hevcdec's messages: the decoder's, NULL once it's closed (hevcdec may
+                                   close later, with a caller's last frame, and say so) */
 } HWDecShared;
 
 static void shared_unref(HWDecShared *sh)
@@ -119,7 +121,7 @@ typedef struct HWDecContext {
     struct v4l2_ctrl_hevc_slice_params *sp;
     hevcdec_slice *sl;
     unsigned nsl, cap;
-    int in_picture;
+    int in_picture;             /* start_frame's picture (w->number) is being given its slices */
     int failures;
     /* options */
     int pipelined;
@@ -142,7 +144,8 @@ static HWDecContext *ours(AVCodecContext *inner)
 
 static void hevcdec_log(void *handle, const char *text)
 {
-    av_log(handle, AV_LOG_DEBUG, "%s\n", text);
+    const HWDecShared *sh = handle;
+    av_log(sh->log, AV_LOG_DEBUG, "%s\n", text);
 }
 
 /* hevcdec open, with frames this big at least, for this depth: 0, or
@@ -179,7 +182,7 @@ static int ensure_open(HWDecContext *w, int width, int height, int depth)
     c.pipelined = w->pipelined;
     c.cached_frames = w->cached_frames;
     c.log = hevcdec_log;
-    c.log_handle = w->avctx;
+    c.log_handle = w->sh;
     if ((r = hevcdec_open(&w->sh->d, &c)) != HEVCDEC_OK) {
         av_log(w->avctx, AV_LOG_ERROR, "The HEVC block can't be used: %s\n", hevcdec_open_error());
         w->sh->d = NULL;
@@ -218,7 +221,7 @@ static void fill_pred_table(const HEVCContext *h, struct v4l2_hevc_pred_weight_t
     luma_weight_denom = (1 << sh->luma_log2_weight_denom);
     chroma_weight_denom = (1 << sh->chroma_log2_weight_denom);
 
-    for (int i = 0; i < 15 && i < sh->nb_refs[L0]; i++) {
+    for (int i = 0; i < V4L2_HEVC_DPB_ENTRIES_NUM_MAX && i < sh->nb_refs[L0]; i++) {
         table->delta_luma_weight_l0[i] = sh->luma_weight_l0[i] - luma_weight_denom;
         table->luma_offset_l0[i] = sh->luma_offset_l0[i];
         table->delta_chroma_weight_l0[i][0] = sh->chroma_weight_l0[i][0] - chroma_weight_denom;
@@ -230,7 +233,7 @@ static void fill_pred_table(const HEVCContext *h, struct v4l2_hevc_pred_weight_t
     if (sh->slice_type != HEVC_SLICE_B)
         return;
 
-    for (int i = 0; i < 15 && i < sh->nb_refs[L1]; i++) {
+    for (int i = 0; i < V4L2_HEVC_DPB_ENTRIES_NUM_MAX && i < sh->nb_refs[L1]; i++) {
         table->delta_luma_weight_l1[i] = sh->luma_weight_l1[i] - luma_weight_denom;
         table->luma_offset_l1[i] = sh->luma_offset_l1[i];
         table->delta_chroma_weight_l1[i][0] = sh->chroma_weight_l1[i][0] - chroma_weight_denom;
@@ -272,15 +275,20 @@ static const uint8_t *ptr_from_index(const uint8_t *b, unsigned int idx)
     return b;
 }
 
-static unsigned int fill_dpb_entries(const HEVCContext *const h, struct v4l2_hevc_dpb_entry *const entries)
+/* the reference pictures (FFmpeg's DPB has 32 places, and a damaged
+   stream can mark more than 16 as references): how many, or -1 if more
+   than V4L2's 16 */
+static int fill_dpb_entries(const HEVCContext *const h, struct v4l2_hevc_dpb_entry *const entries)
 {
-    unsigned int n = 0;
+    int n = 0;
     const HEVCFrame *const pic = h->ref;
 
     for (unsigned i = 0; i < FF_ARRAY_ELEMS(h->DPB); i++) {
         const HEVCFrame *const frame = &h->DPB[i];
         if (frame != pic && (frame->flags & (HEVC_FRAME_FLAG_LONG_REF | HEVC_FRAME_FLAG_SHORT_REF))) {
-            struct v4l2_hevc_dpb_entry *const entry = entries + n++;
+            struct v4l2_hevc_dpb_entry *entry;
+            if (n == V4L2_HEVC_DPB_ENTRIES_NUM_MAX) return -1;
+            entry = entries + n++;
             entry->timestamp = pic_number(frame);
             entry->flags = (frame->flags & HEVC_FRAME_FLAG_LONG_REF) == 0 ? 0 : V4L2_HEVC_DPB_ENTRY_LONG_TERM_REFERENCE;
             entry->field_pic = frame->frame->interlaced_frame;
@@ -357,8 +365,9 @@ static void fill_slice_params(const HEVCContext *const h, const struct v4l2_ctrl
     slice_params->num_entry_point_offsets = sh->num_entry_point_offsets;
 }
 
-static void fill_decode_params(const HEVCContext *const h, struct v4l2_ctrl_hevc_decode_params *const dec)
+static int fill_decode_params(const HEVCContext *const h, struct v4l2_ctrl_hevc_decode_params *const dec)
 {
+    int n;
     *dec = (struct v4l2_ctrl_hevc_decode_params) {
         .pic_order_cnt_val = h->poc,
         .num_poc_st_curr_before = h->rps[ST_CURR_BEF].nb_refs,
@@ -366,7 +375,8 @@ static void fill_decode_params(const HEVCContext *const h, struct v4l2_ctrl_hevc
         .num_poc_lt_curr = h->rps[LT_CURR].nb_refs,
     };
 
-    dec->num_active_dpb_entries = fill_dpb_entries(h, dec->dpb);
+    if ((n = fill_dpb_entries(h, dec->dpb)) < 0) return AVERROR_INVALIDDATA;
+    dec->num_active_dpb_entries = n;
 
     for (int i = 0; i != h->rps[ST_CURR_BEF].nb_refs; ++i)
         dec->poc_st_curr_before[i] = h->rps[ST_CURR_BEF].ref[i]->poc;
@@ -381,6 +391,7 @@ static void fill_decode_params(const HEVCContext *const h, struct v4l2_ctrl_hevc
         dec->flags |= V4L2_HEVC_DECODE_PARAM_FLAG_IDR_PIC;
     if (h->sh.no_output_of_prior_pics_flag)
         dec->flags |= V4L2_HEVC_DECODE_PARAM_FLAG_NO_OUTPUT_OF_PRIOR;
+    return 0;
 }
 
 static void fill_sps(struct v4l2_ctrl_hevc_sps *ctrl, const HEVCSPS *sps)
@@ -556,7 +567,7 @@ static int hwaccel_alloc_frame(AVCodecContext *inner, AVFrame *frame)
     if (!frame->buf[0]) return AVERROR(ENOMEM);
     e->in_use = 1;
     w->sh->refs++;
-    e->failed = 0;
+    e->failed = 1;                           /* (until its picture is given to the block) */
     frame->data[3] = (uint8_t *)e->f;
     /* (ff_get_buffer leaves this to an alloc_frame: the decoder's own
        data for the frame, which it expects every frame to have) */
@@ -570,6 +581,15 @@ static PoolEntry *entry_of(HWDecContext *w, const hevcdec_frame *f)
     return NULL;
 }
 
+/* is the inner decoder's picture in hand the one start_frame began? (A
+   picture whose slice header failed after start_frame never gets its
+   end_frame; one whose header failed before it never gets a start_frame:
+   its slices and end_frame mustn't be taken for the last one's.) */
+static int same_picture(const HWDecContext *w, const HEVCContext *h)
+{
+    return w->in_picture && h->ref && ((const HWDecPicture *)h->ref->hwaccel_picture_private)->number == w->number;
+}
+
 static int hwaccel_start_frame(AVCodecContext *inner, const uint8_t *buf, uint32_t size)
 {
     HWDecContext *w = ours(inner);
@@ -577,8 +597,13 @@ static int hwaccel_start_frame(AVCodecContext *inner, const uint8_t *buf, uint32
     HWDecPicture *p = h->ref->hwaccel_picture_private;
     (void)buf; (void)size;
     p->number = ++w->number;
-    fill_decode_params(h, &w->dec);
     w->nsl = 0;
+    w->in_picture = 0;
+    if (fill_decode_params(h, &w->dec) < 0) {
+        if (w->failures++ < 10) av_log(w->avctx, AV_LOG_ERROR, "Picture %"PRIu64": more than %d reference pictures\n",
+                                       w->number, V4L2_HEVC_DPB_ENTRIES_NUM_MAX);
+        return AVERROR_INVALIDDATA;
+    }
     w->in_picture = 1;
     return 0;
 }
@@ -591,7 +616,7 @@ static int hwaccel_decode_slice(AVCodecContext *inner, const uint8_t *buf, uint3
     const HEVCContext *h = inner->priv_data;
     int bcount = get_bits_count(&h->HEVClc->gb);
     uint32_t boff;
-    if (!w->in_picture) return AVERROR_INVALIDDATA;
+    if (!same_picture(w, h)) return AVERROR_INVALIDDATA;
     if (w->nsl == w->cap) {
         unsigned cap = w->cap ? w->cap * 2 : 16;
         void *a = av_realloc_array(w->sp, cap, sizeof(*w->sp)), *b;
@@ -620,9 +645,12 @@ static int hwaccel_end_frame(AVCodecContext *inner)
     struct v4l2_ctrl_hevc_pps pps;
     struct v4l2_ctrl_hevc_scaling_matrix sm;
     hevcdec_picture pic;
-    int r;
-    if (!w->in_picture || !w->nsl) return 0;
+    int r, same = same_picture(w, h);
     w->in_picture = 0;
+    if (!same || !w->nsl) {                  /* (not this picture's slices: none given to the block, and the */
+        w->nsl = 0;                          /* frame let go of rather than given out undecoded) */
+        return AVERROR_INVALIDDATA;
+    }
     scl = h->ps.pps->scaling_list_data_present_flag ? &h->ps.pps->scaling_list :
           s->scaling_list_enable_flag ? &s->scaling_list : NULL;
     memset(&sps, 0, sizeof(sps)); memset(&pps, 0, sizeof(pps)); memset(&sm, 0, sizeof(sm));
@@ -643,11 +671,16 @@ static int hwaccel_end_frame(AVCodecContext *inner)
         w->refused = 1;
         return AVERROR(ENOSYS);
     }
+    w->nsl = 0;
     if (r != HEVCDEC_OK) {
         PoolEntry *e = entry_of(w, (const hevcdec_frame *)h->ref->frame->data[3]);
         if (e) e->failed = 1;
         if (w->failures++ < 10) av_log(w->avctx, AV_LOG_ERROR, "Picture %"PRIu64": %s\n", w->number, hevcdec_error(w->sh->d));
         return AVERROR_EXTERNAL;
+    }
+    {
+        PoolEntry *e = entry_of(w, (const hevcdec_frame *)h->ref->frame->data[3]);
+        if (e) e->failed = 0;                /* (the block has it) */
     }
     return 0;
 }
@@ -693,7 +726,10 @@ static av_cold int hwdec_close(AVCodecContext *avctx)
     av_frame_free(&w->held);
     av_packet_free(&w->pkt);
     avcodec_free_context(&w->inner);         /* (its frames, and so hevcdec's, let go of) */
-    if (w->sh) shared_unref(w->sh);          /* (hevcdec closed now, or with the last frame a caller keeps) */
+    if (w->sh) {                             /* (hevcdec closed now, or with the last frame a caller keeps: */
+        if (w->sh->refs > 1) w->sh->log = NULL;   /* then avctx is gone, so its messages go without it) */
+        shared_unref(w->sh);
+    }
     w->sh = NULL;
     av_freep(&w->sp);
     av_freep(&w->sl);
@@ -708,6 +744,7 @@ static av_cold int hwdec_init(AVCodecContext *avctx)
     w->avctx = avctx;
     if (!(w->sh = av_mallocz(sizeof(*w->sh)))) return AVERROR(ENOMEM);
     w->sh->refs = 1;
+    w->sh->log = avctx;
     if (!(w->pkt = av_packet_alloc()) || !(w->hwf = av_frame_alloc()) || !(w->held = av_frame_alloc()))
         return AVERROR(ENOMEM);
     if (!(w->inner = avcodec_alloc_context3(&ff_hevc_decoder.p))) return AVERROR(ENOMEM);
@@ -788,9 +825,13 @@ static int give_out(AVCodecContext *avctx, AVFrame *frame, AVFrame *hwf)
     frame->crop_left = frame->crop_top = frame->crop_right = frame->crop_bottom = 0;   /* (already the window) */
     if (sixteen) {
         uint16_t *p16[3] = { (uint16_t *)frame->data[0], (uint16_t *)frame->data[1], (uint16_t *)frame->data[2] };
-        hevcdec_frame_to_i420_16(w->sh->d, f, p16, frame->linesize, x, y, width, height);
+        ret = hevcdec_frame_to_i420_16(w->sh->d, f, p16, frame->linesize, x, y, width, height);
     } else {
-        hevcdec_frame_to_i420(w->sh->d, f, frame->data, frame->linesize, x, y, width, height);
+        ret = hevcdec_frame_to_i420(w->sh->d, f, frame->data, frame->linesize, x, y, width, height);
+    }
+    if (ret != HEVCDEC_OK && !failed) {      /* (0.1.10: a window outside the frame, or the decoder stopped) */
+        failed = 1;
+        if (w->failures++ < 10) av_log(avctx, AV_LOG_ERROR, "A picture: %s\n", hevcdec_error(w->sh->d));
     }
     if (failed) frame->decode_error_flags |= FF_DECODE_ERROR_INVALID_BITSTREAM;
     av_frame_unref(hwf);
@@ -880,6 +921,8 @@ static void hwdec_flush(AVCodecContext *avctx)
     avcodec_flush_buffers(w->inner);
     av_frame_unref(w->hwf);
     w->eof_sent = 0;
+    w->in_picture = 0;
+    w->nsl = 0;
 }
 
 #define OFFSET(x) offsetof(HWDecContext, x)

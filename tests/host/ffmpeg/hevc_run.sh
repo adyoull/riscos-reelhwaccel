@@ -65,7 +65,7 @@ FF=$O/build/ffmpeg
 Q="$TOP/tests/qemu/aligntrap.sh"
 echo "== hevc_hwdec in FFmpeg 5.1.10 (the ffmpeg command on the fake HEVC block: every picture, pipelined"
 echo "   and not, cached and not, -ss, a raw stream, cropped; 10-bit, 8-bit from 10-bit, 4K; 4:2:2, 12-bit and"
-echo "   no block refused)"
+echo "   no block refused; a size change part way; damaged streams)"
 
 clean() {   # the fake's report in file $1: no complaints, nothing wrong, nothing left
   grep -q "fake_hevc: 0 complaints, .* 0 references wrong, 0 pictures unknown, 0 stale factors, 0 evictions, 0 buffers not freed" "$1"
@@ -191,6 +191,41 @@ export HEVC_FAKE_TRACE=$C/small.trace HEVC_FAKE_YUV=$C/small.yuv HEVC_FAKE_SIZE=
 grep -q "the depth changed (352x288 8-bit to 352x288 10-bit) part way" "$O/mixed.err" &&
   [ "$(grep -c "Not for the HEVC block\|part way" "$O/mixed.err")" = 1 ] && grep -q "Function not implemented" "$O/mixed.err" ||
   { echo "FAIL: a depth change part way: not refused once with ENOSYS:"; cat "$O/mixed.err"; bad=1; }
+
+# (0.1.10) a stream whose picture size changes part way and back: slices' first two pictures (416x240),
+# all of tiny (256x144: more pictures held, so frames of its own size's motion-vector buffers), then all
+# of slices again. hevcdec is kept (the frames are big enough) and restarts rpivid at each change, so
+# the block never writes motion vectors past a buffer made for the smaller size; every picture FFmpeg's
+ffmpeg -v error -y -i "$C/slices.mp4" -c copy -bsf:v hevc_mp4toannexb -f hevc "$O/slices.hevc" &&
+  ffmpeg -v error -y -i "$C/slices.mp4" -c copy -frames:v 2 -bsf:v hevc_mp4toannexb -f hevc "$O/slices2.hevc" &&
+  ffmpeg -v error -y -i "$C/tiny.mp4" -c copy -bsf:v hevc_mp4toannexb -f hevc "$O/tiny.hevc" &&
+  cat "$O/slices2.hevc" "$O/tiny.hevc" "$O/slices.hevc" > "$O/sizes.hevc" || bad=1
+"$Q" "$FF" -nostdin -loglevel error -c:v hevc -i "$O/sizes.hevc" -f framecrc - 2>/dev/null |
+  awk -F', ' '!/^#/{print $5, $6}' > "$O/sizes.want"
+HEVC_FAKE_TRACE=$C/slices.trace HEVC_FAKE_YUV=$C/slices.yuv HEVC_FAKE_SIZE=416x240 \
+  HEVC_FAKE_TRACE2=$C/tiny.trace HEVC_FAKE_YUV2=$C/tiny.yuv HEVC_FAKE_SIZE2=256x144 \
+  "$Q" "$FF" -nostdin -loglevel debug -c:v hevc_hwdec -i "$O/sizes.hevc" -f framecrc - 2> "$O/sizes.err" |
+  awk -F', ' '!/^#/{print $5, $6}' > "$O/sizes.got"
+[ "$(wc -l < "$O/sizes.want")" -ge 20 ] && cmp -s "$O/sizes.got" "$O/sizes.want" && clean "$O/sizes.err" &&
+  [ "$(grep -c "rpivid restarted" "$O/sizes.err")" = 2 ] && ! grep -q "wrote past the end" "$O/sizes.err" ||
+  { echo "FAIL: a picture size changing part way:"; grep "fake_hevc\|restarted\|past the end\|FAIL\|rror" "$O/sizes.err" | head;
+    bad=1; }
+
+# (0.1.10) damaged streams (bytes of a raw stream changed): decoded or refused, never anything the fake
+# complains of (the block given memory it hasn't, references or slices past their arrays), nothing left
+for seed in 1 2 3 4 5 6; do
+  python3 -c "
+import random, sys
+d = bytearray(open(sys.argv[1], 'rb').read()); r = random.Random(int(sys.argv[3]))
+for _ in range(len(d) // 200): d[r.randrange(64, len(d))] = r.randrange(256)
+open(sys.argv[2], 'wb').write(d)" "$O/small.hevc" "$O/damaged.hevc" $seed
+  HEVC_FAKE_TRACE=$C/small.trace HEVC_FAKE_YUV=$C/small.yuv HEVC_FAKE_SIZE=352x288 HEVC_FAKE_QUIET=1 \
+    "$Q" "$FF" -nostdin -loglevel quiet -c:v hevc_hwdec -i "$O/damaged.hevc" -f null - 2> "$O/damaged.err"
+  r=$?
+  # (wrong references are the stream's own doing: FFmpeg makes up missing ones; nothing else may be complained of)
+  [ $r -lt 128 ] && grep -q "fake_hevc: \([0-9]*\) complaints, .* \1 references wrong, .* 0 buffers not freed" "$O/damaged.err" ||
+    { echo "FAIL: a damaged stream (seed $seed, exit $r):"; cat "$O/damaged.err"; bad=1; }
+done
 
 # refused: 4:2:2 and 12-bit (from the MP4's extradata, and from a raw stream's first picture); no block
 for k in p422:yuv422p10le p12:yuv420p12le; do

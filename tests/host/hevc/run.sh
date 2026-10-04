@@ -46,6 +46,8 @@ if [ -n "${FFMPEG_TARBALL:-}" ] && ffmpeg -hide_banner -encoders 2>/dev/null | g
   clip odd10 426x240 8 "keyint=4:bframes=0:wpp=0" yuv420p10le
   clip crop10 416x240 6 "keyint=3:bframes=1" yuv420p10le "crop_left=16:crop_top=8:crop_right=32:crop_bottom=4"
   clip slices10 416x240 12 "keyint=6:bframes=2:slices=4" yuv420p10le
+  # (0.1.10) smaller than slices, with more pictures held: for a stream whose size changes part way
+  clip tiny 256x144 10 "keyint=10:bframes=3"
   # 4K, 8-bit and 10-bit
   clip uhd 3840x2160 4 "keyint=4:bframes=1:crf=30"
   clip uhd10 3840x2160 4 "keyint=4:bframes=1:crf=30" yuv420p10le

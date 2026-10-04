@@ -61,6 +61,15 @@ cropping applied. Ask for it by name (`-c:v hevc_hwdec`, or
   - A conversion waits for the picture if the block is still decoding it.
   - **Lifetime:** each frame holds one of hevcdec's frames (12 MB at 4K) until freed, on the thread that decodes. hevcdec stays open until the decoder is closed and the last frame is freed. While it is open, no other hevcdec can be opened.
   - **Failures:** a picture the block failed is flagged in `decode_error_flags` only if that was known when it was given out.
+- **Fixes from a code audit (devkit 0.2.9, hevcdec 0.1.10):**
+  - With `output_hw`, frames kept past `avcodec_free_context` no longer make hevcdec log through the freed context when the last one is freed (a use-after-free).
+  - A damaged stream marking more than 16 reference pictures is refused (AVERROR_INVALIDDATA for that picture) instead of overrunning the 16-entry DPB list; hevcdec itself refuses pictures with more than 16 references, references outside the DPB, or slices longer than their data.
+  - A picture whose slices FFmpeg gave up on part way can no longer be sent with another picture's slices; a frame never given to the block comes out flagged (`decode_error_flags`) rather than as a good picture.
+  - A stream whose picture size changes part way (smaller, then back) restarts hevcdec's buffers at each change, so the block never writes motion vectors past one made at the smaller size.
+  - A picture refused in pipelined mode no longer lets the next picture take the slice buffer of one the block is still reading.
+  - Weighted prediction uses all 16 references (it stopped at 15).
+  - `hevcdec_frame_to_i420_half`: 10-bit samples averaging 1022 or more stay 255 (they wrapped to 0, black), and halving to the frame's last chroma row with an odd height doesn't read below it.
+  - **API:** `hevcdec_frame_to_i420` now returns an int, like `_16` and `_half`: HEVCDEC_OK, HEVCDEC_UNSUPPORTED for a window outside the frame (or an odd x or y), HEVCDEC_ERROR if the picture can't be finished. Code that ignores the result still compiles and works.
 - **Options:** `output_hw` (above), `drop_before` (above), `output_8bit` (default off; see 10-bit), `pipelined` (default on: the block decodes while FFmpeg parses the next picture; one picture is held back, so output is a picture later) and `cached_frames` (default on: the block's frames are cacheable, cleaned and invalidated before conversion, about twice as quick to convert).
 - **Threads:** the decoder runs FFmpeg's HEVC decoder single-threaded; the parallelism is the block's.
 - **Seeking:** `avcodec_flush_buffers` as for `hevc`.

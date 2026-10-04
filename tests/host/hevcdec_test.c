@@ -6,7 +6,7 @@
  * Each TRACE comes from tools/hevctrace (FFmpeg's HEVC decoder) and RAW is
  * FFmpeg's decode of the same clip (I420, display order: 8-bit, or for a
  * 10-bit trace yuv420p10le). The fake
- * "decodes" a picture by writing FFmpeg's (found by its first slice's
+ * "decodes" a picture by writing FFmpeg's (found by its slices'
  * bitstream), so hevctest's check passes only if everything between -
  * the slices' bytes, the frames, the references, the 128-byte column
  * format and its conversion - is right.
@@ -33,7 +33,7 @@ static uint32_t adler(const uint8_t *p, size_t n)
     return b << 16 | a;
 }
 
-/* ---- the pictures, by their first slice's bitstream ---- */
+/* ---- the pictures, by their slices' bitstream ---- */
 #define MAXP 512
 static struct { uint32_t hash; const uint8_t *y, *u, *v; } map[MAXP];
 static int nmap, map_w, map_h, map_bytes;
@@ -61,7 +61,7 @@ static uint32_t adler_rect(const uint8_t *p, size_t wb, int h, size_t stride)
 /* the trace's pictures matched to RAW's by their Adler-32s over the
    output window (RAW: whole pictures, the coded size, so the fake can
    write them as the block would; for an uncropped clip the window is the
-   whole picture); the hash of each first slice's data (as phase 1 is
+   whole picture); the hash of each picture's slices' data (as phase 1 is
    given it) noted */
 static int load(const char *trace, const char *rawname, int w, int h)
 {
@@ -89,7 +89,7 @@ static int load(const char *trace, const char *rawname, int w, int h)
     map_bytes = bytes;
     yn = (size_t)w * h * bytes; cn = (size_t)((w + 1) / 2) * ((h + 1) / 2) * bytes; fs = yn + 2 * cn;
     while (o + 48 <= (size_t)n) {
-        uint32_t nsl = rd32(d + o + 24), has_sm = rd32(d + o + 28), hash = 0, crc[3];
+        uint32_t nsl = rd32(d + o + 24), has_sm = rd32(d + o + 28), hash = 2166136261u, crc[3];
         int wl = (int)rd32(d + o + 32), wt = (int)rd32(d + o + 36), ww = (int)rd32(d + o + 40), wh = (int)rd32(d + o + 44);
         o += 48 + s_sps + s_pps + s_dec + (has_sm ? s_sm : 0);
         for (uint32_t i = 0; i < nsl; i++) {
@@ -97,7 +97,7 @@ static int load(const char *trace, const char *rawname, int w, int h)
             uint32_t bits = rd32(sp), off = rd32(sp + 4), len;
             o += s_sp;
             len = rd32(d + o); o += 4;
-            if (i == 0) hash = fake_hevc_hash(d + o + off, (bits + 7) / 8 - off);
+            hash = (hash ^ fake_hevc_hash(d + o + off, (bits + 7) / 8 - off)) * 16777619u;   /* (every slice's, as the fake's) */
             o += (len + 3) & ~3u;
         }
         for (int k = 0; k < 3; k++) { crc[k] = rd32(d + o); o += 4; }
@@ -368,6 +368,19 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
               nall == 12 && ndone >= 12 - 5, "hevctest -p, a slice refused (%d, %d of %d):\n%s", ret, ndone, nall, o);
         fake_hevc.fails = 0;
         cleaned("-p a slice refused");
+        /* (0.1.10) and with phase 1 slow, so two pictures wait in phase 1 when one is refused: the
+           refused one takes no slice buffer, so the next can't take one phase 1 has still to read */
+        fake_hevc_reset();
+        fake_hevc.quiet = 1;
+        fake_hevc.p1_ticks = 40;
+        fake_hevc.p2_ticks = 2;
+        o = run_app(&ret, trace, "-P 4 -n -x 4");
+        CHECK(ret == 1 && strstr(o, "Picture 4 (poc 1, 4 slices): Slice 1:") && !strstr(o, "WRONG") &&
+              strstr(o, "11 checked against FFmpeg: 1 wrong"),
+              "hevctest -P 4, a slice refused with phase 1 slow (%d; the refused picture's slice buffer taken from "
+              "a picture still in phase 1?):\n%s", ret, o);
+        fake_hevc.fails = 0;
+        cleaned("-p a slice refused, phase 1 slow");
     }
 
     {                                           /* (0.1.8) the block kept busy while a picture is converted: */
@@ -454,6 +467,47 @@ int main(int argc, char **argv)
         int st[3] = { 0, 0, 0 };
         hevcdec_frame *f = hevcdec_frame_new(d);
         CHECK(f && hevcdec_frame_to_i420_16(d, f, p16, st, 0, 0, 2, 2) == HEVCDEC_UNSUPPORTED, "16-bit from an 8-bit decoder");
+        if (f) {                                /* (0.1.10) windows checked (the frame: 384x288) */
+            static uint8_t pl[3][384 * 288];
+            uint8_t *p8[3] = { pl[0], pl[1], pl[2] };
+            int s8[3] = { 384, 192, 192 };
+            CHECK(hevcdec_frame_to_i420(d, f, p8, s8, 0, 0, 384, 288) == HEVCDEC_OK, "the whole frame: %s", hevcdec_error(d));
+            CHECK(hevcdec_frame_to_i420(d, f, p8, s8, 2, 0, 384, 2) == HEVCDEC_UNSUPPORTED, "converting past the right");
+            CHECK(hevcdec_frame_to_i420(d, f, p8, s8, 0, 2, 2, 288) == HEVCDEC_UNSUPPORTED, "converting past the bottom");
+            CHECK(hevcdec_frame_to_i420(d, f, p8, s8, -2, 0, 2, 2) == HEVCDEC_UNSUPPORTED, "converting from x -2");
+            CHECK(hevcdec_frame_to_i420(d, f, p8, s8, 1, 0, 2, 2) == HEVCDEC_UNSUPPORTED, "converting from an odd x");
+            CHECK(hevcdec_frame_to_i420_half(d, f, p8, s8, 4, 0, 0x7FFFFFFF, 2) == HEVCDEC_UNSUPPORTED, "halving, w huge");
+            CHECK(hevcdec_frame_to_i420_half(d, f, p8, s8, 0, 2, 2, 144) == HEVCDEC_UNSUPPORTED, "halving past the bottom");
+            CHECK(hevcdec_frame_to_i420_half(d, f, p8, s8, 0, 0, 192, 144) == HEVCDEC_OK, "halving the whole frame");
+        }
+        {                                       /* (0.1.10) pictures rpivid would index past its arrays with */
+            static struct v4l2_ctrl_hevc_sps sps;
+            static struct v4l2_ctrl_hevc_pps pps;
+            static struct v4l2_ctrl_hevc_decode_params dec;
+            static struct v4l2_ctrl_hevc_slice_params sp;
+            static uint8_t data[64];
+            hevcdec_slice sl = { &sp, data, sizeof data };
+            hevcdec_picture pic = { &sps, &pps, &dec, NULL, 1, &sl };
+            sps.chroma_format_idc = 1;
+            sps.pic_width_in_luma_samples = 352;
+            sps.pic_height_in_luma_samples = 288;
+            dec.num_active_dpb_entries = 17;
+            CHECK(f && hevcdec_decode(d, &pic, f, 1) == HEVCDEC_ERROR && strstr(hevcdec_error(d), "17 references"),
+                  "17 DPB entries: %s", hevcdec_error(d));
+            dec.num_active_dpb_entries = 2;
+            sp.slice_type = V4L2_HEVC_SLICE_TYPE_P;
+            sp.num_ref_idx_l0_active_minus1 = 16;
+            CHECK(f && hevcdec_decode(d, &pic, f, 1) == HEVCDEC_ERROR && strstr(hevcdec_error(d), "17 and 1 references"),
+                  "17 L0 references: %s", hevcdec_error(d));
+            sp.num_ref_idx_l0_active_minus1 = 1;
+            sp.ref_idx_l0[1] = 2;
+            CHECK(f && hevcdec_decode(d, &pic, f, 1) == HEVCDEC_ERROR && strstr(hevcdec_error(d), "not among the 2"),
+                  "a reference past the DPB: %s", hevcdec_error(d));
+            sp.ref_idx_l0[1] = 1;
+            sp.bit_size = 8 * 65;
+            CHECK(f && hevcdec_decode(d, &pic, f, 1) == HEVCDEC_ERROR && strstr(hevcdec_error(d), "520 bits in 64 bytes"),
+                  "a slice longer than its data: %s", hevcdec_error(d));
+        }
         hevcdec_close(d);
         d = NULL;
     }
