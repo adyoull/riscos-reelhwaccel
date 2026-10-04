@@ -1,5 +1,12 @@
 # Changes
 
+## Release 0.2.8 (2026-10-04)
+
+The first release on GitHub: devkit 0.2.8 (vcdec 0.4.2, hevcdec 0.1.9,
+patches 0001 and 0002 for FFmpeg 5.1.10), with the Pi test programs
+HEVCTest 0.1.10 and VCDecTest 0.3.2. The code is as below; the README
+now describes where it has got to, with the Pi 4 figures.
+
 ## hevcdec 0.1.9, HEVCTest 0.1.10, devkit 0.2.8: one copy instead of two (output_hw) (2026-10-03)
 
 Agreed with riscos-ffmpeg (FFmpeg/handoffs/2026-10-03-reelhwaccel-devkit-0.2.7-adopted):

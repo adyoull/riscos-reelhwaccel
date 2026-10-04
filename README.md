@@ -2,101 +2,75 @@
 
 ReelHWAccel decodes video with the Raspberry Pi's own hardware instead of
 the ARM, for Reel and for FFmpeg on RISC OS (github.com/adyoull/riscos-ffmpeg,
-where it started). It has three parts:
+where it started). It has two libraries, each with an FFmpeg decoder on
+top:
 
-| Part | What it drives | Codecs | Boards |
-|---|---|---|---|
-| `vcdec` | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264, Motion JPEG (and MPEG-2 / VC-1 with the licences on a Pi 1-3) | Pi 2, 3, 4 (and 1/Zero, though Reel and FFmpeg need ARMv7) |
-| `hevcdec` | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by Raspberry Pi's `rpivid_h265.c` | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 |
-| `hwdec` | one small interface over both: can this codec and size be decoded in hardware, and do it | - | - |
+| Library | What it drives | Codecs | Boards | FFmpeg decoder |
+|---|---|---|---|---|
+| `vcdec` (0.4.2) | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264 (8-bit 4:2:0, up to 1080p), Motion JPEG | Pi 4 (tested); Pi 2, 3 (untested) | `h264_vchiq` |
+| `hevcdec` (0.1.9) | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by Raspberry Pi's `rpivid_h265.c` | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 | `hevc_hwdec` |
 
-Reel and FFmpeg will only use `hwdec` (`libhwdec`, `hwdec.h`), from this
-project's devkit; in FFmpeg the decoders will appear as `h264_vchiq` and
-`hevc_hwdec` (not `h264_mmal`, which is FFmpeg's existing decoder for
-Linux's MMAL library).
+Reel and FFmpeg use them through this project's devkit (0.2.8): both
+libraries, their headers and the two FFmpeg 5.1.10 patches (`devkit/`,
+and `devkit/README.md` for how to use them). The decoders are
+`h264_vchiq` and `hevc_hwdec`, not `h264_mmal`, which is FFmpeg's existing
+decoder for Linux's MMAL library. Each refuses what its hardware can't
+decode (AVERROR(ENOSYS)), so a player falls back to FFmpeg's software
+decoder.
 
-## Where it's got to
+## What it does on a Raspberry Pi 4
 
-Nothing here is for everyday use yet: these are the test tools that
-found out how to drive the hardware from RISC OS, each with what it
-showed on a Raspberry Pi 4.
+Every picture is exactly as FFmpeg's software decoder gives it (H.264:
+within the VideoCore's rounding of chroma). Checked on a Pi 4 with the
+test programs below.
 
-- **`tools/vchiqprobe`**: the VCHIQ module's SWIs (VCHIQ 0.14, in the
-  ROM) and how BCMSound and BCMVideo call them.
-- **`tools/mmalprobe`**: the firmware's `ril.video_decode` answers through
-  VCHIQ and MMAL (H.264, MVC and MJPEG on a Pi 4).
-- **`tools/mmaldecode`**: whole H.264 decodes on the VideoCore, every
-  picture checked against FFmpeg's (within rounding: the VideoCore's
-  chroma can be 1 lower). On a Pi 4: 640x360 at 193 pictures a second,
-  426x240 at 333, and 1080p High (with `gpu_mem=128`; at 64 MB the decoder
-  stalls without a word). What it took: physically contiguous buffers,
-  buffers numbered from 1, output buffers only after the decoder's format
-  change, every receive queued as its message arrives, and the 20 input
-  buffers the decoder recommends.
-  0.13 to 0.17 added MP4 input (one access unit a buffer, with its pts),
-  display order by pts, flush and seek, and timing: on a Pi 4 every
-  picture comes back with its own pts in display order, 1080p decodes
-  and copies out at 58-59 pictures a second, and a flush is clean as
-  long as no end-of-stream reached the decoder before it.
-- **`vcdec/`** (0.4.1): the library itself, from all of that. Open, send
-  an access unit with its pts, take a picture (copied into the caller's
-  planes), flush for a seek (after the end of the stream, the decoder is
-  created again), close; nothing waits for the decoder but open, flush
-  and close, so a player can drive it from Wimp null events. It checks
-  the profile, the size and `gpu_mem` (1080p needs 128 MB), and says
-  when the stream isn't for the VideoCore so the caller can decode in
-  software. Pictures arrive in a cacheable Physical Memory Pool (user
-  readable; PCI memory if there's none) and are copied out by LDM 8:
-  timed on the Pi with VCDecTest 0.2 and confirmed with 0.3 (every
-  picture right), that took 1080p from 64 to 82 pictures a second.
-  0.4.1 adds zero-copy: the caller can take a picture in vcdec's own
-  buffer and give it back when done. **`tools/vcdectest`** drives it on
-  the Pi as a player would: on a Pi 4 every picture right, seeks before
-  and after the end of the stream losing nothing, open, flush and close
-  in 0-3 cs.
-- **`tools/hevcprobe`** and **`hevchw/`** (the HEVCHW module): the Pi 4's
-  HEVC block answers, and its registers (30-bit, addresses in 64-byte
-  units), contiguous memory and interrupt (GIC 130, device 34) all work
-  from RISC OS.
-- **`hevcdec/`** (0.1.5): the HEVC decoder. A stateless
-  decoder, as Linux's: the caller parses the stream (FFmpeg's HEVC
-  decoder) and gives each picture as the V4L2 stateless HEVC controls
-  (`hevc_ctrls.h`) with its slices; hevcdec builds the block's commands
-  with `rpivid_h265.c` (unchanged, under a small kernel shim) and runs
-  the two phases, polling. Output is NV12 in 128-byte columns, as the
-  block writes it, with a conversion to planar 4:2:0. 8-bit only, one
-  picture at a time. **`tools/hevctrace`** records what FFmpeg's decoder
-  gives a hwaccel (controls, slices, and checksums of each picture) on
-  the host; **`tools/hevctest`** (HEVCTest) replays those traces on the
-  Pi and checks every picture. Tested on the host against a fake block
-  that checks the commands and references and writes FFmpeg's pictures.
+| | Pictures a second | ARM time a picture |
+|---|---|---|
+| H.264 1080p (vcdec, zero-copy) | 85.7 | 0.13 ms |
+| HEVC 1080p 8-bit (hevcdec, pipelined) | 353 | 4.0 ms converting (2.0 halved) |
+| HEVC 1080p 10-bit | 316 | 4.7 ms to 8-bit, 7.7 ms to 16-bit |
+| HEVC 4K 8-bit | 83 | 16.3 ms converting, 7.7 ms halved |
+| HEVC 4K 10-bit | 79 | 18.0 ms to 8-bit, 10.0 ms halved |
 
-- **`ffmpeg/`**: FFmpeg 5.1.10's `h264_vchiq` decoder on top of vcdec, as
-  a patch (`0001-avcodec-h264_vchiq.patch`, `--enable-vchiq`), tested in
-  FFmpeg itself (libavcodec's API and the `ffmpeg` command) against the
-  fakes. And `hevc_hwdec` on top of hevcdec
-  (`0002-avcodec-hevc_hwdec.patch`, `--enable-libhevcdec`): a hwaccel on
-  FFmpeg's own HEVC decoder (FFmpeg parses, the block decodes, pipelined)
-  and a decoder of that name giving YUV420P frames, tested in the `ffmpeg`
-  command against the fake HEVC block. **`devkit/`** packs libvcdec,
-  libhevcdec, their headers and both patches for riscos-ffmpeg (FFmpeg,
-  Reel).
+In Reel (riscos-ffmpeg) this plays 1080p60 H.264, and 1080p HEVC at
+35-45% of the ARM (Reel 0.1.23 test builds, which convert each picture
+from the block straight into the video overlay, halving 4K).
 
-On a Pi 4 (HEVCTest 0.1.2) every picture of every clip comes out
-exactly as FFmpeg decodes it, 1080p at 230 pictures a second, now that
-the block's scaling factors are always loaded (hevcdec 0.1.2). 0.1.4
-makes the output frames cacheable and converts them with NEON (it took
-29 ms a 1080p picture from memory that isn't cacheable). 0.1.5 overlaps
-the block's two phases and can decode while the program works
-(pipelined): 1080p at 353 pictures a second (HEVCTest 0.1.6). 0.1.7
-adds 10-bit (the block's frames hold three samples a 32-bit word; out as
-16-bit samples, or 8-bit) and tests 4K (HEVCTest 0.1.8); `hevc_hwdec`
-gives YUV420P10 for 10-bit streams (devkit 0.2.5).
+## The test programs
 
-Both libraries' contiguous memory (`common/contig.h`) avoids the running
-program's page at &8000: taking it moves the program to another page,
-which ARMEABISupport doesn't notice (the "EMT trap" seen after hardware
-runs; vcdec 0.4.2, hevcdec 0.1.6).
+The Pi test zips (`./build.sh`, into `dist/`) are what found out how to
+drive the hardware from RISC OS, and check it:
+
+- **VCDecTest** (`tools/vcdectest`): vcdec as a player drives it: every
+  picture checked, seeks before and after the end of the stream, zero
+  copy, memory, speed.
+- **HEVCTest** (`tools/hevctest`): replays traces of FFmpeg's HEVC
+  decoder (made on the host by `tools/hevctrace`) through hevcdec and
+  checks every picture, 1:1, halved and 10-bit, blocking and pipelined,
+  1080p and 4K; `-K` times the conversions.
+- Earlier probes: **VCHIQProbe** (the VCHIQ module's SWIs), **MMALProbe**
+  and **MMALDecode** (the firmware's video decoder through VCHIQ and
+  MMAL), **HEVCProbe** and the **HEVCHW** module (the HEVC block's
+  registers, clock, interrupt and memory).
+
+How it got here, version by version, is in `CHANGELOG.md`. Some of what
+it took:
+
+- **H.264:** physically contiguous buffers numbered from 1, output
+  buffers only after the decoder's format change, every receive queued
+  as its message arrives, and `gpu_mem=128` for 1080p. Pictures arrive
+  in a cacheable Physical Memory Pool and are handed out without a copy.
+- **HEVC:** the block's scaling-factor RAM persists and is used even
+  when the stream has no scaling lists, so the factors are always
+  loaded. The block's two phases overlap, decoding while the program
+  works, and hevcdec polls the block between the columns of a
+  conversion, so the next picture is decoded during the copy. Frames
+  are cacheable and converted with NEON from the block's 128-byte
+  columns (three 10-bit samples a word at 10-bit).
+- **Memory:** both libraries' contiguous memory (`common/contig.h`)
+  avoids the running program's page at &8000. Taking it moves the
+  program to another page, which ARMEABISupport doesn't notice (the
+  "EMT trap" seen after hardware runs).
 
 ## Building
 
@@ -104,7 +78,7 @@ runs; vcdec 0.4.2, hevcdec 0.1.6).
     vcdec/build.sh OUTDIR      # libvcdec.a and vcdec.h, for RISC OS
     hevcdec/build.sh OUTDIR    # libhevcdec.a and hwhevcdec.h, for RISC OS
     tools/hevctrace/build.sh .../ffmpeg-5.1.10.tar.xz   # the host ffmpeg that writes traces (HEVC_TRACE=file)
-    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.3)
+    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.8)
     FFMPEG_TARBALL=.../ffmpeg-5.1.10.tar.xz tests/host/run.sh   # the host tests
     ffmpeg/mkpatch.sh .../ffmpeg-5.1.10.tar.xz   # patch 0001, after vchiqdec.c changes
     ffmpeg/mkpatch-hevc.sh .../ffmpeg-5.1.10.tar.xz   # patch 0002, after hevc_hwdec.c changes
