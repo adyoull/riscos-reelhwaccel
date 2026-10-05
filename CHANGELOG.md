@@ -1,5 +1,30 @@
 # Changes
 
+## hevcdec 0.1.11, HEVCTest 0.1.12, devkit 0.2.10: once a picture, and without waiting (2026-10-05)
+
+riscos-ffmpeg asked (FFmpeg/handoffs/2026-10-05-reelhwaccel-cache-invalidate-per-call):
+Reel with the stats panel made two or three conversion calls a picture,
+each cleaning and invalidating the whole frame; and at 4K 10-bit 60 fps,
+once behind, every picture it converted was still in the block.
+
+- hevcdec: a frame is cleaned and invalidated once after the block has
+  written it (a flag, cleared when the frame is given to the block
+  again), not on every conversion call. The program only reads frames,
+  so nothing it caches between conversions goes stale.
+- hevcdec_frame_done: whether a picture is decoded, without waiting
+  (polling the phases as the other calls do).
+- hevcdec_stats: convert_waits and cs_convert_wait (conversions that
+  waited for their picture), cache_cleans.
+- HEVCTest 0.1.12: says how many cleans and conversion waits there were;
+  pipelined runs ask hevcdec_frame_done before each wait and count the
+  pictures not yet decoded (-Q, for the host tests: checks a picture it
+  called done is then not waited for).
+- Host tests: one clean per picture decoded in a checked run (1:1,
+  halved, 8-bit); frame_done with slow phases (some not done, none
+  waited for after done) and quick ones (some done). Mutants caught: the
+  flag not cleared on resubmission (stale pictures through the fake's
+  caches), a clean on every call, frame_done always 1, always 0.
+
 ## hevcdec 0.1.10, HEVCTest 0.1.11, devkit 0.2.9: fixes from a code audit (2026-10-04)
 
 A code audit of the HEVC side (also reported by riscos-ffmpeg's own

@@ -15,6 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
+ * 0.1.11: a frame is cleaned and invalidated once after the block writes
+ * it, not on every conversion; hevcdec_frame_done (without waiting);
+ * stats of conversions that waited, and of cleans.
  * 0.1.10 (from a code audit): halving 10-bit no longer turns the brightest
  * pixels black; halving to the frame's last chroma row doesn't read below
  * it; a picture size change restarts rpivid (its motion-vector buffers
@@ -44,7 +47,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.10"
+#define HEVCDEC_VERSION "0.1.11"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */
@@ -96,6 +99,12 @@ typedef struct {
     unsigned app_page_moves;
     /* (0.1.8) times the program had to wait for the block (cs_wait's count) */
     unsigned waits;
+    /* (0.1.11) conversions that had to wait for their picture (counted in
+       waits and cs_wait too), and the centiseconds those waits took; times
+       a frame was cleaned and invalidated (once after the block writes it,
+       however many conversions read it: cs_cache's count) */
+    unsigned convert_waits, cs_convert_wait;
+    unsigned cache_cleans;
 } hevcdec_stats;
 
 void hevcdec_config_init(hevcdec_config *c);
@@ -119,6 +128,13 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
 int hevcdec_frame_wait(hevcdec *d, hevcdec_frame *f);
 /* Waits for every picture given (before a seek, say) */
 int hevcdec_finish(hevcdec *d);
+/* (0.1.11) Without waiting: 1 if f's picture is decoded (or failed, or was
+   never given to the block, or the decoder stopped), so converting it
+   won't wait; 0 while the block is still at it. Sees phases that have
+   finished and starts the next, as the other calls do. For a player that
+   has fallen behind: show a picture that's done, keep the one on screen
+   rather than wait for one that isn't. */
+int hevcdec_frame_done(hevcdec *d, const hevcdec_frame *f);
 
 /* Part of the frame's picture as planar 8-bit 4:2:0: w x h from (x, y) in
    luma samples (the SPS's output window; x and y even), U and V

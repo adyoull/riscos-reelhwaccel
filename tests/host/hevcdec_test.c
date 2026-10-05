@@ -396,6 +396,36 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
         cleaned("-p busy while converting");
     }
 
+    {                                           /* (0.1.11) each frame cleaned and invalidated once a decode, */
+        unsigned cleans = 0, nd = 0, na = 0;   /* however many conversions read it (1:1, halved, 8-bit) */
+        int ndone = -1;
+        const char *q;
+        fake_hevc_reset();
+        o = run_app(&ret, trace, "-p");
+        if ((q = strstr(o, "of that, "))) sscanf(q, "of that, %u times", &cleans);
+        if ((q = strstr(o, " pictures decoded in"))) { while (q > o && q[-1] != '\n') q--; sscanf(q, "%d of", &ndone); }
+        CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && ndone > 0 && cleans == (unsigned)ndone,
+              "hevctest -p %s: %u cleans for %d pictures:\n%s", trace, cleans, ndone, o);
+        cleaned("-p cleaned once");
+        /* hevcdec_frame_done: with slow phases some pictures aren't done when wanted, and every one it
+           calls done is converted without a wait; with quick phases and a lag, some are done */
+        fake_hevc_reset();
+        fake_hevc.p1_ticks = 3;
+        fake_hevc.p2_ticks = 8;
+        o = run_app(&ret, trace, "-P 2 -Q");
+        if ((q = strstr(o, "hevcdec_frame_done: "))) sscanf(q, "hevcdec_frame_done: %u of %u", &nd, &na);
+        CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !strstr(o, "frame_done WRONG") && na > 0 &&
+              nd > 0, "hevctest -P 2 -Q %s, slow phases: %u of %u not done:\n%s", trace, nd, na, o);
+        cleaned("-P 2 -Q");
+        fake_hevc_reset();
+        nd = na = 0;
+        o = run_app(&ret, trace, "-P 3 -Q -t");
+        if ((q = strstr(o, "hevcdec_frame_done: "))) sscanf(q, "hevcdec_frame_done: %u of %u", &nd, &na);
+        CHECK(ret == 0 && !strstr(o, "frame_done WRONG") && na > 0 && nd < na,
+              "hevctest -P 3 -Q -t %s, quick phases: %u of %u not done:\n%s", trace, nd, na, o);
+        cleaned("-P 3 -Q -t");
+    }
+
     fake_hevc_reset();                          /* (0.1.8) -K: every way of converting gives the same pictures */
     o = run_app(&ret, trace, "-K -c 4");
     {

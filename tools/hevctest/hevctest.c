@@ -315,6 +315,8 @@ int probe_main(int argc, char **argv)
     FILE *dump = NULL;                     /* -d: every picture decoded, 4:2:0 (10-bit: 16-bit LE), in decoding order */
     int spoil = 0;                         /* (host tests: -x N spoils picture N's second slice) */
     int no_wait = 0;                       /* (host tests: -w, the picture converted without waiting first) */
+    int check_done = 0;                    /* (host tests: -Q, hevcdec_frame_done checked against the waits) */
+    unsigned not_done = 0, done_asked = 0, done_but_waited = 0;   /* (0.1.12) hevcdec_frame_done, pipelined */
     int force_depth = 0;                   /* (host tests: -D n, a decoder for n-bit whatever the trace) */
     int bench = 0;                         /* -K: the last picture converted each way, timed */
     int last_fs = -1;                      /* (the last picture decoded: its frame and picture) */
@@ -354,6 +356,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-x") && i + 1 < argc) spoil = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-D") && i + 1 < argc) force_depth = atoi(argv[++i]);   /* (host tests: the decoder's depth) */
         else if (!strcmp(argv[i], "-w")) no_wait = 1;   /* (host tests: converting waits by itself) */
+        else if (!strcmp(argv[i], "-Q")) check_done = 1;
         else if (!strcmp(argv[i], "-z")) flat = 2;   /* (host tests: the flag without the lists) */
 #endif
         else if (!name) name = argv[i];
@@ -484,9 +487,20 @@ int probe_main(int argc, char **argv)
             int fs = pend_slot[0];
             for (int q = 1; q < npend; q++) { pend[q - 1] = pend[q]; pend_slot[q - 1] = pend_slot[q]; }
             npend--;
-            t0 = now_cs();
-            r = no_wait ? HEVCDEC_OK : hevcdec_frame_wait(d, frames[fs]);
-            t_dec += now_cs() - t0;
+            {
+                hevcdec_stats s0, s1;
+                int is_done = hevcdec_frame_done(d, frames[fs]);   /* (asked first, as a player behind would) */
+                done_asked++;
+                if (!is_done) not_done++;
+                if (check_done) hevcdec_get_stats(d, &s0);
+                t0 = now_cs();
+                r = no_wait ? HEVCDEC_OK : hevcdec_frame_wait(d, frames[fs]);
+                t_dec += now_cs() - t0;
+                if (check_done) {
+                    hevcdec_get_stats(d, &s1);
+                    if (is_done && s1.waits != s0.waits) done_but_waited++;
+                }
+            }
             if (r != HEVCDEC_OK) {
                 say("Picture %u (poc %d, %u slices): %s\n", (unsigned)p->number, (int)p->poc, (unsigned)p->nslices,
                     hevcdec_error(d));
@@ -514,7 +528,15 @@ int probe_main(int argc, char **argv)
         st.cs_phase2, st.phase1_retries);
     say("hevcdec: output frames %s%s", st.cached_frames ? "cacheable" : "not cacheable",
         st.cached_frames ? "" : uncached ? " (-u)\n" : " (no cache maintenance)\n");
-    if (st.cached_frames) say(" (cleaning and invalidating them before converting: %u cs of that)\n", st.cs_cache);
+    if (st.cached_frames)
+        say(" (cleaning and invalidating them before converting: %u cs of that, %u times)\n", st.cs_cache, st.cache_cleans);
+    if (st.convert_waits) say("hevcdec: conversions waited for their picture %u times, %u cs\n", st.convert_waits,
+                              st.cs_convert_wait);
+    if (done_asked) say("hevcdec_frame_done: %u of %u pictures not yet decoded when wanted\n", not_done, done_asked);
+    if (done_but_waited) {
+        say("hevcdec_frame_done WRONG: said done, then the wait waited (%u times)\n", done_but_waited);
+        wrong++;
+    }
     if (!timing) say("%d checked against FFmpeg: %d wrong\n", done, wrong);
     if (st.overruns) {
         say("hevcdec: the block wrote past the end of %u buffers, at most %u bytes past %s (into their guard areas)\n",

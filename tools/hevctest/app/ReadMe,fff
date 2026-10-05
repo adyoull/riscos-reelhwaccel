@@ -88,6 +88,13 @@ That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
 
+0.1.12 (hevcdec 0.1.11): a frame is cleaned and invalidated once after
+the block writes it, however many times it's converted; the summary
+says how many times that was, and how often a conversion had to wait
+for its picture. Pipelined runs also ask hevcdec_frame_done (a check
+that doesn't wait) before each wait, and say how many pictures weren't
+decoded yet when wanted.
+
 0.1.11 (hevcdec 0.1.10): fixes from a code audit. Halving 10-bit
 pictures no longer turns the brightest pixels black, and halving down
 to the frame's last row no longer reads past it; a stream whose

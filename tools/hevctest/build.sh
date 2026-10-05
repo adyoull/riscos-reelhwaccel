@@ -7,7 +7,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
-V=${1:-0.1.11}
+V=${1:-0.1.12}
 CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 ELF2AIF=${ELF2AIF:-$TOP/tools/elf2aif/elf2aif}
 FFMPEG=${FFMPEG:-ffmpeg}

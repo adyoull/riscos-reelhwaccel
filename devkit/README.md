@@ -70,6 +70,10 @@ cropping applied. Ask for it by name (`-c:v hevc_hwdec`, or
   - Weighted prediction uses all 16 references (it stopped at 15).
   - `hevcdec_frame_to_i420_half`: 10-bit samples averaging 1022 or more stay 255 (they wrapped to 0, black), and halving to the frame's last chroma row with an odd height doesn't read below it.
   - **API:** `hevcdec_frame_to_i420` now returns an int, like `_16` and `_half`: HEVCDEC_OK, HEVCDEC_UNSUPPORTED for a window outside the frame (or an odd x or y), HEVCDEC_ERROR if the picture can't be finished. Code that ignores the result still compiles and works.
+- **Once per picture, and without waiting (devkit 0.2.10, hevcdec 0.1.11):**
+  - A frame is cleaned and invalidated once after the block writes it, not on every conversion call: sub-window, halved, history or sprite copies of the same picture pay for it once (about 1.3 ms for a 4K 10-bit frame on a Pi 4).
+  - `hevcdec_frame_done(d, f)` says, without waiting, whether a picture is decoded (1) or still in the block (0). It also sees finished phases and starts the next. A player that has fallen behind can show a picture that's done and keep the one on screen rather than wait for one that isn't.
+  - `hevcdec_stats` has three more fields at the end: `convert_waits` and `cs_convert_wait` (conversions that waited for their picture, and how long), and `cache_cleans`. Rebuild with the new header: the struct is bigger.
 - **Options:** `output_hw` (above), `drop_before` (above), `output_8bit` (default off; see 10-bit), `pipelined` (default on: the block decodes while FFmpeg parses the next picture; one picture is held back, so output is a picture later) and `cached_frames` (default on: the block's frames are cacheable, cleaned and invalidated before conversion, about twice as quick to convert).
 - **Threads:** the decoder runs FFmpeg's HEVC decoder single-threaded; the parallelism is the block's.
 - **Seeking:** `avcodec_flush_buffers` as for `hevc`.

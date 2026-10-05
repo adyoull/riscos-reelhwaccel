@@ -32,6 +32,7 @@ struct hevcdec_frame {
     int used;
     int cached;                          /* cacheable: invalidated before it's read */
     int submitted;                       /* given to the block: decoded when vb.state is set */
+    int clean;                           /* (0.1.11) cleaned and invalidated since the block wrote it */
     char err[160];                       /* why the block failed it */
     hevcdec *d;                          /* (its decoder) */
 };
@@ -539,6 +540,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
     cap_p = &d->src_caps[d->src_next];       /* picture refused here never reaches phase 1, so keeps none) */
     f->used = 1;
     f->submitted = 0;
+    f->clean = 0;                            /* (the block writes it again: invalidated before it's next read) */
     f->err[0] = 0;
     f->vb.timestamp = number;
     f->vb.state = 0;
@@ -601,17 +603,31 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
 static const uint8_t *frame_ready(hevcdec *d, const hevcdec_frame *f)
 {
     const uint8_t *b = f->vb.vaddr;
-    if (f->submitted && !f->vb.state) hevcdec_frame_wait(d, (hevcdec_frame *)f);   /* (still being decoded) */
+    hevcdec_frame *fw = (hevcdec_frame *)f;
+    if (f->submitted && !f->vb.state) {      /* (still being decoded: waited for, and counted) */
+        uint32_t t0 = hevcdec_hw_now_cs();
+        hevcdec_frame_wait(d, fw);
+        d->stats.convert_waits++;
+        d->stats.cs_convert_wait += hevcdec_hw_now_cs() - t0;
+    }
     if (f->submitted && !f->vb.state) {      /* (0.1.10) the decoder stopped with the block still at it: the */
         fail(d, "The picture wasn't finished: not converted");   /* frame may still be being written */
         return NULL;
     }
-    if (f->cached) {
-        uint32_t t0 = hevcdec_hw_now_cs();
+    if (f->cached && !f->clean) {            /* (0.1.11) once after the block wrote it, not every conversion: the */
+        uint32_t t0 = hevcdec_hw_now_cs();   /* program only reads the frame, so nothing it caches goes stale */
         hevcdec_hw_cache_clean_inv(d->hw, b, f->vb.planes[0].length);
         d->stats.cs_cache += hevcdec_hw_now_cs() - t0;
+        d->stats.cache_cleans++;
+        fw->clean = 1;
     }
     return b;
+}
+
+int hevcdec_frame_done(hevcdec *d, const hevcdec_frame *f)
+{
+    if (!d->dead) poll_phases(d);
+    return !f->submitted || f->vb.state != 0 || d->dead;
 }
 
 /* (between columns of a conversion: a phase that has finished is seen, and
