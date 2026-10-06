@@ -65,7 +65,7 @@ FF=$O/build/ffmpeg
 Q="$TOP/tests/qemu/aligntrap.sh"
 echo "== hevc_hwdec in FFmpeg 5.1.10 (the ffmpeg command on the fake HEVC block: every picture, pipelined"
 echo "   and not, cached and not, -ss, a raw stream, cropped; 10-bit, 8-bit from 10-bit, 4K; 4:2:2, 12-bit and"
-echo "   no block refused; a size change part way; damaged streams)"
+echo "   no block refused; a size change part way; damaged streams; skip_frame noref)"
 
 clean() {   # the fake's report in file $1: no complaints, nothing wrong, nothing left
   grep -q "fake_hevc: 0 complaints, .* 0 references wrong, 0 pictures unknown, 0 stale factors, 0 evictions, 0 buffers not freed" "$1"
@@ -175,6 +175,28 @@ for t in small:small.mp4:352x288:8:small.yuv small10:small10.mp4:352x288:10:smal
     { echo "FAIL: output_hw, $n: $(cat "$O/hw.$n.out")"; cmp "$O/hw.$n.yuv" "$refp"; cmp "$O/hw.$n.half.yuv" "$O/hw.$n.want.half.yuv";
       cat "$O/hw.$n.err"; bad=1; }
 done
+
+# (devkit 0.2.11) skip_frame noref: the non-reference pictures never given to the block (the fake sees only
+# the others), the rest exactly the hevc decoder's with the same skip_frame, and the count said
+for n in small small10; do
+  pf=yuv420p; case $n in *10) pf=yuv420p10le ;; esac
+  export HEVC_FAKE_TRACE=$C/$n.trace HEVC_FAKE_YUV=$C/$n.yuv HEVC_FAKE_SIZE=352x288
+  "$Q" "$FF" -nostdin -loglevel error -skip_frame noref -c:v hevc -i "$C/$n.mp4" -f framecrc - 2>/dev/null |
+    awk -F', ' '!/^#/{print $6}' > "$O/noref.$n.want"
+  "$Q" "$FF" -nostdin -loglevel verbose -skip_frame noref -c:v hevc_hwdec -i "$C/$n.mp4" -f framecrc - 2> "$O/noref.$n.err" |
+    awk -F', ' '!/^#/{print $6}' > "$O/noref.$n.got"
+  k=$(wc -l < "$O/noref.$n.want")
+  [ "$k" -gt 0 ] && [ "$k" -lt 20 ] && cmp -s "$O/noref.$n.got" "$O/noref.$n.want" && clean "$O/noref.$n.err" &&
+    grep -q "$((20 - k)) non-reference pictures skipped (skip_frame)" "$O/noref.$n.err" &&
+    grep -q "fake_hevc: 0 complaints, $k phase 1s, $k phase 2s" "$O/noref.$n.err" ||
+    { echo "FAIL: -skip_frame noref, $n (keep $k):"; grep "skipped\|fake_hevc\|rror" "$O/noref.$n.err"; bad=1; }
+done
+# and set part way, as a player behind would, through output_hw: every picture shown or skipped, the count read
+export HEVC_FAKE_TRACE=$C/small.trace HEVC_FAKE_YUV=$C/small.yuv HEVC_FAKE_SIZE=352x288
+"$Q" "$O/hevc_hw_test" "$C/small.mp4" "$O/hwn.yuv" "$O/hwn.half.yuv" 12 - 8 > "$O/hwn.out" 2> "$O/hwn.err" &&
+  sh=$(sed -n 's/.*: \([0-9]*\) pictures shown, 8-bit, \([0-9]*\) skipped/\1 \2/p' "$O/hwn.out") &&
+  [ -n "$sh" ] && [ "${sh#* }" -gt 0 ] && [ $(( ${sh% *} + ${sh#* } )) = 20 ] && clean "$O/hwn.err" ||
+  { echo "FAIL: skip_frame noref set part way (output_hw): $(cat "$O/hwn.out")"; cat "$O/hwn.err"; bad=1; }
 
 # a picture the block fails (its phase 1 doesn't finish properly): given out, flagged corrupt
 HEVC_FAKE_FAIL=4 HEVC_FAKE_QUIET=1 "$Q" "$FF" -nostdin -loglevel warning -c:v hevc_hwdec -i "$C/small.mp4" -f null - \

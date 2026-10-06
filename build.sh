@@ -14,4 +14,4 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"
 if [ -n "${FFMPEG_TARBALL:-}" ]; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.12}"
 else echo "HEVCTest: skipped (set FFMPEG_TARBALL for its traces)"; fi
-"$HERE/devkit/build.sh" "${DEVKIT:-0.2.10}"
+"$HERE/devkit/build.sh" "${DEVKIT:-0.2.11}"

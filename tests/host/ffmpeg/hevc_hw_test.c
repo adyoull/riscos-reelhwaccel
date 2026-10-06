@@ -7,7 +7,9 @@
  * avcodec_free_context and converted after it, nothing logged through the
  * freed context (hevcdec closes with the last frame, and says so).
  *
- *   hevc_hw_test IN.mp4 OUT.yuv HALF.yuv [queue [drop_before]]
+ *   hevc_hw_test IN.mp4 OUT.yuv HALF.yuv [queue [drop_before [noref_from]]]
+ * (noref_from: skip_frame AVDISCARD_NONREF set from that packet on, as a
+ * player that has fallen behind would; the count read from "skipped")
  * OUT: the 1:1 pictures (yuv420p, or yuv420p10le for 10-bit); HALF: the
  * halved ones (yuv420p, w/2 x h/2). The fake HEVC block (hevc_fake_env.c,
  * from the environment) decodes.
@@ -77,7 +79,8 @@ int main(int argc, char **argv)
     const AVCodec *codec;
     AVPacket *pkt = av_packet_alloc();
     AVFrame *f;
-    int vs, ret, qn = argc > 4 ? atoi(argv[4]) : 12, eof = 0;
+    int vs, ret, qn = argc > 4 ? atoi(argv[4]) : 12, eof = 0, npkt = 0, noref_from = argc > 6 ? atoi(argv[6]) : -1;
+    int64_t skipped = -1;
     if (argc < 4 || qn < 1 || qn > QMAX) { fprintf(stderr, "usage: hevc_hw_test in.mp4 out.yuv half.yuv [queue [drop_before]]\n"); return 2; }
     if (!(out1 = fopen(argv[2], "wb")) || !(outh = fopen(argv[3], "wb"))) return 2;
     if (avformat_open_input(&fc, argv[1], NULL, NULL) < 0 || avformat_find_stream_info(fc, NULL) < 0) return 2;
@@ -89,13 +92,17 @@ int main(int argc, char **argv)
     depth = av_pix_fmt_desc_get(fc->streams[vs]->codecpar->format) ?
             av_pix_fmt_desc_get(fc->streams[vs]->codecpar->format)->comp[0].depth : 8;
     av_opt_set_int(c->priv_data, "output_hw", 1, 0);
-    if (argc > 5) av_opt_set_int(c->priv_data, "drop_before", strtoll(argv[5], NULL, 10), 0);
+    if (argc > 5 && strcmp(argv[5], "-")) av_opt_set_int(c->priv_data, "drop_before", strtoll(argv[5], NULL, 10), 0);
     if ((ret = avcodec_open2(c, codec, NULL)) < 0) { fprintf(stderr, "FAIL: open: %d\n", ret); return 1; }
     if (c->pix_fmt != AV_PIX_FMT_HEVCDEC) { fprintf(stderr, "FAIL: pix_fmt %d after open\n", c->pix_fmt); return 1; }
     while (!eof) {
         if (av_read_frame(fc, pkt) < 0) { avcodec_send_packet(c, NULL); eof = 1; }
         else if (pkt->stream_index != vs) { av_packet_unref(pkt); continue; }
-        else { avcodec_send_packet(c, pkt); av_packet_unref(pkt); }
+        else {
+            if (noref_from >= 0 && npkt++ == noref_from) c->skip_frame = AVDISCARD_NONREF;
+            avcodec_send_packet(c, pkt);
+            av_packet_unref(pkt);
+        }
         for (;;) {
             f = av_frame_alloc();
             ret = avcodec_receive_frame(c, f);
@@ -108,11 +115,18 @@ int main(int argc, char **argv)
             }
         }
     }
+    if (av_opt_get_int(c, "skipped", AV_OPT_SEARCH_CHILDREN, &skipped) < 0) {
+        fprintf(stderr, "FAIL: no \"skipped\" option\n");
+        return 1;
+    }
     /* the decoder closed with frames still held: they stay convertible */
     av_log_set_level(AV_LOG_DEBUG);
     av_log_set_callback(log_cb);
-    freed_ctx = c;
-    avcodec_free_context(&c);
+    {
+        const void *was = c;                /* (its own closing messages, while it still exists, are fine) */
+        avcodec_free_context(&c);
+        freed_ctx = was;
+    }
     for (int i = 0; i < nq; i++) { if (show(q[i])) return 1; av_frame_free(&q[i]); }
     avformat_close_input(&fc);
     av_packet_free(&pkt);
@@ -121,6 +135,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "FAIL: %d messages through the freed context (%d after it was freed)\n", logged_freed, logged_after);
         return 1;
     }
-    printf("hevc_hw_test: %d pictures shown, %d-bit\n", shown, depth);
+    printf("hevc_hw_test: %d pictures shown, %d-bit, %lld skipped\n", shown, depth, (long long)skipped);
     return 0;
 }

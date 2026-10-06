@@ -130,6 +130,7 @@ typedef struct HWDecContext {
     int64_t drop_before;        /* pictures with an earlier pts (pkt_timebase) are decoded but not converted or given out */
     int output_hw;              /* frames given out unconverted (AV_PIX_FMT_HEVCDEC): the caller converts them */
     unsigned dropped;
+    int64_t skipped;            /* non-reference pictures not given to the block (skip_frame >= AVDISCARD_NONREF) */
 } HWDecContext;
 
 typedef struct HWDecPicture {
@@ -722,6 +723,8 @@ static av_cold int hwdec_close(AVCodecContext *avctx)
     HWDecContext *w = avctx->priv_data;
     if (w->dropped)
         av_log(avctx, AV_LOG_VERBOSE, "%u late pictures decoded but not converted (drop_before)\n", w->dropped);
+    if (w->skipped)
+        av_log(avctx, AV_LOG_VERBOSE, "%"PRId64" non-reference pictures skipped (skip_frame)\n", w->skipped);
     av_frame_free(&w->hwf);
     av_frame_free(&w->held);
     av_packet_free(&w->pkt);
@@ -852,6 +855,18 @@ static void drop(HWDecContext *w, AVFrame *f)
     w->dropped++;
 }
 
+/* the pictures of the packet just decoded that skip_frame kept from the block: its non-reference
+   pictures' first slices (FFmpeg's HEVC decoder skips every such NAL unit at AVDISCARD_NONREF) */
+static void count_skipped(HWDecContext *w)
+{
+    const HEVCContext *h = w->inner->priv_data;
+    for (int i = 0; i < h->pkt.nb_nals; i++) {
+        const H2645NAL *nal = &h->pkt.nals[i];
+        if (nal->nuh_layer_id == 0 && ff_hevc_nal_is_nonref(nal->type) && nal->size > 2 && (nal->data[2] & 0x80))
+            w->skipped++;                    /* (first_slice_segment_in_pic_flag: one a picture) */
+    }
+}
+
 static int hwdec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 {
     HWDecContext *w = avctx->priv_data;
@@ -903,7 +918,13 @@ static int hwdec_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         } else if (ret < 0) {
             return ret;
         } else {
+            /* (the caller's skip_frame, as it is now: a player that's behind sets AVDISCARD_NONREF so the
+               block isn't given the pictures nothing refers to, and can catch up; FFmpeg's HEVC decoder
+               drops their NAL units before parsing them, so they never reach the hwaccel) */
+            w->inner->skip_frame = avctx->skip_frame;
             ret = avcodec_send_packet(w->inner, w->pkt);
+            if (ret >= 0 && avctx->skip_frame >= AVDISCARD_NONREF && avctx->skip_frame < AVDISCARD_ALL)
+                count_skipped(w);
             av_packet_unref(w->pkt);
         }
         if (ret < 0 && ret != AVERROR(EAGAIN)) {
@@ -939,6 +960,9 @@ static const AVOption options[] = {
       INT64_MAX, VD },
     { "output_hw", "give frames out unconverted (AV_PIX_FMT_HEVCDEC, data[3] the hevcdec_frame) for the caller to convert "
       "with hevcdec_frame_to_i420(_16, _half)", OFFSET(output_hw), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VD },
+    { "skipped", "(read only) non-reference pictures kept from the block by skip_frame (AVDISCARD_NONREF): a player "
+      "that's behind sets skip_frame, and reads this to say how many", OFFSET(skipped), AV_OPT_TYPE_INT64, { .i64 = 0 },
+      0, INT64_MAX, AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_EXPORT | AV_OPT_FLAG_READONLY },
     { NULL }
 };
 

@@ -1,5 +1,29 @@
 # Changes
 
+## devkit 0.2.11: hevc_hwdec honours skip_frame (2026-10-06)
+
+riscos-ffmpeg asked (FFmpeg/handoffs/2026-10-06-reelhwaccel-skip-nonref-request):
+at 4K 10-bit 60 fps and about 40 Mbit/s the block only just keeps up, so
+once Reel falls behind it can't catch up; drop_before saves the ARM's
+conversion but not the block's decoding.
+
+- hevc_hwdec: the caller's skip_frame is passed to the inner HEVC
+  decoder before each packet (it wasn't at all: one of the audit's low
+  items). At AVDISCARD_NONREF FFmpeg 5.1's decoder drops non-reference
+  NAL units (ff_hevc_nal_is_nonref) before parsing, so those pictures
+  never reach the block.
+- The count: the read-only option "skipped" (non-reference pictures'
+  first slices in the packets decoded while skip_frame >= NONREF), and
+  "N non-reference pictures skipped (skip_frame)" at close (verbose).
+- hevcdec unchanged (0.1.11); HEVCTest unchanged (0.1.12).
+- Tests: -skip_frame noref on small and small10: exactly the hevc
+  decoder's pictures with the same skip_frame, the fake given only
+  those, the count logged; set part way through output_hw (as a player
+  behind would): every picture shown or skipped, the count read through
+  the option. hevc_hw_test's freed-context check now starts once the
+  context is gone (its own closing messages are fine). Mutants caught:
+  skip_frame not passed, not counted.
+
 ## hevcdec 0.1.11, HEVCTest 0.1.12, devkit 0.2.10: once a picture, and without waiting (2026-10-05)
 
 riscos-ffmpeg asked (FFmpeg/handoffs/2026-10-05-reelhwaccel-cache-invalidate-per-call):
