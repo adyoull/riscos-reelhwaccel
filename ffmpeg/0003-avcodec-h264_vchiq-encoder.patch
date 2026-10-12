@@ -1,6 +1,6 @@
-From f17b8522d7d93781f9ffcd8dff2a124710aa425a Mon Sep 17 00:00:00 2001
+From 6f1266fd0a555d07cd71718e94d66692e0723e1d Mon Sep 17 00:00:00 2001
 From: Andrew Youll <andrewyoull86@gmail.com>
-Date: Mon, 12 Oct 2026 10:29:26 +0100
+Date: Mon, 12 Oct 2026 10:48:23 +0100
 Subject: [PATCH] avcodec: add h264_vchiq encoder (RISC OS, Raspberry Pi
  VideoCore)
 
@@ -57,7 +57,7 @@ index 5014510..3865eb6 100644
  extern const FFCodec ff_h264_vaapi_encoder;
 diff --git a/libavcodec/vchiqenc.c b/libavcodec/vchiqenc.c
 new file mode 100644
-index 0000000..7ac2781
+index 0000000..7ceab22
 --- /dev/null
 +++ b/libavcodec/vchiqenc.c
 @@ -0,0 +1,306 @@
@@ -324,7 +324,7 @@ index 0000000..7ac2781
 +#define OFFSET(x) offsetof(VCHIQEncContext, x)
 +#define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
 +static const AVOption options[] = {
-+    { "rc_constant", "constant bit rate (if the encoder refuses it: constant skipping frames, then variable)",
++    { "rc_constant", "constant bit rate (tried several ways; if the encoder takes none, variable)",
 +      OFFSET(rc_constant), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
 +    { "repeat_headers", "SPS and PPS at the start of every keyframe", OFFSET(repeat_headers), AV_OPT_TYPE_BOOL,
 +      { .i64 = 0 }, 0, 1, VE },

@@ -19,6 +19,19 @@ The encoder needs gpu_mem=128 or more in CONFIG/TXT for 1080p (as the
 decoder does). VCEncTest says how much the VideoCore has at the start of
 each run.
 
+New in 0.1.2 (vcenc 0.1.2), after 0.1.1's Options:
+  - "-i" now passes: vcenc gives every keyframe its SPS and PPS.
+  - "-c" still failed, and the report showed why: once the encoder had
+    refused an enable, it refused every enable after it, even with
+    variable rate control. vcenc 0.1.2 makes the encoder again for each
+    way it tries: 2 (constant) set before the enable, 4 (constant,
+    skipping frames) before it, then variable before it and constant
+    once it's running. The report says which one took ("set once
+    running" for the last).
+  - CBR (new, run this): the constant runs alone, at 360p, 720p and
+    1080p, each beside a variable run at the same bit rate, so we can
+    see whether "constant" holds the bit rate. Writes ResultC.
+
 New in 0.1.1 (vcenc 0.1.1), after 0.1's run on the Pi 4:
   - Every run passed except two in Options. The streams play in FFmpeg.
     1080p30 encodes at about 72 pictures a second.
@@ -32,7 +45,7 @@ New in 0.1.1 (vcenc 0.1.1), after 0.1's run on the Pi 4:
     constant and 2 Mbit/s each on their own as well, and constant at
     720p over 100 pictures, to see whether the bit rate holds.
 
-Running it (please send back ResultO, and Result if you have time):
+Running it (please send back ResultC):
   Verbose  Run this first. 320x180, 10 pictures, with every MMAL message
            in the report: how the firmware answers the ports, the
            settings and the buffers. If anything else fails, this shows
@@ -80,4 +93,4 @@ Options (for running it by hand):
 Needs SharedUnixLibrary and ARMEABISupport (from PackMan), RISC OS 5.28
 or later on a Raspberry Pi.
 
-VCEncTest 0.1.1 (vcenc 0.1.1). Part of riscos-reelhwaccel, GPL version 2.
+VCEncTest 0.1.2 (vcenc 0.1.2). Part of riscos-reelhwaccel, GPL version 2.

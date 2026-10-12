@@ -62,7 +62,9 @@ static uint64_t e_slow_pts;
 static uint8_t e_pic[1920 * 1088 * 3 / 2], e_slow_pic[1920 * 1088 * 3 / 2];
 static int e_quiet, e_error_at = -1, e_pim = 1, e_rx_late;
 static uint32_t e_refuse_id, e_out_min = 65536;
-static int e_refuse_rc4;                     /* rate control 4 refused too (2 always is, as the Pi 4: at the input's enable) */
+static int e_refuse_rc4 = 1;                 /* rate control 4 refused at the input's enable too (2 always is, as the Pi 4) */
+static int e_refuse_rc_running;              /* rate control refused once the ports are on */
+static int e_broken;                         /* an enable was refused: every enable is now (as the Pi 4), until made again */
 static int e_big_at = -1;                    /* this picture's unit: 100000 bytes (two pieces) */
 static int pts_late;                         /* a unit's pts on its last piece (else its first); KEYFRAME on the first */
 /* state */
@@ -222,6 +224,8 @@ static void e_firmware(const uint32_t *m, uint32_t len)
         uint32_t r[5] = { 0, 0xE1C, 3, 1, 1 };
         CHECK(!strcmp((const char *)&p[1], "ril.video_encode"), "create %s", (const char *)&p[1]);
         e_created++;
+        e_broken = 0;                        /* (a new component: as the Pi, it enables again, and sends its CONFIG) */
+        e_config_out = 0;
         e_reply(m, r, sizeof r, 0);
         break;
     }
@@ -264,6 +268,7 @@ static void e_firmware(const uint32_t *m, uint32_t len)
         CHECK(p[0] == 0xE1C && p[1] >= EP_CTL && p[1] <= EP_OUT && p[3] >= 12 && p[3] <= 24 && (p[3] & 3) == 0,
               "parameter &%X on %u, size %u", p[2], p[1], p[3]);
         if (p[2] == e_refuse_id) st = 4;     /* ENOSYS */
+        else if (p[2] == P_RATECONTROL && (e_port_on[1] || e_port_on[2]) && e_refuse_rc_running) st = 3;
         else if (p[2] == P_REQ_I) e_force = 1;
         else if (neparams < 64) {
             param_t *q = &eparams[neparams++];
@@ -287,7 +292,8 @@ static void e_firmware(const uint32_t *m, uint32_t len)
         CHECK(port == 2 || port == 3, "port action on %u", p[1]);
         if (p[2] == 1) {
             const param_t *rc = param(P_RATECONTROL);
-            if (port == 2 && rc && (rc->v[0] == 2 || (rc->v[0] == 4 && e_refuse_rc4))) {
+            if (e_broken || (port == 2 && rc && (rc->v[0] == 2 || (rc->v[0] == 4 && e_refuse_rc4)))) {
+                e_broken = 1;
                 r = 3;                       /* EINVAL, and the port stays off */
                 e_reply(m, &r, 4, 0);
                 break;
@@ -414,7 +420,7 @@ static void enc_reset(void)
     if (!pmp_live && !pci_live) npci_blocks = 0;   /* (the fake's blocks above 32 would be above 1 GB) */
     for (int i = 0; i < e_npieces; i++) free(e_pieces[i].d);
     neparams = 0;
-    e_hold_in = e_quiet = 0; e_slow = e_slow_pending = 0; e_error_at = -1; e_pim = 1; e_rx_late = 0; e_refuse_id = 0; e_refuse_rc4 = 0; e_out_min = 65536; e_big_at = -1; pts_late = 0;
+    e_hold_in = e_quiet = 0; e_slow = e_slow_pending = 0; e_error_at = -1; e_pim = 1; e_rx_late = 0; e_refuse_id = 0; e_refuse_rc4 = 1; e_refuse_rc_running = 0; e_broken = 0; e_out_min = 65536; e_big_at = -1; pts_late = 0;
     e_created = e_destroyed = e_enabled = e_frames = e_eos_in = e_eos_out = e_force = e_config_out = 0;
     memset(e_port_on, 0, sizeof e_port_on);
     e_in_stride = e_in_rows = e_crop_w = e_crop_h = e_in_size_set = e_out_size_set = e_in_enc = e_out_enc = 0;

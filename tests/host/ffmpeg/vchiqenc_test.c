@@ -171,7 +171,7 @@ int main(void)
     run("global headers", t);
     CHECK(fake_vcenc_param(P_BITRATE, 0) == 3000000 && fake_vcenc_param(P_INTRAPERIOD, 0) == 5 &&
           fake_vcenc_param(P_PROFILE, 0) == 26 && fake_vcenc_param(P_PROFILE, 1) == 0x1D &&
-          fake_vcenc_param(P_RATECONTROL, 0) == 4 && fake_vcenc_param(P_MINQ, 0) == 18 && fake_vcenc_param(P_MAXQ, 0) == 38,
+          fake_vcenc_param(P_RATECONTROL, 0) == 2 && fake_vcenc_param(P_MINQ, 0) == 18 && fake_vcenc_param(P_MAXQ, 0) == 38,
           "global headers: the settings");
 
     /* repeat_headers; a frame with pict_type I; baseline */

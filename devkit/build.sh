@@ -6,7 +6,7 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
-V=${1:-0.2.12}
+V=${1:-0.2.13}
 CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V

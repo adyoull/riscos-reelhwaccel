@@ -218,7 +218,7 @@ struct vcenc {
     uint8_t *row;                          /* (PCI memory: a row built here, then copied in) */
     uint8_t *evbuf;
     uint32_t evsize;
-    int sent_any, eos_sent, eos_back, eos_seen, heard_output;
+    int sent_any, eos_sent, eos_back, eos_seen, heard_output, enable_failed;
     uint32_t t_first_send, last_heard;
     vcenc_stats stats;
 };
@@ -767,7 +767,11 @@ static int level_for(const vcenc_config *c)
     return 42;
 }
 
-static int create_component(vcenc *e)
+/* rc_before: the rate control set before the ports are enabled; with
+   rc_after (constant asked for), 2 and then 4 are tried once they're
+   running. An enable that fails sets enable_failed (the component is then
+   no use: the Pi 4 refused every later enable on it, VCEncTest 0.1.1) */
+static int create_component(vcenc *e, uint32_t rc_before, int rc_after)
 {
     const vcenc_config *c = &e->cfg;
     uint32_t req[1 + 32 + 1], v[2];
@@ -836,7 +840,7 @@ static int create_component(vcenc *e)
     if (param_set(e, &e->out_info, P_PROFILE, v, 2, 1, "Profile and level")) return -1;
     v[0] = c->bitrate;
     if (param_set(e, &e->out_info, P_BIT_RATE, v, 1, 1, "Bit rate")) return -1;
-    v[0] = c->flags & VCENC_CBR ? 2 : 1;
+    v[0] = rc_before;
     e->stats.rate_control = param_set(e, &e->out_info, P_RATECONTROL, v, 1, 0, "Rate control") ? 0 : (int)v[0];
     if (c->gop > 0) { v[0] = (uint32_t)c->gop; param_set(e, &e->out_info, P_INTRAPERIOD, v, 1, 0, "Keyframe period"); }
     if (c->qp_min > 0) { v[0] = (uint32_t)c->qp_min; param_set(e, &e->out_info, P_MIN_QUANT, v, 1, 0, "Smallest quantiser"); }
@@ -846,21 +850,22 @@ static int create_component(vcenc *e)
     if (e->failed) return -1;
     if (simple(e, T_COMPONENT_ENABLE, "Enable")) return -1;
     e->enabled = 1;
-    /* (on the Pi 4, constant bit rate made the input's enable fail with
-       EINVAL (VCEncTest 0.1): then constant skipping frames, then variable) */
-    while (port_action(e, &e->in_info, ACTION_ENABLE, "Input enable")) {
-        uint32_t next = e->stats.rate_control == 2 ? 4 : e->stats.rate_control == 4 ? 1 : 0;
-        if (!next) return -1;
-        logf_(e, "%s with rate control %d: trying %u", e->err, e->stats.rate_control, (unsigned)next);
-        e->failed = 0;
-        e->err[0] = 0;
-        v[0] = next;
-        if (param_set(e, &e->out_info, P_RATECONTROL, v, 1, 0, "Rate control")) return -1;
-        e->stats.rate_control = (int)next;
-    }
+    if (port_action(e, &e->in_info, ACTION_ENABLE, "Input enable")) { e->enable_failed = 1; return -1; }
     e->in_on = 1;
-    if (port_action(e, &e->out_info, ACTION_ENABLE, "Output enable")) return -1;
+    if (port_action(e, &e->out_info, ACTION_ENABLE, "Output enable")) { e->enable_failed = 1; return -1; }
     e->out_on = 1;
+    if (rc_after) {                        /* constant, set on the running encoder */
+        static const uint32_t rcs[2] = { 2, 4 };
+        for (int k = 0; k < 2; k++) {
+            v[0] = rcs[k];
+            if (!param_set(e, &e->out_info, P_RATECONTROL, v, 1, 0, "Rate control (running)")) {
+                e->stats.rate_control = (int)rcs[k];
+                e->stats.rate_control_running = 1;
+                break;
+            }
+            if (e->failed) return -1;
+        }
+    }
     return give_outputs(e);
 }
 
@@ -982,7 +987,24 @@ int vcenc_open(vcenc **out, const vcenc_config *c)
     }
     e->opened = 1;
     swi(VCHIQ_ServiceRelease, e->handle, 0, 0, 0, NULL, NULL);
-    if (create_component(e)) goto bad;
+    {   /* constant bit rate: set before the enables (2, then 4), else variable
+           then constant once running; each try a new component (the Pi 4
+           refused 2 at the input's enable, and every enable after that) */
+        static const struct { uint32_t before; int after; } cbr[3] = { { 2, 0 }, { 4, 0 }, { 1, 1 } };
+        int tries = c->flags & VCENC_CBR ? 3 : 1;
+        for (int k = 0; k < tries; k++) {
+            uint32_t before = c->flags & VCENC_CBR ? cbr[k].before : 1;
+            e->enable_failed = 0;
+            if (!create_component(e, before, c->flags & VCENC_CBR ? cbr[k].after : 0)) break;
+            if (!e->enable_failed || k + 1 == tries) goto bad;
+            logf_(e, "%s with rate control %u: the encoder made again, trying %s", e->err, (unsigned)before,
+                  cbr[k + 1].after ? "variable, then constant once running" : "4 (constant, skipping frames)");
+            destroy_component(e);
+            if (e->created) { fail(e, VCENC_ERROR, "The encoder couldn't be destroyed to try again"); goto bad; }
+            e->failed = 0;
+            e->err[0] = 0;
+        }
+    }
     *out = e;
     return VCENC_OK;
 bad:

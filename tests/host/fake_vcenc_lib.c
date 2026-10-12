@@ -24,7 +24,7 @@ int *fake_vcenc_var(const char *name)
     static const struct { const char *n; int *p; } v[] = {
         { "slow", &e_slow }, { "hold_in", &e_hold_in }, { "quiet", &e_quiet }, { "error_at", &e_error_at },
         { "rx_late", &e_rx_late }, { "frames", &e_frames }, { "created", &e_created }, { "destroyed", &e_destroyed },
-        { "pad_bad", &e_pad_bad }, { "big_at", &e_big_at }, { "refuse_rc4", &e_refuse_rc4 },
+        { "pad_bad", &e_pad_bad }, { "big_at", &e_big_at }, { "refuse_rc4", &e_refuse_rc4 }, { "refuse_rc_running", &e_refuse_rc_running },
     };
     for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++)
         if (!strcmp(v[i].n, name)) return v[i].p;

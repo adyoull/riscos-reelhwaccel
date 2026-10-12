@@ -1,5 +1,31 @@
 # Changes
 
+## vcenc 0.1.2, devkit 0.2.13, VCEncTest 0.1.2: constant bit rate made again each way (2026-10-12)
+
+VCEncTest 0.1.1's Options on the Pi 4: `-i` passes (every keyframe given
+its SPS and PPS, 4 of 4), and 2 Mbit/s on its own is fine. `-c` still
+failed: after the input's enable was refused with rate control 2, the
+encoder refused every enable after it, 4 and then even 1 (variable),
+which opens normally on a new encoder.
+
+- vcenc 0.1.2: with VCENC_CBR, each way is tried on a new encoder
+  (destroyed and made again after a refused enable): 2 before the
+  enables, 4 before them, then 1 before them and 2 (else 4) set once the
+  ports are running. `rate_control` says which took, and
+  `rate_control_running` whether it was set while running. Without
+  VCENC_CBR nothing changes.
+- devkit 0.2.13: vcenc 0.1.2 (the patches are as in 0.2.12, apart from
+  the wording of rc_constant's help).
+- VCEncTest 0.1.2: the report says "set once running"; a CBR Obey file
+  (ResultC) runs constant at 360p, 720p and 1080p beside variable at the
+  same bit rates, to see whether constant holds the rate.
+- Tests: the fake encoder now refuses every enable after a refused one,
+  until it's made again (as the Pi), and refuses 4 at the enable too.
+  Scenarios: three encoders and constant once running, 4 taken on the
+  second encoder, constant refused every way. Mutants caught: no
+  fallback, constant never set while running, 4 never tried, the encoder
+  not made again.
+
 ## vcenc 0.1.1, devkit 0.2.12 (the h264_vchiq encoder), VCEncTest 0.1.1 (2026-10-12)
 
 VCEncTest 0.1 on the Pi 4: every run in Test, Speed and Verbose passed.

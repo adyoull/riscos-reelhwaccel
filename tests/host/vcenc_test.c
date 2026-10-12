@@ -50,6 +50,7 @@ typedef struct {
     int stop_at_error;                        /* vcenc_send/receive fails part way (and says this) */
     const char *fail_has;
     int expect_rc;                            /* the rate control in the end (0: not checked) */
+    int expect_rc_running;
 } run_t;
 
 static int run(const char *name, run_t t)
@@ -150,7 +151,8 @@ static int run(const char *name, run_t t)
               s.keyframes == (unsigned)keys, "%s: stats %u %u %u %u", name, s.pictures, s.packets, s.config_packets, s.keyframes);
         CHECK(!!(t.flags & VCENC_PCI) == !s.in_pools && !!(t.flags & VCENC_PCI) == !s.out_pools, "%s: pools %d %d", name,
               s.in_pools, s.out_pools);
-        CHECK(!t.expect_rc || s.rate_control == t.expect_rc, "%s: rate control %d", name, s.rate_control);
+        CHECK(!t.expect_rc || (s.rate_control == t.expect_rc && s.rate_control_running == t.expect_rc_running),
+              "%s: rate control %d (running %d)", name, s.rate_control, s.rate_control_running);
         CHECK(s.headers_repeated == (t.flags & VCENC_INLINE_HEADERS ? (unsigned)keys : 0), "%s: %u keyframes given headers",
               name, s.headers_repeated);
         CHECK(!e_pad_bad, "%s: %d rows' padding not the edge repeated", name, e_pad_bad);
@@ -196,12 +198,19 @@ int main(void)
     /* PCI memory; receives finishing late; a keyframe asked for; headers before keyframes; main, level 4.1, CBR */
     enc_reset(); e_rx_late = 1; e_big_at = 3; pts_late = 1;
     memset(&t, 0, sizeof t); t.frames = 10; t.gop = 4; t.flags = VCENC_PCI | VCENC_INLINE_HEADERS | VCENC_CBR; t.force_at = 6;
-    t.profile = VCENC_PROFILE_MAIN; t.level = 41; t.qp_min = 20; t.qp_max = 40; t.expect_rc = 4;
-    run("pci", t);
-    params_check("pci", 26, 0x1D, 10000000, 4, 4, 20, 40, 1);
+    t.profile = VCENC_PROFILE_MAIN; t.level = 41; t.qp_min = 20; t.qp_max = 40; t.expect_rc = 2; t.expect_rc_running = 1;
+    run("pci", t);                           /* (2 and 4 refused at the enable, as the Pi: three components, 2 once running) */
+    params_check("pci", 26, 0x1D, 10000000, 2, 4, 20, 40, 1);
+    CHECK(e_created == 3, "pci: %d components made", e_created);
 
-    /* constant bit rate refused both ways: variable */
-    enc_reset(); e_refuse_rc4 = 1;
+    /* constant skipping frames taken at the enable: the second component */
+    enc_reset(); e_refuse_rc4 = 0;
+    memset(&t, 0, sizeof t); t.frames = 3; t.flags = VCENC_CBR; t.expect_rc = 4;
+    run("cbr 4", t);
+    CHECK(e_created == 2, "cbr 4: %d components made", e_created);
+
+    /* constant refused every way: variable */
+    enc_reset(); e_refuse_rc_running = 1;
     memset(&t, 0, sizeof t); t.frames = 3; t.flags = VCENC_CBR; t.expect_rc = 1;
     run("cbr refused", t);
     params_check("cbr refused", 28, 0x1A, 10000000, 1, 0, 0, 0, 0);

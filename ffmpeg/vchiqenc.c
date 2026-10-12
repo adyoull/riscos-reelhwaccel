@@ -261,7 +261,7 @@ static int vchiqenc_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
 #define OFFSET(x) offsetof(VCHIQEncContext, x)
 #define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-    { "rc_constant", "constant bit rate (if the encoder refuses it: constant skipping frames, then variable)",
+    { "rc_constant", "constant bit rate (tried several ways; if the encoder takes none, variable)",
       OFFSET(rc_constant), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { "repeat_headers", "SPS and PPS at the start of every keyframe", OFFSET(repeat_headers), AV_OPT_TYPE_BOOL,
       { .i64 = 0 }, 0, 1, VE },
