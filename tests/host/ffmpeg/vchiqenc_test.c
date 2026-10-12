@@ -1,5 +1,5 @@
 /*
- * The h264_vchiq encoder (ffmpeg/0003) through libavcodec's API, on vcenc
+ * The h264_encvchiq encoder (ffmpeg/0003) through libavcodec's API, on vcenc
  * and the fake ril.video_encode (fake_vcenc_lib.c), under qemu:
  *   - frames from av_frame_get_buffer (rows longer than the picture), each
  *     packet the fake's unit for that frame: its number and the Adler-32
@@ -50,7 +50,7 @@ typedef struct {
 
 static int run(const char *name, run_t t)
 {
-    const AVCodec *codec = avcodec_find_encoder_by_name("h264_vchiq");
+    const AVCodec *codec = avcodec_find_encoder_by_name("h264_encvchiq");
     AVCodecContext *c = avcodec_alloc_context3(codec);
     AVDictionary *d = NULL;
     AVFrame *f = av_frame_alloc();
@@ -171,12 +171,12 @@ int main(void)
     run("global headers", t);
     CHECK(fake_vcenc_param(P_BITRATE, 0) == 3000000 && fake_vcenc_param(P_INTRAPERIOD, 0) == 5 &&
           fake_vcenc_param(P_PROFILE, 0) == 26 && fake_vcenc_param(P_PROFILE, 1) == 0x1D &&
-          fake_vcenc_param(P_RATECONTROL, 0) == 2 && fake_vcenc_param(P_MINQ, 0) == 18 && fake_vcenc_param(P_MAXQ, 0) == 38,
+          fake_vcenc_param(P_RATECONTROL, 0) == 1 && fake_vcenc_param(P_MINQ, 0) == 18 && fake_vcenc_param(P_MAXQ, 0) == 38,
           "global headers: the settings");
 
     /* repeat_headers; a frame with pict_type I; baseline */
-    memset(&t, 0, sizeof t); t.frames = 16; t.g = 6; t.force_at = 9; t.b = -1; t.profile = FF_PROFILE_H264_CONSTRAINED_BASELINE;
-    t.opts = "repeat_headers=1";
+    memset(&t, 0, sizeof t); t.frames = 16; t.g = 6; t.force_at = 9; t.b = -1;
+    t.opts = "repeat_headers=1:profile=constrained_baseline";   /* (the profile by name: the private option) */
     run("repeat headers", t);
     CHECK(fake_vcenc_param(P_PROFILE, 0) == 32 && fake_vcenc_param(P_INLINE, 0) == 1, "repeat headers: the settings");
 

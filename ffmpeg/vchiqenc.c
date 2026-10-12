@@ -1,5 +1,5 @@
 /*
- * h264_vchiq encoder: H.264 encoded by the Raspberry Pi's VideoCore on
+ * h264_encvchiq: H.264 encoded by the Raspberry Pi's VideoCore on
  * RISC OS, through the VCHIQ module and the firmware's MMAL service (vcenc,
  * in riscos-reelhwaccel's libvcdec).
  *
@@ -14,8 +14,9 @@
  * packet too. A frame with pict_type I is made a keyframe.
  *
  * Settings: b (bit rate; 0, the default: 10 Mbit/s), g (keyframe
- * interval; 0, the default: the encoder's, about 60), profile (baseline,
- * main or high, the default), level, the private options below. Up to
+ * interval; 0, the default: the encoder's, about 60), profile (by name:
+ * baseline, constrained_baseline, main or high, the default; or 66, 578, 77,
+ * 100), level, the private options below. Up to
  * 1920x1088, even sizes; 1080p needs gpu_mem=128 or more.
  *
  * This encoder only waits for the VideoCore when its input is full (about
@@ -60,7 +61,7 @@ typedef struct VCHIQEncContext {
     uint8_t *hdr;                            /* the SPS and PPS (Annex B) */
     int hdr_len;
     /* options */
-    int rc_constant, repeat_headers, qp_min, qp_max, in_buffers, pci_memory, gpu_mem_check;
+    int profile, rc_constant, repeat_headers, qp_min, qp_max, in_buffers, pci_memory, gpu_mem_check;
 } VCHIQEncContext;
 
 static void log_cb(void *h, const char *text)
@@ -117,6 +118,10 @@ static av_cold int vchiqenc_init(AVCodecContext *avctx)
     }
     if (avctx->bit_rate > 0)
         c.bitrate = avctx->bit_rate > 0x7FFFFFFF ? 0x7FFFFFFFu : (unsigned)avctx->bit_rate;
+    /* (the private option, which takes names; else AVCodecContext's, which
+       in FFmpeg 5.1 takes only numbers for H.264) */
+    if (s->profile != FF_PROFILE_UNKNOWN)
+        avctx->profile = s->profile;
     switch (avctx->profile) {
     case FF_PROFILE_H264_BASELINE:
     case FF_PROFILE_H264_CONSTRAINED_BASELINE: c.profile = VCENC_PROFILE_BASELINE; break;
@@ -261,7 +266,13 @@ static int vchiqenc_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
 #define OFFSET(x) offsetof(VCHIQEncContext, x)
 #define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-    { "rc_constant", "constant bit rate (tried several ways; if the encoder takes none, variable)",
+    { "profile", "the H.264 profile", OFFSET(profile), AV_OPT_TYPE_INT, { .i64 = FF_PROFILE_UNKNOWN },
+      FF_PROFILE_UNKNOWN, 0xFFFF, VE, "profile" },
+        { "baseline", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_PROFILE_H264_BASELINE }, 0, 0, VE, "profile" },
+        { "constrained_baseline", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_PROFILE_H264_CONSTRAINED_BASELINE }, 0, 0, VE, "profile" },
+        { "main", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_PROFILE_H264_MAIN }, 0, 0, VE, "profile" },
+        { "high", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_PROFILE_H264_HIGH }, 0, 0, VE, "profile" },
+    { "rc_constant", "constant bit rate, set on the running encoder (the Pi 4's firmware refuses it: then variable)",
       OFFSET(rc_constant), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { "repeat_headers", "SPS and PPS at the start of every keyframe", OFFSET(repeat_headers), AV_OPT_TYPE_BOOL,
       { .i64 = 0 }, 0, 1, VE },
@@ -276,7 +287,7 @@ static const AVOption options[] = {
 };
 
 static const AVClass vchiqenc_class = {
-    .class_name = "h264_vchiq encoder",
+    .class_name = "h264_encvchiq",
     .item_name  = av_default_item_name,
     .option     = options,
     .version    = LIBAVUTIL_VERSION_INT,
@@ -288,8 +299,8 @@ static const FFCodecDefault vchiqenc_defaults[] = {
     { NULL },
 };
 
-const FFCodec ff_h264_vchiq_encoder = {
-    .p.name         = "h264_vchiq",
+const FFCodec ff_h264_encvchiq_encoder = {
+    .p.name         = "h264_encvchiq",
     .p.long_name    = NULL_IF_CONFIG_SMALL("H.264 on the VideoCore (RISC OS, VCHIQ)"),
     .p.type         = AVMEDIA_TYPE_VIDEO,
     .p.id           = AV_CODEC_ID_H264,

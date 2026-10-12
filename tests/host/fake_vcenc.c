@@ -63,7 +63,7 @@ static uint8_t e_pic[1920 * 1088 * 3 / 2], e_slow_pic[1920 * 1088 * 3 / 2];
 static int e_quiet, e_error_at = -1, e_pim = 1, e_rx_late;
 static uint32_t e_refuse_id, e_out_min = 65536;
 static int e_refuse_rc4 = 1;                 /* rate control 4 refused at the input's enable too (2 always is, as the Pi 4) */
-static int e_refuse_rc_running;              /* rate control refused once the ports are on */
+static int e_refuse_rc_running = 1;          /* rate control refused once the ports are on (as the Pi 4, VCEncTest 0.1.2) */
 static int e_broken;                         /* an enable was refused: every enable is now (as the Pi 4), until made again */
 static int e_big_at = -1;                    /* this picture's unit: 100000 bytes (two pieces) */
 static int pts_late;                         /* a unit's pts on its last piece (else its first); KEYFRAME on the first */
@@ -420,7 +420,7 @@ static void enc_reset(void)
     if (!pmp_live && !pci_live) npci_blocks = 0;   /* (the fake's blocks above 32 would be above 1 GB) */
     for (int i = 0; i < e_npieces; i++) free(e_pieces[i].d);
     neparams = 0;
-    e_hold_in = e_quiet = 0; e_slow = e_slow_pending = 0; e_error_at = -1; e_pim = 1; e_rx_late = 0; e_refuse_id = 0; e_refuse_rc4 = 1; e_refuse_rc_running = 0; e_broken = 0; e_out_min = 65536; e_big_at = -1; pts_late = 0;
+    e_hold_in = e_quiet = 0; e_slow = e_slow_pending = 0; e_error_at = -1; e_pim = 1; e_rx_late = 0; e_refuse_id = 0; e_refuse_rc4 = 1; e_refuse_rc_running = 1; e_broken = 0; e_out_min = 65536; e_big_at = -1; pts_late = 0;
     e_created = e_destroyed = e_enabled = e_frames = e_eos_in = e_eos_out = e_force = e_config_out = 0;
     memset(e_port_on, 0, sizeof e_port_on);
     e_in_stride = e_in_rows = e_crop_w = e_crop_h = e_in_size_set = e_out_size_set = e_in_enc = e_out_enc = 0;

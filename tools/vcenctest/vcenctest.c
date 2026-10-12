@@ -44,7 +44,7 @@
 #include "vcenc.h"
 #include "vcdec.h"
 
-#define VCENCTEST_VERSION "0.1.2"
+#define VCENCTEST_VERSION "0.1.3"
 #define OS_ReadMonotonicTime 0x42
 
 static FILE *out2;

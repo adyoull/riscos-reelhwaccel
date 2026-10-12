@@ -19,6 +19,13 @@ The encoder needs gpu_mem=128 or more in CONFIG/TXT for 1080p (as the
 decoder does). VCEncTest says how much the VideoCore has at the start of
 each run.
 
+New in 0.1.3 (vcenc 0.1.3), after 0.1.2's CBR run:
+  - The Pi 4's firmware refuses constant bit rate every way, before the
+    encoder starts and while it's running, so "-c" gives variable.
+    vcenc 0.1.3 makes one encoder and tries constant only once it's
+    running (0.1.2 made three, about 6 cs more at open). Variable holds
+    the rate on real content (1080p30 at 8 Mbit/s gave 8.04).
+
 New in 0.1.2 (vcenc 0.1.2), after 0.1.1's Options:
   - "-i" now passes: vcenc gives every keyframe its SPS and PPS.
   - "-c" still failed, and the report showed why: once the encoder had
@@ -45,7 +52,7 @@ New in 0.1.1 (vcenc 0.1.1), after 0.1's run on the Pi 4:
     constant and 2 Mbit/s each on their own as well, and constant at
     720p over 100 pictures, to see whether the bit rate holds.
 
-Running it (please send back ResultC):
+Running it (nothing to send back for 0.1.3: run CBR if you like, to see one encoder made):
   Verbose  Run this first. 320x180, 10 pictures, with every MMAL message
            in the report: how the firmware answers the ports, the
            settings and the buffers. If anything else fails, this shows
@@ -93,4 +100,4 @@ Options (for running it by hand):
 Needs SharedUnixLibrary and ARMEABISupport (from PackMan), RISC OS 5.28
 or later on a Raspberry Pi.
 
-VCEncTest 0.1.2 (vcenc 0.1.2). Part of riscos-reelhwaccel, GPL version 2.
+VCEncTest 0.1.3 (vcenc 0.1.3). Part of riscos-reelhwaccel, GPL version 2.

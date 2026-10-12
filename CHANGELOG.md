@@ -1,5 +1,36 @@
 # Changes
 
+## v0.2.14: devkit 0.2.14, vcenc 0.1.3, h264_encvchiq, VCEncTest 0.1.3 (2026-10-12)
+
+riscos-ffmpeg released the encoder in riscos21 / Reel 0.1.28 (their
+FFmpeg/handoffs/2026-10-12-reelhwaccel-encoder-released-riscos21). On the
+owner's Pi 4, the Convert window converted a 1280x544 trailer with AAC at
+3.4x real time with h264_vchiq decoding and the encoder, 2.2x with ARM
+decoding, and 0.66x with libx264 veryfast. Every output played.
+
+VCEncTest 0.1.2 on the Pi (ResultC): constant bit rate is refused every
+way, at the enables (2 and 4, on new encoders) and on the running encoder
+(EINVAL). So `-c` gives variable, the same streams byte for byte. Variable
+holds the rate on real content: 1080p30 at 8 Mbit/s gave 8.04, and 720p at
+3 Mbit/s gave 3.09.
+
+- The encoder is renamed **`h264_encvchiq`** (riscos-ffmpeg's request; the
+  decoder stays `h264_vchiq`): the codec's name, `ff_h264_encvchiq_encoder`,
+  `h264_encvchiq_encoder_deps`, CONFIG_H264_ENCVCHIQ_ENCODER and the class.
+  The patch is now `0003-avcodec-h264_encvchiq.patch`.
+- **Profiles by name:** FFmpeg 5.1's `profile` option names none for H.264
+  (`-profile:v main` failed), so the encoder has its own: `baseline`,
+  `constrained_baseline`, `main`, `high`, or the numbers.
+- **vcenc 0.1.3:** with VCENC_CBR, one encoder: variable at the enables,
+  constant (2, else 4) tried on the running encoder. 0.1.2 made three
+  encoders first, about 6 cs at open, for nothing on the Pi 4.
+- devkit 0.2.14 carries all of this. VCEncTest 0.1.3 links vcenc 0.1.3.
+- Tests: the fake refuses rate control on the running encoder by default,
+  as the Pi did. The FFmpeg tests use the new name, `-profile:v main` on
+  the command line (checked in the SPS the fake made), and
+  `profile=constrained_baseline` through libavcodec. Mutant caught: the
+  private profile ignored (High came out where Main was asked for).
+
 ## vcenc 0.1.2, devkit 0.2.13, VCEncTest 0.1.2: constant bit rate made again each way (2026-10-12)
 
 VCEncTest 0.1.1's Options on the Pi 4: `-i` passes (every keyframe given

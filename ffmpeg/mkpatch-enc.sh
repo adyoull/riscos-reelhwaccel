@@ -1,5 +1,5 @@
 #!/bin/bash
-# ffmpeg/mkpatch-enc.sh FFMPEG_TARBALL - makes 0003-avcodec-h264_vchiq-encoder.patch
+# ffmpeg/mkpatch-enc.sh FFMPEG_TARBALL - makes 0003-avcodec-h264_encvchiq.patch
 # (on top of 0001) from vchiqenc.c: FFmpeg 5.1.10 with 0001 applied, the
 # encoder registered (configure: only its deps line, so the patch applies
 # before or after 0002; Makefile; allcodecs.c: among the hardware encoders,
@@ -18,16 +18,16 @@ def edit(p, a, b):
     assert s.count(a) == 1, (p, a)
     open(p, 'w').write(s.replace(a, b))
 edit('configure', 'h264_vchiq_decoder_select="h264_mp4toannexb_bsf"\n',
-     'h264_vchiq_decoder_select="h264_mp4toannexb_bsf"\nh264_vchiq_encoder_deps="vchiq"\n')
+     'h264_vchiq_decoder_select="h264_mp4toannexb_bsf"\nh264_encvchiq_encoder_deps="vchiq"\n')
 edit('libavcodec/Makefile', 'OBJS-$(CONFIG_H264_VCHIQ_DECODER)      += vchiqdec.o\n',
-     'OBJS-$(CONFIG_H264_VCHIQ_DECODER)      += vchiqdec.o\nOBJS-$(CONFIG_H264_VCHIQ_ENCODER)      += vchiqenc.o\n')
+     'OBJS-$(CONFIG_H264_VCHIQ_DECODER)      += vchiqdec.o\nOBJS-$(CONFIG_H264_ENCVCHIQ_ENCODER)   += vchiqenc.o\n')
 edit('libavcodec/allcodecs.c', 'extern const FFCodec ff_h264_omx_encoder;\n',
-     'extern const FFCodec ff_h264_omx_encoder;\nextern const FFCodec ff_h264_vchiq_encoder;\n')
+     'extern const FFCodec ff_h264_omx_encoder;\nextern const FFCodec ff_h264_encvchiq_encoder;\n')
 PY
 cp "$HERE/vchiqenc.c" libavcodec/vchiqenc.c
 git add -A
 git -c user.name="Andrew Youll" -c user.email=andrewyoull86@gmail.com commit -q -F - <<'MSG'
-avcodec: add h264_vchiq encoder (RISC OS, Raspberry Pi VideoCore)
+avcodec: add h264_encvchiq encoder (RISC OS, Raspberry Pi VideoCore)
 
 H.264 encoded by the Raspberry Pi's VideoCore on RISC OS, through the
 VCHIQ module and the firmware's MMAL service, using vcenc from
@@ -35,8 +35,10 @@ riscos-reelhwaccel (in libvcdec, with --enable-vchiq). YUV420P frames in,
 Annex B packets out in the same order (no B frames); the SPS and PPS as
 extradata with global headers, otherwise in front of the first packet.
 Registered among the hardware encoders, so it's chosen only by name
-(-c:v h264_vchiq).
+(-c:v h264_encvchiq; the decoder is h264_vchiq). Profiles by name
+(-profile:v main) through a private option, as FFmpeg 5.1's own takes
+only numbers for H.264.
 MSG
-git format-patch -q -1 --stdout > "$HERE/0003-avcodec-h264_vchiq-encoder.patch"
+git format-patch -q -1 --stdout > "$HERE/0003-avcodec-h264_encvchiq.patch"
 rm -rf "$T"
-echo "ffmpeg/0003-avcodec-h264_vchiq-encoder.patch made"
+echo "ffmpeg/0003-avcodec-h264_encvchiq.patch made"

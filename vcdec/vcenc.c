@@ -218,7 +218,7 @@ struct vcenc {
     uint8_t *row;                          /* (PCI memory: a row built here, then copied in) */
     uint8_t *evbuf;
     uint32_t evsize;
-    int sent_any, eos_sent, eos_back, eos_seen, heard_output, enable_failed;
+    int sent_any, eos_sent, eos_back, eos_seen, heard_output;
     uint32_t t_first_send, last_heard;
     vcenc_stats stats;
 };
@@ -769,8 +769,8 @@ static int level_for(const vcenc_config *c)
 
 /* rc_before: the rate control set before the ports are enabled; with
    rc_after (constant asked for), 2 and then 4 are tried once they're
-   running. An enable that fails sets enable_failed (the component is then
-   no use: the Pi 4 refused every later enable on it, VCEncTest 0.1.1) */
+   running (the Pi 4 refused rate control 2 and 4 at the input's enable,
+   and then every enable on that encoder: VCEncTest 0.1.1) */
 static int create_component(vcenc *e, uint32_t rc_before, int rc_after)
 {
     const vcenc_config *c = &e->cfg;
@@ -850,9 +850,9 @@ static int create_component(vcenc *e, uint32_t rc_before, int rc_after)
     if (e->failed) return -1;
     if (simple(e, T_COMPONENT_ENABLE, "Enable")) return -1;
     e->enabled = 1;
-    if (port_action(e, &e->in_info, ACTION_ENABLE, "Input enable")) { e->enable_failed = 1; return -1; }
+    if (port_action(e, &e->in_info, ACTION_ENABLE, "Input enable")) return -1;
     e->in_on = 1;
-    if (port_action(e, &e->out_info, ACTION_ENABLE, "Output enable")) { e->enable_failed = 1; return -1; }
+    if (port_action(e, &e->out_info, ACTION_ENABLE, "Output enable")) return -1;
     e->out_on = 1;
     if (rc_after) {                        /* constant, set on the running encoder */
         static const uint32_t rcs[2] = { 2, 4 };
@@ -987,24 +987,12 @@ int vcenc_open(vcenc **out, const vcenc_config *c)
     }
     e->opened = 1;
     swi(VCHIQ_ServiceRelease, e->handle, 0, 0, 0, NULL, NULL);
-    {   /* constant bit rate: set before the enables (2, then 4), else variable
-           then constant once running; each try a new component (the Pi 4
-           refused 2 at the input's enable, and every enable after that) */
-        static const struct { uint32_t before; int after; } cbr[3] = { { 2, 0 }, { 4, 0 }, { 1, 1 } };
-        int tries = c->flags & VCENC_CBR ? 3 : 1;
-        for (int k = 0; k < tries; k++) {
-            uint32_t before = c->flags & VCENC_CBR ? cbr[k].before : 1;
-            e->enable_failed = 0;
-            if (!create_component(e, before, c->flags & VCENC_CBR ? cbr[k].after : 0)) break;
-            if (!e->enable_failed || k + 1 == tries) goto bad;
-            logf_(e, "%s with rate control %u: the encoder made again, trying %s", e->err, (unsigned)before,
-                  cbr[k + 1].after ? "variable, then constant once running" : "4 (constant, skipping frames)");
-            destroy_component(e);
-            if (e->created) { fail(e, VCENC_ERROR, "The encoder couldn't be destroyed to try again"); goto bad; }
-            e->failed = 0;
-            e->err[0] = 0;
-        }
-    }
+    /* constant bit rate: variable at the enables, then constant (2, else 4)
+       on the running encoder. (The Pi 4's firmware refused 2 and 4 at the
+       input's enable, after which it refused every enable on that
+       encoder, and refused them while running too, VCEncTest 0.1.2: so
+       vcenc 0.1.3 no longer makes three encoders to find that out.) */
+    if (create_component(e, 1, (c->flags & VCENC_CBR) != 0)) goto bad;
     *out = e;
     return VCENC_OK;
 bad:

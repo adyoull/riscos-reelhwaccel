@@ -1,12 +1,12 @@
 #!/bin/bash
 # devkit/build.sh [VERSION] - dist/riscos-reelhwaccel-devkit-VERSION.tgz: libvcdec.a with
 # vcdec.h and vcenc.h (0.2.12), libhevcdec.a with hwhevcdec.h and hevc_ctrls.h (GCCSDK GCC 10
-# at CROSS), the FFmpeg patches (0001 h264_vchiq, 0002 hevc_hwdec, 0003 the h264_vchiq encoder),
+# at CROSS), the FFmpeg patches (0001 h264_vchiq, 0002 hevc_hwdec, 0003 h264_encvchiq),
 # README and COPYING.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
-V=${1:-0.2.13}
+V=${1:-0.2.14}
 CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V
@@ -15,7 +15,7 @@ CROSS=$CROSS "$TOP/vcdec/build.sh" "$TMP/build"
 cp "$TMP/build/libvcdec.a" "$D/lib/"
 cp "$TOP/vcdec/vcdec.h" "$TOP/vcdec/vcenc.h" "$D/include/"
 cp "$TOP/ffmpeg/0001-avcodec-h264_vchiq.patch" "$TOP/ffmpeg/0002-avcodec-hevc_hwdec.patch" \
-  "$TOP/ffmpeg/0003-avcodec-h264_vchiq-encoder.patch" "$D/ffmpeg/"
+  "$TOP/ffmpeg/0003-avcodec-h264_encvchiq.patch" "$D/ffmpeg/"
 CROSS=$CROSS "$TOP/hevcdec/build.sh" "$TMP/hbuild"
 cp "$TMP/hbuild/libhevcdec.a" "$D/lib/"
 cp "$TOP/hevcdec/hwhevcdec.h" "$TOP/hevcdec/hevc_ctrls.h" "$D/include/"

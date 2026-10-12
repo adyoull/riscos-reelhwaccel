@@ -196,24 +196,19 @@ int main(void)
     CHECK(pmp_invalidates > 0, "pools: no cache maintenance");
 
     /* PCI memory; receives finishing late; a keyframe asked for; headers before keyframes; main, level 4.1, CBR */
-    enc_reset(); e_rx_late = 1; e_big_at = 3; pts_late = 1;
+    enc_reset(); e_rx_late = 1; e_big_at = 3; pts_late = 1; e_refuse_rc_running = 0;   /* (a firmware that takes constant) */
     memset(&t, 0, sizeof t); t.frames = 10; t.gop = 4; t.flags = VCENC_PCI | VCENC_INLINE_HEADERS | VCENC_CBR; t.force_at = 6;
     t.profile = VCENC_PROFILE_MAIN; t.level = 41; t.qp_min = 20; t.qp_max = 40; t.expect_rc = 2; t.expect_rc_running = 1;
-    run("pci", t);                           /* (2 and 4 refused at the enable, as the Pi: three components, 2 once running) */
+    run("pci", t);                           /* (variable at the enable, constant once running: one encoder) */
     params_check("pci", 26, 0x1D, 10000000, 2, 4, 20, 40, 1);
-    CHECK(e_created == 3, "pci: %d components made", e_created);
+    CHECK(e_created == 1 && !e_broken, "pci: %d components made", e_created);
 
-    /* constant skipping frames taken at the enable: the second component */
-    enc_reset(); e_refuse_rc4 = 0;
-    memset(&t, 0, sizeof t); t.frames = 3; t.flags = VCENC_CBR; t.expect_rc = 4;
-    run("cbr 4", t);
-    CHECK(e_created == 2, "cbr 4: %d components made", e_created);
-
-    /* constant refused every way: variable */
-    enc_reset(); e_refuse_rc_running = 1;
+    /* constant refused while running too (as the Pi 4): variable, one encoder */
+    enc_reset();
     memset(&t, 0, sizeof t); t.frames = 3; t.flags = VCENC_CBR; t.expect_rc = 1;
     run("cbr refused", t);
     params_check("cbr refused", 28, 0x1A, 10000000, 1, 0, 0, 0, 0);
+    CHECK(e_created == 1, "cbr refused: %d components made", e_created);
 
     /* a slow encoder that holds each input until its unit is out (input full), one input buffer; baseline */
     enc_reset(); e_hold_in = 1; e_pim = 0; e_rx_late = 1; e_slow = 5;
