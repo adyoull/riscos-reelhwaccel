@@ -299,6 +299,200 @@ static int benchmark(hevcdec *d, hevcdec_frame *f, const pic_t *p, uint8_t *cons
     return bad;
 }
 
+/* -O (0.1.13): the last picture converted into each kind of memory a
+   player might write to, timed: ordinary cached memory (as -K), memory that
+   isn't cacheable but is bufferable, memory that's neither (dynamic areas),
+   and a VideoOverlay buffer, as Reel converts into (the desktop needed:
+   HEVCTest becomes a Wimp task for it, so the desktop stops while it runs).
+   Each 1:1 (8-bit, up to 1920x1088) and halved, column by column and row
+   by row, and a plain copy of the converted picture from cached memory (as
+   Reel does when it blends first); each result checked against the
+   cached column-by-column one. */
+#define OBENCH_N 30
+enum { MEM_CACHED, MEM_NCB, MEM_NCNB, MEM_OVERLAY, MEM_KINDS };
+static const char *const mem_names[MEM_KINDS] = { "cached memory", "not cacheable, bufferable",
+                                                  "not cacheable, not bufferable", "a VideoOverlay buffer" };
+typedef struct { uint8_t *p[3]; int st[3]; int area, ov; void *block; char why[320]; } dmem_t;
+
+#ifndef PROBE_TEST
+static int ov_task;                        /* (our Wimp task, for VideoOverlay_Create) */
+static int ov_swi(const char *name, _kernel_swi_regs *r, char *why, size_t n)
+{
+    _kernel_swi_regs q;
+    _kernel_oserror *e;
+    q.r[1] = (int)(intptr_t)name;
+    if ((e = ht_swi(0x39, &q))) { snprintf(why, n, "%s: %s", name, e->errmess); return -1; }   /* OS_SWINumberFromString */
+    if ((e = ht_swi(q.r[0] | 0x20000, r))) { snprintf(why, n, "%s: %s", name, e->errmess); return -1; }
+    return 0;
+}
+#endif
+
+/* memory of kind k for a w x h YV12/I420 picture: 0, or -1 (m->why says why) */
+static int mem_get(int k, int w, int h, dmem_t *m)
+{
+    size_t ys, cs;
+    memset(m, 0, sizeof *m);
+    m->st[0] = (w + 31) & ~31;
+    m->st[1] = m->st[2] = ((w + 1) / 2 + 15) & ~15;
+    ys = (size_t)m->st[0] * h;
+    cs = (size_t)m->st[1] * ((h + 1) / 2);
+    if (k == MEM_CACHED) {
+        if (!(m->block = malloc(ys + 2 * cs + 64))) { snprintf(m->why, sizeof m->why, "out of memory"); return -1; }
+        m->p[0] = (uint8_t *)(((uintptr_t)m->block + 63) & ~(uintptr_t)63);
+    } else if (k == MEM_NCB || k == MEM_NCNB) {
+#ifdef PROBE_TEST
+        if (!(m->block = malloc(ys + 2 * cs + 64))) { snprintf(m->why, sizeof m->why, "out of memory"); return -1; }
+        m->p[0] = (uint8_t *)(((uintptr_t)m->block + 63) & ~(uintptr_t)63);
+#else
+        _kernel_swi_regs r;
+        _kernel_oserror *e;
+        size_t n = (ys + 2 * cs + 4095) & ~(size_t)4095;
+        r.r[0] = 0; r.r[1] = -1; r.r[2] = (int)n; r.r[3] = -1;
+        r.r[4] = (int)((1u << 7) | (1u << 5) | (k == MEM_NCNB ? 1u << 4 : 0));   /* not draggable, not cacheable,
+                                                                                (not bufferable); user read/write */
+        r.r[5] = (int)n; r.r[6] = 0; r.r[7] = -1; r.r[8] = (int)(intptr_t)"HEVCTest memory";
+        if ((e = ht_swi(0x66, &r))) { snprintf(m->why, sizeof m->why, "a dynamic area: %s", e->errmess); return -1; }
+        m->area = r.r[1];
+        m->p[0] = (uint8_t *)(intptr_t)r.r[3];
+#endif
+    } else {
+#ifdef PROBE_TEST
+        snprintf(m->why, sizeof m->why, "no VideoOverlay here (host)");
+        return -1;
+#else
+        static const int msgs[1] = { 0 };
+        int sel[12];
+        _kernel_swi_regs r;
+        _kernel_oserror *e;
+        const int *a;
+        if (!ov_task) {
+            r.r[0] = 380; r.r[1] = 0x4B534154; r.r[2] = (int)(intptr_t)"HEVCTest"; r.r[3] = (int)(intptr_t)msgs;
+            if ((e = ht_swi(0x400C0, &r))) {       /* Wimp_Initialise */
+                snprintf(m->why, sizeof m->why, "not a Wimp task (run it from the desktop): %s", e->errmess);
+                return -1;
+            }
+            ov_task = r.r[1];
+        }
+        sel[0] = 1; sel[1] = w; sel[2] = h; sel[3] = 7; sel[4] = -1;   /* (as Reel: YV12, video range, 1 bank) */
+        sel[5] = 0; sel[6] = 0x2000 | 0x4000;
+        sel[7] = 3; sel[8] = 0x32315659;
+        sel[9] = 13; sel[10] = 1;
+        sel[11] = -1;
+        r.r[0] = (int)(intptr_t)sel; r.r[1] = (w << 16) | h; r.r[2] = 0; r.r[3] = ov_task;
+        if (ov_swi("VideoOverlay_Create", &r, m->why, sizeof m->why)) return -1;
+        m->ov = r.r[0];
+        r.r[0] = m->ov; r.r[1] = 0;
+        if (ov_swi("VideoOverlay_MapBuffer", &r, m->why, sizeof m->why)) {
+            r.r[0] = m->ov;
+            ov_swi("VideoOverlay_Destroy", &r, m->why + strlen(m->why), 0);
+            m->ov = 0;
+            return -1;
+        }
+        a = (const int *)(intptr_t)r.r[0];
+        m->p[0] = (uint8_t *)(intptr_t)a[0]; m->st[0] = a[1];
+        m->p[1] = (uint8_t *)(intptr_t)a[2]; m->st[1] = a[3];
+        m->p[2] = (uint8_t *)(intptr_t)a[4]; m->st[2] = a[5];
+        snprintf(m->why, sizeof m->why, "YV12 %dx%d, strides %d/%d/%d", w, h, m->st[0], m->st[1], m->st[2]);
+        return 0;
+#endif
+    }
+    m->p[1] = m->p[0] + ys;
+    m->p[2] = m->p[1] + cs;
+    return 0;
+}
+
+static void mem_put(int k, dmem_t *m)
+{
+#ifndef PROBE_TEST
+    _kernel_swi_regs r;
+    char why[8];
+    if (k == MEM_OVERLAY && m->ov) {
+        r.r[0] = m->ov; r.r[1] = 0;
+        ov_swi("VideoOverlay_UnmapBuffer", &r, why, 0);
+        r.r[0] = m->ov;
+        ov_swi("VideoOverlay_Destroy", &r, why, 0);
+    }
+    if (m->area) { r.r[0] = 1; r.r[1] = m->area; ht_swi(0x66, &r); }
+#endif
+    (void)k;
+    free(m->block);
+    memset(m, 0, sizeof *m);
+}
+
+static void mem_end(void)
+{
+#ifndef PROBE_TEST
+    if (ov_task) {
+        _kernel_swi_regs r;
+        r.r[0] = ov_task; r.r[1] = 0x4B534154;
+        ht_swi(0x400DD, &r);                       /* Wimp_CloseDown */
+        ov_task = 0;
+    }
+#endif
+}
+
+static int mem_bench(hevcdec *d, hevcdec_frame *f, const pic_t *p)
+{
+    static const char *const tests[5] = { "1:1 to 8-bit, column by column", "1:1 to 8-bit, row by row",
+                                          "halved, column by column", "halved, row by row",
+                                          "copy of the halved picture (memcpy)" };
+    int full = p->out_w <= 1920 && p->out_h <= 1088, halve = !(p->left & 3) && p->out_w >= 4 && p->out_h >= 4;
+    int w = full ? (int)p->out_w : (int)p->out_w / 2, h = full ? (int)p->out_h : (int)p->out_h / 2;
+    int hw = (int)p->out_w / 2, hh = (int)p->out_h / 2, bad = 0;
+    dmem_t ref[2];                                 /* (cached: the 1:1 and halved results to check against) */
+    if (mem_get(MEM_CACHED, w, h, &ref[0]) || mem_get(MEM_CACHED, w, h, &ref[1])) {
+        say("-O: %s\n", ref[0].why);
+        return 1;
+    }
+    say("\n-O: picture %u (%ux%u) into each kind of memory, %d times each:\n", (unsigned)p->number, (unsigned)p->out_w,
+        (unsigned)p->out_h, OBENCH_N);
+    for (int k = 0; k < MEM_KINDS; k++) {
+        dmem_t m;
+        if (mem_get(k, w, h, &m)) { say("  %s: not tried (%s)\n", mem_names[k], m.why); continue; }
+        say("  %s%s%s%s:\n", mem_names[k], m.why[0] ? " (" : "", m.why, m.why[0] ? ")" : "");
+        for (int t = 0; t < 5; t++) {
+            int half = t >= 2, ow = half ? hw : (int)p->out_w, oh = half ? hh : (int)p->out_h, same = 1;
+            int cw = (ow + 1) / 2, ch = (oh + 1) / 2;
+            unsigned cs = 0;
+            dmem_t *r = &ref[half];
+            void *pv[3] = { m.p[0], m.p[1], m.p[2] };
+            if ((!half && !full) || (half && !halve)) continue;
+            for (int c = 0; c < 3; c++)
+                for (int y = 0; y < (c ? ch : oh); y++) memset(m.p[c] + (size_t)y * m.st[c], 0x5A, (size_t)(c ? cw : ow));
+            if (t == 4) {                          /* (the halved picture, converted into cached memory first) */
+                uint32_t t0 = now_cs();
+                for (int i = 0; i < OBENCH_N; i++)
+                    for (int c = 0; c < 3; c++)
+                        for (int y = 0; y < (c ? ch : oh); y++)
+                            memcpy(m.p[c] + (size_t)y * m.st[c], r->p[c] + (size_t)y * r->st[c], (size_t)(c ? cw : ow));
+                cs = now_cs() - t0;
+            } else if (hevcdec_convert_benchmark(d, f, pv, m.st, half ? 0 : 8, (int)p->left, (int)p->top, ow, oh,
+                                                 t & 1 ? 1 : 0, OBENCH_N, &cs) != HEVCDEC_OK) {
+                say("    %-38s refused: %s\n", tests[t], hevcdec_error(d));
+                bad = 1;
+                continue;
+            }
+            if (k == MEM_CACHED && !(t & 1) && t < 4) {   /* (the reference) */
+                for (int c = 0; c < 3; c++)
+                    for (int y = 0; y < (c ? ch : oh); y++)
+                        memcpy(r->p[c] + (size_t)y * r->st[c], m.p[c] + (size_t)y * m.st[c], (size_t)(c ? cw : ow));
+            } else {
+                for (int c = 0; c < 3 && same; c++)
+                    for (int y = 0; y < (c ? ch : oh) && same; y++)
+                        same = !memcmp(m.p[c] + (size_t)y * m.st[c], r->p[c] + (size_t)y * r->st[c], (size_t)(c ? cw : ow));
+            }
+            say("    %-38s %u.%02u ms a picture%s\n", tests[t], cs * 10 / OBENCH_N, cs * 1000 / OBENCH_N % 100,
+                same ? "" : " - WRONG (not the cached column-by-column pictures)");
+            bad |= !same;
+        }
+        mem_put(k, &m);
+    }
+    mem_put(MEM_CACHED, &ref[0]);
+    mem_put(MEM_CACHED, &ref[1]);
+    mem_end();
+    return bad;
+}
+
 int probe_main(int argc, char **argv)
 {
     const char *name = NULL;
@@ -319,6 +513,7 @@ int probe_main(int argc, char **argv)
     unsigned not_done = 0, done_asked = 0, done_but_waited = 0;   /* (0.1.12) hevcdec_frame_done, pipelined */
     int force_depth = 0;                   /* (host tests: -D n, a decoder for n-bit whatever the trace) */
     int bench = 0;                         /* -K: the last picture converted each way, timed */
+    int obench = 0;                        /* -O: the last picture converted into each kind of memory, timed */
     int last_fs = -1;                      /* (the last picture decoded: its frame and picture) */
     const pic_t *last_p = NULL;
     int bench_bad = 0;                     /* -K: a way gave other pictures than the default's */
@@ -347,6 +542,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-u")) uncached = 1;
         else if (!strcmp(argv[i], "-q")) quick = 1;
         else if (!strcmp(argv[i], "-K")) bench = 1;
+        else if (!strcmp(argv[i], "-O")) obench = 1;
         else if (!strcmp(argv[i], "-p")) pipelined = 1;
         else if (!strcmp(argv[i], "-P") && i + 1 < argc) pipelined = 1, lag = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
@@ -363,7 +559,7 @@ int probe_main(int argc, char **argv)
         else name = NULL, i = argc;
     }
     if (quick) {
-        say("hevctest %s: started and wrote this (-q: nothing decoded, the HEVC block untouched)\n", HEVCDEC_VERSION);
+        say("hevctest (hevcdec %s): started and wrote this (-q: nothing decoded, the HEVC block untouched)\n", HEVCDEC_VERSION);
         if (out2) fclose(out2);
         if (dump) fclose(dump);
         return 0;
@@ -518,6 +714,7 @@ int probe_main(int argc, char **argv)
     }
     t_all = now_cs() - t_all;
     if (bench && last_fs >= 0 && !fatal) bench_bad = benchmark(d, frames[last_fs], last_p, planes, strides);
+    if (obench && last_fs >= 0 && !fatal) bench_bad |= mem_bench(d, frames[last_fs], last_p);
     hevcdec_get_stats(d, &st);
     say("\n%d of %d pictures decoded in %u.%02u s (%u.%u a second); converting them %u cs\n", done, npics,
         (unsigned)(t_dec / 100), (unsigned)(t_dec % 100), t_dec ? (unsigned)(done * 100 / t_dec) : 0,

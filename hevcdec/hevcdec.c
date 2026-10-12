@@ -682,15 +682,24 @@ int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const
 
 hevcdec *hevcdec_frame_decoder(const hevcdec_frame *f) { return f ? f->d : NULL; }
 
+static int half(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0, int y0, int w,
+                int h, int way);
+
 int hevcdec_frame_to_i420_half(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0,
                                int y0, int w, int h)
+{
+    return half(d, f, planes, strides, x0, y0, w, h, HEVCDEC_CONV_COLUMNS);
+}
+
+static int half(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0, int y0, int w,
+                int h, int way)
 {
     const size_t col = (size_t)d->ctx.dst_fmt.plane_fmt[0].bytesperline * 128, c_off = (size_t)d->ctx.dst_fmt.height * 128;
     hevcdec_conv_opts o;
     const uint8_t *b;
     if (window_bad(d, x0, y0, w, h, 1)) return HEVCDEC_UNSUPPORTED;
     if (!(b = frame_ready(d, f))) return HEVCDEC_ERROR;
-    o.way = HEVCDEC_CONV_COLUMNS;
+    o.way = way;
     o.tick = conv_tick;
     o.arg = d;
     if (!d->dead) poll_phases(d);
@@ -704,12 +713,15 @@ int hevcdec_convert_benchmark(hevcdec *d, const hevcdec_frame *f, void *const pl
     uint32_t t0;
     int r;
     if (way < 0 || way >= HEVCDEC_CONV_WAYS || (way == HEVCDEC_CONV_TEMP && d->cfg.bit_depth != 10) ||
-        (bits != 8 && bits != 16) || (bits == 16 && d->cfg.bit_depth != 10) || n < 1)
+        (bits != 0 && bits != 8 && bits != 16) || (bits == 16 && d->cfg.bit_depth != 10) || n < 1 ||
+        (bits == 0 && way != HEVCDEC_CONV_COLUMNS && way != HEVCDEC_CONV_ROWS))
         return HEVCDEC_UNSUPPORTED;
     hevcdec_frame_wait(d, (hevcdec_frame *)f);
     t0 = hevcdec_hw_now_cs();
     for (int i = 0; i < n; i++)
-        if ((r = convert(d, f, planes, strides, bits, x0, y0, w, h, way)) != HEVCDEC_OK) return r;
+        if ((r = bits ? convert(d, f, planes, strides, bits, x0, y0, w, h, way)
+                      : half(d, f, (uint8_t *const *)planes, strides, x0, y0, w, h, way)) != HEVCDEC_OK)
+            return r;
     *cs = hevcdec_hw_now_cs() - t0;
     return HEVCDEC_OK;
 }

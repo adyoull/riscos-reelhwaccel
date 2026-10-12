@@ -438,6 +438,22 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     }
     cleaned("-K");
 
+    fake_hevc_reset();                          /* (0.1.13) -O: into each kind of memory, every way the same */
+    o = run_app(&ret, trace, "-O -c 3");
+    {
+        int lines = 0;
+        for (const char *q = o; (q = strstr(q, " ms a picture")); q++) lines++;
+        /* (the host: cached, and the two dynamic areas as ordinary memory; no overlay) - per kind 1:1 by
+           columns and rows (the clips are small), halved by columns and rows (every clip's window starts at a
+           multiple of 4), the copy */
+        CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !strstr(o, "WRONG") &&
+              strstr(o, "  cached memory:") && strstr(o, "not cacheable, bufferable:") &&
+              strstr(o, "a VideoOverlay buffer: not tried (no VideoOverlay here (host))") &&
+              lines == 3 * 5 && strstr(o, "halved, row by row"),
+              "hevctest -O %s (%d, %d timed):\n%s", trace, ret, lines, o);
+    }
+    cleaned("-O");
+
     fake_hevc_reset();                          /* -q: starts and stops, the block untouched */
     o = run_app(&ret, trace, "-q");
     CHECK(ret == 0 && strstr(o, "started and wrote this (-q") && !strstr(o, "Trace:") && fake_hevc.opens == 0,

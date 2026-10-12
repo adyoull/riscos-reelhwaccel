@@ -1,5 +1,30 @@
 # Changes
 
+## hevcdec 0.1.12, HEVCTest 0.1.13: converting into each kind of memory, timed (2026-10-12)
+
+Reel's halved 4K 10-bit conversion straight into its VideoOverlay buffer
+takes about 18 ms (riscos-ffmpeg's opt11/opt12 logs, block busy or
+idle); HEVCTest -K's into cached memory, 9.3 ms. The overlay's memory is
+probably not cacheable, and the conversion writes it column by column:
+64-byte pieces of every output row in turn.
+
+- hevcdec_conv_half: row by row too (HEVCDEC_CONV_ROWS: each output row
+  written left to right across the columns), and hevcdec_convert_benchmark
+  bits 0 for the halved conversion, either way. hevcdec_frame_to_i420_half
+  is unchanged (column by column).
+- HEVCTest -O (the Memory Obey file, ResultO): the last picture converted
+  30 times into cached memory, a dynamic area that isn't cacheable but is
+  bufferable, one that's neither, and a VideoOverlay buffer (YV12, as
+  Reel makes it; HEVCTest becomes a Wimp task for it): 1:1 to 8-bit (up
+  to 1920x1088) and halved, column by column and row by row, and a plain
+  copy of the halved picture from cached memory; each checked against the
+  cached column-by-column result. -q's line names hevcdec's version as
+  such.
+- Tests: hevcdec_conv_test now covers the halved row order (random
+  windows); hevctest -O on the host (cached, the two areas as ordinary
+  memory, no overlay), every way the same pictures. Mutant caught (the
+  last chroma row not written row by row).
+
 ## devkit 0.2.11: hevc_hwdec honours skip_frame (2026-10-06)
 
 riscos-ffmpeg asked (FFmpeg/handoffs/2026-10-06-reelhwaccel-skip-nonref-request):

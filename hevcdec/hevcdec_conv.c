@@ -390,6 +390,27 @@ void hevcdec_conv_half(const uint8_t *b, size_t col, size_t c_off, int ten, uint
     job_t j = { b, col, c_off, ten, 8, HEVCDEC_CONV_COLUMNS, p, strides, x0, y0 };
     void (*tick)(void *) = o ? o->tick : NULL;
     void *arg = o ? o->arg : NULL;
+    if (o && o->way == HEVCDEC_CONV_ROWS) {     /* (0.1.12) row by row: each output row written from left to
+                                                   right in one go (memory that isn't cached takes long runs
+                                                   best), the source read a column's piece at a time */
+        for (int y = 0; y < oh; y++) {
+            for (int x = 0, n; x < ow; x += n) {
+                n = (per - (x0 + 2 * x) % per) / 2;
+                if (n > ow - x) n = ow - x;
+                luma_half_row(&j, x, n, y);
+            }
+            if (tick && (y & 63) == 63) tick(arg);
+        }
+        for (int y = 0; y < ch; y++) {
+            for (int x = 0, n; x < cw; x += n) {
+                n = (per / 2 - (x0 / 2 + 2 * x) % (per / 2)) / 2;
+                if (n > cw - x) n = cw - x;
+                chroma_half_row(&j, x, n, y);
+            }
+            if (tick && (y & 63) == 63) tick(arg);
+        }
+        return;
+    }
     for (int x = 0, n; x < ow; x += n) {        /* (x0 even: a column's samples pair up within it) */
         n = (per - (x0 + 2 * x) % per) / 2;
         if (n > ow - x) n = ow - x;

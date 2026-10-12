@@ -88,6 +88,17 @@ That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
 
+0.1.13 (hevcdec 0.1.12): Memory (-O, to ResultO) times converting into
+each kind of memory a player might write to: ordinary cached memory,
+memory that isn't cacheable but is bufferable, memory that's neither,
+and a real VideoOverlay buffer, as Reel converts into. Reel's halved 4K
+10-bit conversion takes about 18 ms where Convert's takes 9.3 ms into
+cached memory; this shows whether the difference is the overlay's
+memory, and whether converting row by row (each output row written in
+one go) or converting into cached memory and copying is quicker there.
+Run Memory from the desktop: HEVCTest becomes a Wimp task to make the
+overlay, and the desktop stops while each clip runs (a few seconds).
+
 0.1.12 (hevcdec 0.1.11): a frame is cleaned and invalidated once after
 the block writes it, however many times it's converted; the summary
 says how many times that was, and how often a conversion had to wait

@@ -1,0 +1,18 @@
+| Memory: the last of the first three pictures of each 1080p and 4K clip
+| converted 30 times into each kind of memory (-O): cached, not cacheable
+| but bufferable, neither, and a VideoOverlay buffer (as Reel uses), 1:1
+| (1080p) and halved, column by column and row by row, and a plain copy,
+| timed and checked. Run it from the desktop: HEVCTest becomes a Wimp task
+| for the overlay, and the desktop stops while each clip runs. Reports to
+| ResultO.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 98304K -max 98304K
+Remove <Obey$Dir>.ResultO
+Run <Obey$Dir>.hevctest -O -c 3 -o <Obey$Dir>.ResultO <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -O -c 3 -o <Obey$Dir>.ResultO <Obey$Dir>.clips.hd10.trace
+Run <Obey$Dir>.hevctest -O -c 3 -f 10 -o <Obey$Dir>.ResultO <Obey$Dir>.clips.uhd.trace
+Run <Obey$Dir>.hevctest -O -c 3 -f 10 -o <Obey$Dir>.ResultO <Obey$Dir>.clips.uhd10.trace
