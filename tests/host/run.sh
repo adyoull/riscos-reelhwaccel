@@ -65,6 +65,8 @@ grep "FAIL\|vcenc_test:" "$O/vcenc_test.out"
 
 # ffmpeg/: the h264_vchiq decoder built into FFmpeg 5.1.10 (FFMPEG_TARBALL; skipped without it)
 "$HERE/ffmpeg/run.sh" "$O" || bad=1
+# ffmpeg/0003: the h264_vchiq encoder built into FFmpeg 5.1.10, on vcenc and the fake encoder
+"$HERE/ffmpeg/enc_run.sh" "$O" || bad=1
 
 # hevcdec/hevcdec_conv.c: the conversions (NEON under qemu, and plain C) against a reference
 arm-linux-gnueabihf-gcc -O2 -marm -march=armv7-a -mfpu=neon -mfloat-abi=hard -mno-unaligned-access -Wall -no-pie \

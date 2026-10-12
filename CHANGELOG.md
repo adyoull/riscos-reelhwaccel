@@ -1,5 +1,48 @@
 # Changes
 
+## vcenc 0.1.1, devkit 0.2.12 (the h264_vchiq encoder), VCEncTest 0.1.1 (2026-10-12)
+
+VCEncTest 0.1 on the Pi 4: every run in Test, Speed and Verbose passed.
+Each stream decoded back with vcdec at a luma PSNR of 33 to 52 dB, and
+FFmpeg's own decoder plays Stream360 and Stream1080 (High; levels 3.1 and
+4.0). 1080p30 encodes at 72.6 frames a second and 720p at 156; copying a
+1080p frame in takes 3.6 ms from a pool and 12 ms from PCI memory. The
+SPS and PPS come as soon as the output has buffers (CONFIG, with
+FRAME_END and pts 0). Two runs in Options failed:
+
+- vcenc 0.1.1: with INLINE_HEADER the firmware sends the SPS and PPS as a
+  CONFIG buffer of their own before each later keyframe. vcenc now keeps
+  them, and with VCENC_INLINE_HEADERS puts them at the start of every
+  keyframe's packet (the first one included); `headers_repeated` counts
+  them.
+- vcenc 0.1.1: constant bit rate (RATECONTROL 2) made the input's enable
+  fail with EINVAL. vcenc now falls back to 4 (constant, skipping frames),
+  then 1 (variable); `rate_control` says which it got.
+- The h264_vchiq encoder (`ffmpeg/vchiqenc.c`, patch 0003, applied after
+  0001, before or after 0002): YUV420P frames to Annex B packets with
+  their pts (dts = pts, no B frames). The SPS and PPS are the extradata
+  with global headers, otherwise at the start of the first packet. pict_type
+  I forces a keyframe. b and g default to 0 (vcenc's 10 Mbit/s and the
+  encoder's interval); profile, level, rc_constant, repeat_headers, qp_min,
+  qp_max, in_buffers, pci_memory and gpu_mem_check are supported.
+  Registered among the hardware encoders, so it's never the default.
+- devkit 0.2.12: vcenc in libvcdec.a, vcenc.h, patch 0003, and how to use
+  them in the README.
+- VCEncTest 0.1.1: reports the rate control it got. Options now runs
+  constant and 2 Mbit/s each on their own too, and constant at 720p.
+- Tests: the fake encoder (now `tests/host/fake_vcenc.c`, and a library
+  for FFmpeg's tests) behaves as the Pi did: CONFIG at the first output
+  buffer, again on its own before later keyframes, constant refused at
+  the input's enable. `tests/host/ffmpeg/enc_run.sh` builds FFmpeg with
+  0001 and 0003. `vchiqenc_test` covers packets, pts, keyframes, headers
+  both ways, settings, a slow encoder, an error, a quiet encoder (open
+  fails) and sizes refused. The ffmpeg command writes raw YUV to .h264
+  (headers first) and to MP4 (an avcC, no start codes). Mutants caught:
+  no CBR fallback, or straight to variable; a repeated CONFIG given out;
+  headers not put in front; in FFmpeg, a frame dropped when the input is
+  full, no headers in front, pict_type ignored, no dts, no extradata, g
+  ignored.
+
 ## vcenc 0.1, VCEncTest 0.1: H.264 encoding on the VideoCore (2026-10-12)
 
 The next step after decoding: the VideoCore's H.264 encoder, for FFmpeg

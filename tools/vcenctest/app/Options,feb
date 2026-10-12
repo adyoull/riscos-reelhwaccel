@@ -1,6 +1,7 @@
 | Options: 640x360, each of vcenc's settings in turn, each stream decoded
 | again and compared: Main, Baseline, SPS/PPS before every keyframe with
-| a keyframe every 10, constant 2 Mbit/s, a keyframe asked for at picture
+| a keyframe every 10, constant 2 Mbit/s (and constant, and 2 Mbit/s, on
+| their own; constant 3 Mbit/s at 720p), a keyframe asked for at picture
 | 17, PCI memory, 4 input buffers, quantisers 20 to 30, level 4.0.
 | Reports to ResultO.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
@@ -14,6 +15,9 @@ Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -p main -o <Obey$Dir>.ResultO
 Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -p baseline -o <Obey$Dir>.ResultO
 Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -i -g 10 -o <Obey$Dir>.ResultO
 Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -c -b 2000000 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -c -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -b 2000000 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 1280x720 -n 100 -c -b 3000000 -o <Obey$Dir>.ResultO
 Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -k 17 -o <Obey$Dir>.ResultO
 Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -m pci -o <Obey$Dir>.ResultO
 Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -B 4 -o <Obey$Dir>.ResultO

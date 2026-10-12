@@ -44,7 +44,7 @@
 #include "vcenc.h"
 #include "vcdec.h"
 
-#define VCENCTEST_VERSION "0.1"
+#define VCENCTEST_VERSION "0.1.1"
 #define OS_ReadMonotonicTime 0x42
 
 static FILE *out2;
@@ -361,6 +361,10 @@ int probe_main(int argc, char **argv)
             got ? (unsigned long long)(st.bytes * 8.0 * fps / got) : 0ull, fps, st.keyframes, st.config_packets);
         say("Copying pictures in: %u cs in all; buffers: %d+%d in pools, in %u bytes, out %u x %u bytes\n", st.cs_copy,
             st.in_pools, st.out_pools, st.in_size, st.out_buffers, st.out_size);
+        say("Rate control: %s%s; keyframes given SPS and PPS by vcenc: %u\n",
+            st.rate_control == 1 ? "variable" : st.rate_control == 2 ? "constant" : st.rate_control == 4 ?
+            "constant, skipping frames" : "the encoder's", (c.flags & VCENC_CBR) && st.rate_control != 2 ?
+            " (constant was asked for)" : "", st.headers_repeated);
         say("vcenc_close: %u cs\n", (unsigned)t_close);
         if (stream && sf) say("The stream is in %s\n", stream);
     }
@@ -395,6 +399,7 @@ int probe_main(int argc, char **argv)
                                   wrong ? "packets out of order or without their pts" :
                                   first_config != 0 ? "the SPS and PPS didn't come first" :
                                   !dec_ok ? "the stream didn't decode back to the pictures (see above)" :
+                                  inline_bad ? "keyframes without SPS and PPS in front (-i)" :
                                   moved ? "the program's page at &8000 moved (see above)" : "something's wrong (see above)");
             if (out2) fclose(out2);
             for (int k = 0; k < npkts; k++) free(pkts[k].data);

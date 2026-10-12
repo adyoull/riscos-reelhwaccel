@@ -837,7 +837,7 @@ static int create_component(vcenc *e)
     v[0] = c->bitrate;
     if (param_set(e, &e->out_info, P_BIT_RATE, v, 1, 1, "Bit rate")) return -1;
     v[0] = c->flags & VCENC_CBR ? 2 : 1;
-    param_set(e, &e->out_info, P_RATECONTROL, v, 1, 0, "Rate control");
+    e->stats.rate_control = param_set(e, &e->out_info, P_RATECONTROL, v, 1, 0, "Rate control") ? 0 : (int)v[0];
     if (c->gop > 0) { v[0] = (uint32_t)c->gop; param_set(e, &e->out_info, P_INTRAPERIOD, v, 1, 0, "Keyframe period"); }
     if (c->qp_min > 0) { v[0] = (uint32_t)c->qp_min; param_set(e, &e->out_info, P_MIN_QUANT, v, 1, 0, "Smallest quantiser"); }
     if (c->qp_max > 0) { v[0] = (uint32_t)c->qp_max; param_set(e, &e->out_info, P_MAX_QUANT, v, 1, 0, "Largest quantiser"); }
@@ -846,7 +846,18 @@ static int create_component(vcenc *e)
     if (e->failed) return -1;
     if (simple(e, T_COMPONENT_ENABLE, "Enable")) return -1;
     e->enabled = 1;
-    if (port_action(e, &e->in_info, ACTION_ENABLE, "Input enable")) return -1;
+    /* (on the Pi 4, constant bit rate made the input's enable fail with
+       EINVAL (VCEncTest 0.1): then constant skipping frames, then variable) */
+    while (port_action(e, &e->in_info, ACTION_ENABLE, "Input enable")) {
+        uint32_t next = e->stats.rate_control == 2 ? 4 : e->stats.rate_control == 4 ? 1 : 0;
+        if (!next) return -1;
+        logf_(e, "%s with rate control %d: trying %u", e->err, e->stats.rate_control, (unsigned)next);
+        e->failed = 0;
+        e->err[0] = 0;
+        v[0] = next;
+        if (param_set(e, &e->out_info, P_RATECONTROL, v, 1, 0, "Rate control")) return -1;
+        e->stats.rate_control = (int)next;
+    }
     e->in_on = 1;
     if (port_action(e, &e->out_info, ACTION_ENABLE, "Output enable")) return -1;
     e->out_on = 1;
@@ -1146,11 +1157,29 @@ int vcenc_receive(vcenc *e, vcenc_packet *pkt)
         if (!end || !e->pkt_len) continue;
         if (e->pkt_flags & VCENC_PKT_CONFIG) {   /* SPS and PPS: kept for vcenc_headers */
             uint8_t *h = realloc(e->hdr, e->pkt_len);
+            int again = e->hdr_len != 0;
             if (!h) return fail(e, VCENC_ERROR, "Out of memory");
             memcpy(h, e->pkt, e->pkt_len);
             e->hdr = h;
             e->hdr_len = e->pkt_len;
+            if (again) {                   /* (INLINE_HEADER: before each keyframe, on their own) */
+                e->pkt_len = 0;
+                continue;
+            }
             e->stats.config_packets++;
+        } else if ((e->cfg.flags & VCENC_INLINE_HEADERS) && (e->pkt_flags & VCENC_PKT_KEY) && e->hdr_len &&
+                   !(e->pkt_len > 4 && !e->pkt[0] && !e->pkt[1] && ((e->pkt[2] == 1 && (e->pkt[3] & 31) == 7) ||
+                                                                    (!e->pkt[2] && e->pkt[3] == 1 && (e->pkt[4] & 31) == 7)))) {
+            if (e->pkt_len + e->hdr_len > e->pkt_cap) {   /* the SPS and PPS in front of the keyframe */
+                uint8_t *n = realloc(e->pkt, e->pkt_len + e->hdr_len);
+                if (!n) return fail(e, VCENC_ERROR, "Out of memory");
+                e->pkt = n;
+                e->pkt_cap = e->pkt_len + e->hdr_len;
+            }
+            memmove(e->pkt + e->hdr_len, e->pkt, e->pkt_len);
+            memcpy(e->pkt, e->hdr, e->hdr_len);
+            e->pkt_len += e->hdr_len;
+            e->stats.headers_repeated++;
         }
         pkt->data = e->pkt;
         pkt->size = e->pkt_len;

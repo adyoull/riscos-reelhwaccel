@@ -21,8 +21,9 @@
  *
  * The first packet is the stream's SPS and PPS on their own
  * (VCENC_PKT_CONFIG); vcenc_headers gives them too. With
- * VCENC_INLINE_HEADERS they also come again before every keyframe (for
- * a stream that's joined part way). Limits: 8-bit 4:2:0, up to 1920x1088,
+ * VCENC_INLINE_HEADERS each keyframe's packet starts with them again (for
+ * a stream that's joined part way; the firmware sends them as a buffer of
+ * their own, which vcenc puts in front of the keyframe). Limits: 8-bit 4:2:0, up to 1920x1088,
  * even sizes; 1080p needs gpu_mem=128 or more.
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
@@ -33,7 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCENC_VERSION "0.1"
+#define VCENC_VERSION "0.1.1"
 
 /* results (as vcdec's) */
 #define VCENC_OK           0
@@ -51,8 +52,9 @@
 #define VCENC_PROFILE_BASELINE  2   /* constrained baseline */
 
 /* vcenc_config.flags */
-#define VCENC_INLINE_HEADERS  1u    /* SPS and PPS again before every keyframe */
-#define VCENC_CBR             2u    /* constant bit rate (default: variable) */
+#define VCENC_INLINE_HEADERS  1u    /* SPS and PPS again at the start of every keyframe's packet */
+#define VCENC_CBR             2u    /* constant bit rate (default: variable). If the encoder refuses it,
+                                       constant skipping frames, then variable (vcenc_stats.rate_control) */
 #define VCENC_LOG_MESSAGES    4u    /* every MMAL message to the log */
 #define VCENC_NO_GPU_MEM_CHECK 8u   /* open even if gpu_mem looks too small for the size */
 #define VCENC_PCI            16u    /* buffers in PCI_RAMAlloc memory, not Physical Memory Pools */
@@ -95,6 +97,8 @@ typedef struct {
     int in_pools, out_pools;    /* buffers in Physical Memory Pools (else PCI memory) */
     unsigned in_size, out_size, out_buffers;   /* buffer sizes and the output's count, as set */
     unsigned app_page_moves;    /* claiming memory moved the program's page at &8000 (should be 0) */
+    int rate_control;           /* (0.1.1) as set: 1 variable, 2 constant, 4 constant skipping frames */
+    unsigned headers_repeated;  /* (0.1.1) keyframe packets with SPS and PPS put in front */
 } vcenc_stats;
 
 void vcenc_config_init(vcenc_config *c);
