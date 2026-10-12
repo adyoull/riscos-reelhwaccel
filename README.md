@@ -1,31 +1,26 @@
-# ReelHWAccel - hardware video decoding for RISC OS on the Raspberry Pi
+# ReelHWAccel - hardware video decoding and encoding for RISC OS on the Raspberry Pi
 
-ReelHWAccel decodes video with the Raspberry Pi's own hardware instead of
-the ARM, for Reel and for FFmpeg on RISC OS (github.com/adyoull/riscos-ffmpeg,
-where it started). It has two libraries, each with an FFmpeg decoder on
-top:
+ReelHWAccel decodes and encodes video with the Raspberry Pi's own hardware
+instead of the ARM, for Reel and for FFmpeg on RISC OS
+(github.com/adyoull/riscos-ffmpeg, where it started). It has three
+libraries (vcdec and vcenc both in `libvcdec.a`), each with an FFmpeg
+codec on top:
 
 | Library | What it drives | Codecs | Boards | FFmpeg codec |
 |---|---|---|---|---|
 | `vcdec` (0.4.2) | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264 (8-bit 4:2:0, up to 1080p), Motion JPEG | Pi 4 (tested); Pi 2, 3 (untested) | `h264_vchiq` |
 | `vcenc` (0.1.3, in libvcdec) | the VideoCore's encoder, the same way | H.264 encoding (8-bit 4:2:0, up to 1080p) | Pi 4 (tested) | `h264_encvchiq` |
-| `hevcdec` (0.1.12) | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by Raspberry Pi's `rpivid_h265.c` | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 | `hevc_hwdec` |
+| `hevcdec` (0.1.12) | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by `rpivid_h265.c` from the Raspberry Pi Linux kernel, unmodified | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 | `hevc_hwdec` |
 
-`vcdec` also holds `vcenc` (0.1.3): the VideoCore's H.264 encoder, through
-the same VCHIQ and MMAL route (`vcdec/vcenc.h`), with an FFmpeg encoder on
-top, `h264_encvchiq`. On a Pi 4 it encodes 1080p30 at about 72 frames a
-second; with `h264_vchiq` decoding, riscos-ffmpeg's Convert window converts
-at 3.4x real time.
+Reel and FFmpeg use them through this project's devkit (0.2.14): the
+libraries, their headers and the three FFmpeg 5.1.10 patches: two
+decoders and one encoder (`devkit/`, and `devkit/README.md` for how to
+use them). The decoders are `h264_vchiq` and `hevc_hwdec`, not
+`h264_mmal`, which is FFmpeg's existing decoder for Linux's MMAL library;
+the encoder is `h264_encvchiq`. Each refuses what its hardware can't do
+(AVERROR(ENOSYS)), so a program falls back to FFmpeg's software codecs.
 
-Reel and FFmpeg use them through this project's devkit (0.2.14): both
-libraries, their headers and the three FFmpeg 5.1.10 patches (two decoders, one encoder) (`devkit/`,
-and `devkit/README.md` for how to use them). The decoders are
-`h264_vchiq` and `hevc_hwdec`, not `h264_mmal`, which is FFmpeg's existing
-decoder for Linux's MMAL library. Each refuses what its hardware can't
-decode (AVERROR(ENOSYS)), so a player falls back to FFmpeg's software
-decoder.
-
-## What it does on a Raspberry Pi 4
+## Decoding on a Raspberry Pi 4
 
 Every picture is exactly as FFmpeg's software decoder gives it (H.264:
 within the VideoCore's rounding of chroma). Checked on a Pi 4 with the
@@ -42,6 +37,35 @@ test programs below.
 In Reel (riscos-ffmpeg) this plays 1080p60 H.264, and 1080p HEVC at
 35-45% of the ARM (Reel 0.1.23 test builds, which convert each picture
 from the block straight into the video overlay, halving 4K).
+
+## Encoding H.264 on the VideoCore
+
+`h264_encvchiq` (vcenc underneath) encodes on the VideoCore. It's never
+FFmpeg's default H.264 encoder, so ask for it by name:
+
+    ffmpeg -c:v h264_vchiq -i in.mp4 -c:v h264_encvchiq -profile:v main -b:v 5M -c:a aac out.mp4
+
+| On a Raspberry Pi 4 | Speed |
+|---|---|
+| 1080p30 (VCEncTest, pictures already made) | 72 frames a second |
+| 720p | 155 frames a second |
+| Converting a 1280x544 trailer with AAC (riscos-ffmpeg's Convert window), `h264_vchiq` decoding + `h264_encvchiq` | 3.4x real time |
+| The same with ARM decoding + `h264_encvchiq` | 2.2x real time |
+| The same with libx264 (veryfast) on the ARM | 0.66x real time |
+
+- **Input:** YUV420P frames, even sizes up to 1920x1088 (1080p needs `gpu_mem=128`).
+- **Output:** H.264 Baseline, Main or High, Annex B, one access unit a packet, in order (no B frames, so dts = pts).
+- **Headers:** the SPS and PPS are the extradata for MP4 and Matroska; otherwise they're in front of the first packet. `repeat_headers` puts them in front of every keyframe.
+- **Settings:**
+  - `b` (default 10 Mbit/s);
+  - `g` (the keyframe interval; the encoder's default is about 60);
+  - `profile` by name (`baseline`, `main`, `high`) or number;
+  - `level`, `qp_min`, `qp_max`;
+  - keyframes on request (a frame with pict_type I).
+- **Quality:** every stream VCEncTest made decoded back close to the pictures sent (luma PSNR 33 to 52 dB). The 360p and 1080p streams it kept also play in FFmpeg's software decoder.
+- **Constant bit rate:** the Pi 4's firmware refuses it every way, so `rc_constant` gives variable. Variable keeps to the asked rate on real material: 1080p30 at 8 Mbit/s came out at 8.04.
+
+From a program of your own, `vcdec/vcenc.h` is the same without FFmpeg: open, send pictures until the input is full, take packets, send the end, close.
 
 ## The test programs
 
@@ -77,6 +101,13 @@ it took:
   conversion, so the next picture is decoded during the copy. Frames
   are cacheable and converted with NEON from the block's 128-byte
   columns (three 10-bit samples a word at 10-bit).
+- **Encoding:** the encoder is set up as Linux's bcm2835-codec driver
+  sets it, over the same transport as the decoder. The firmware sends
+  the SPS and PPS as soon as the output has buffers, and again as a
+  buffer of their own before each later keyframe, which vcenc puts at
+  the start of the keyframe's packet. It refuses constant bit rate, and
+  once it has refused an enable it refuses every later one on that
+  encoder, so vcenc tries constant only on the running encoder.
 - **Memory:** both libraries' contiguous memory (`common/contig.h`)
   avoids the running program's page at &8000. Taking it moves the
   program to another page, which ARMEABISupport doesn't notice (the
