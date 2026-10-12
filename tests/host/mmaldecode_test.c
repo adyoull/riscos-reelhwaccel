@@ -543,7 +543,7 @@ static int npci_blocks, pci_live, no_pci_mem;
    VideoCore writes; the program sees it only after a cache clean and
    invalidate over the range (as with a real cache that may hold old lines) */
 static int pmp_block[NBLOCKS], pmp_area[NBLOCKS], pmp_pages[NBLOCKS], pmp_claimed[NBLOCKS], pmp_mapped[NBLOCKS], pmp_cached[NBLOCKS];
-static uint8_t *pmp_shadow[NBLOCKS];
+static uint8_t *pmp_shadow[NBLOCKS], *pmp_synced[NBLOCKS];   /* (synced: the program's view at the last clean) */
 static int pmp_live, pmp_invalidates, no_pmp, pmp_scattered, pmp_privileged;
 static int no_armop;
 static int pmp_made;                         /* pools created since the reset */                         /* OS_MMUControl 2 unknown (a RISC OS before 5.23) */
@@ -591,16 +591,35 @@ static void dma_write(uint32_t a, const void *src, uint32_t n)
     memcpy((void *)(uintptr_t)a, src, n);
     pci_open(0);
 }
-/* the kernel's Cache_CleanInvalidateRange (ARMop 21), called in SVC mode */
+/* the kernel's Cache_CleanInvalidateRange (ARMop 21), called in SVC mode:
+   what the program wrote since the last clean (dirty) goes out to the
+   "RAM" first, then the program sees the RAM (for vcenc's input, which the
+   VideoCore reads from RAM; vcdec only reads, so for it only the second) */
 static void fake_cci(uint32_t start, uint32_t end)
 {
     int b = block_of(start);
+    uint32_t o;
     pmp_invalidates++;
     CHECK(b >= 0 && pmp_block[b] && pmp_cached[b] && end <= pci_hi[b] + 63 && end > start, "cache maintenance on &%X..&%X", start, end);
     if (b < 0 || !pmp_block[b]) return;
     if (end > pci_hi[b]) end = pci_hi[b];
+    o = start - pci_lo[b];
     pci_open(1);
-    memcpy((void *)(uintptr_t)start, pmp_shadow[b] + (start - pci_lo[b]), end - start);
+    for (uint32_t i = 0; i < end - start; i++) {
+        uint8_t now = ((uint8_t *)(uintptr_t)start)[i];
+        if (now != pmp_synced[b][o + i]) pmp_shadow[b][o + i] = now;   /* (dirty: cleaned) */
+    }
+    memcpy((void *)(uintptr_t)start, pmp_shadow[b] + o, end - start);
+    memcpy(pmp_synced[b] + o, pmp_shadow[b] + o, end - start);
+    pci_open(0);
+}
+/* the VideoCore reading n bytes at a (a bulk transmit): a cached pool's RAM */
+static void dma_read(void *dst, uint32_t a, uint32_t n)
+{
+    int b = block_of(a);
+    if (b >= 0 && pmp_block[b] && pmp_cached[b]) { memcpy(dst, pmp_shadow[b] + (a - pci_lo[b]), n); return; }
+    pci_open(1);
+    memcpy(dst, (const void *)(uintptr_t)a, n);
     pci_open(0);
 }
 static int in_pci(uint32_t a, uint32_t n)
@@ -656,11 +675,17 @@ static void late_rx_finish(void)
     ((void (*)(uint32_t, uint32_t, uint32_t))(uintptr_t)stub)(stub + 64, 4, 0);
 }
 
+/* vcenc_test: its fake encoder takes the messages and bulk transfers (and
+   the rest is this file's) */
+static int (*swi_hook)(int n, _kernel_swi_regs *r, _kernel_oserror **e);
+
 _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
 {
     uint32_t *R = (uint32_t *)r->r;
+    _kernel_oserror *he = NULL;
     if (n == 0x42 || n == 0x59204) late_rx_finish();
     if (n == 0x59204) slow_tick();
+    if (swi_hook && swi_hook(n, r, &he)) return he;
     switch (n) {
     case 0x42: R[0] = time_cs++; return NULL;
     case 0x591C5: {                          /* BCMSupport_SendTempPropertyBuffer: VC memory */
@@ -695,7 +720,8 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
             b = npci_blocks++;
             pci_lo[b] = (uint32_t)(uintptr_t)p; pci_hi[b] = pci_lo[b] + R[5];
             pmp_block[b] = 1; pmp_area[b] = 300 + b; pmp_pages[b] = (int)R[9]; pmp_claimed[b] = pmp_mapped[b] = 0;
-            pmp_cached[b] = -1; pmp_shadow[b] = calloc(1, R[5]);
+            pmp_cached[b] = -1; pmp_shadow[b] = malloc(R[5]); pmp_synced[b] = malloc(R[5]);
+            memset(pmp_shadow[b], 0xEE, R[5]); memset(pmp_synced[b], 0xEE, R[5]);   /* (RAM as the cache) */
             pci_open(1);
             memset(p, 0xEE, R[5]);           /* ("cache" contents: old) */
             pci_open(0);
@@ -736,6 +762,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
             CHECK(!freed, "a pool removed after its handler's RMA block was freed");
             munmap((void *)(uintptr_t)pci_lo[b], pci_hi[b] - pci_lo[b]);
             free(pmp_shadow[b]);
+            free(pmp_synced[b]);
             pci_lo[b] = 0; pmp_block[b] = 0; pmp_live--;
             return NULL;
         }

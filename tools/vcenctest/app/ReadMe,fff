@@ -1,0 +1,70 @@
+VCEncTest - the vcenc encoder on the Raspberry Pi
+=================================================
+
+vcenc is new: the VideoCore's H.264 encoder (the firmware's
+ril.video_encode), reached through RISC OS's VCHIQ module and MMAL in the
+same way vcdec reaches the decoder. It is in libvcdec beside vcdec. This is
+its first run on a real Pi: until now it has only been tested against a
+fake encoder that behaves the way Linux's driver expects the firmware to.
+
+VCEncTest drives it as a program would. It makes test pictures (a pattern
+that moves), sends them until vcenc says the encoder's input is full, then
+takes every packet that's ready. It checks that the stream's SPS and PPS
+come first, that the packets come in order with their times, and where the
+keyframes are. With -d it then decodes the stream again on the VideoCore
+(with vcdec) and compares each picture with the one sent (PSNR, in dB:
+higher is closer; around 35 or more is good, under 25 counts as a fault).
+
+The encoder needs gpu_mem=128 or more in CONFIG/TXT for 1080p (as the
+decoder does). VCEncTest says how much the VideoCore has at the start of
+each run.
+
+Running it (please send back Result, ResultO, ResultT and ResultV):
+  Verbose  Run this first. 320x180, 10 pictures, with every MMAL message
+           in the report: how the firmware answers the ports, the
+           settings and the buffers. If anything else fails, this shows
+           why. Writes ResultV.
+  Test     640x360, 1280x720 and 1920x1080, 60 pictures each, encoded and
+           decoded again. Keeps two of the streams (Stream360 and
+           Stream1080, H.264 "Annex B": VLC or ffplay can play them).
+           Writes Result.
+  Options  640x360 with each of vcenc's settings in turn: Main, Baseline,
+           SPS and PPS before every keyframe, constant bit rate, a
+           keyframe asked for, PCI memory, 4 input buffers, quantiser
+           limits, level 4.0. Each stream decoded again. Writes ResultO.
+  Speed    How fast it encodes: 720p and 1080p, 300 pictures each, not
+           checked; 1080p from PCI memory and with 4 input buffers too.
+           Writes ResultT.
+
+Each run ends with "Result: OK - ..." or what went wrong.
+
+What the reports tell us:
+  - "CONFIG packet": the SPS and PPS the encoder made, and its profile
+    and level (profile_idc 100 is High, 77 Main, 66 Baseline).
+  - "Encoded N pictures in ... a second": the encoder's speed with
+    pictures already made (the time to make them isn't counted).
+  - "Copying pictures in": the time spent copying the pictures into the
+    encoder's buffers.
+  - "Decoded again ... PSNR": how close the decoded pictures are.
+  - The page at &8000 line: "MOVED" is a failure (restart before the
+    next test).
+
+Options (for running it by hand):
+  vcenctest [-o report] [-w stream] [-v] [-d] [-t] [-s WxH] [-n frames]
+            [-r fps] [-b bitrate] [-g gop] [-p high|main|baseline]
+            [-l level] [-i] [-c] [-k N] [-q min,max] [-B n] [-m pci] [-G]
+  -o file   add the report to file          -w file   the stream to file
+  -v        every MMAL message               -d        decode again, compare
+  -t        a shorter report                 -s WxH    the size (640x360)
+  -n N      pictures (60)                    -r fps    frames a second (25)
+  -b bits   bits a second (10000000)         -g N      a keyframe every N
+  -p name   profile (high)                   -l level  e.g. 41 for 4.1
+  -i        SPS and PPS before every keyframe
+  -c        constant bit rate                -k N      a keyframe at picture N
+  -q a,b    quantiser limits                 -B n      input buffers (2, up to 4)
+  -m pci    PCI memory, not a buffer pool    -G        ignore gpu_mem
+
+Needs SharedUnixLibrary and ARMEABISupport (from PackMan), RISC OS 5.28
+or later on a Raspberry Pi.
+
+VCEncTest 0.1 (vcenc 0.1). Part of riscos-reelhwaccel, GPL version 2.

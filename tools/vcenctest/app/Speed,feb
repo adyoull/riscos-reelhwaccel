@@ -1,0 +1,14 @@
+| Speed: how fast the VideoCore encodes, 300 pictures each, not checked:
+| 720p at 5 Mbit/s, 1080p30 at 15 Mbit/s, the same from PCI memory, and
+| 1080p with 4 input buffers. Reports to ResultT.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 40960K -max 40960K
+Remove <Obey$Dir>.ResultT
+Run <Obey$Dir>.vcenctest -t -s 1280x720 -n 300 -b 5000000 -o <Obey$Dir>.ResultT
+Run <Obey$Dir>.vcenctest -t -s 1920x1080 -n 300 -r 30 -b 15000000 -o <Obey$Dir>.ResultT
+Run <Obey$Dir>.vcenctest -t -s 1920x1080 -n 300 -r 30 -b 15000000 -m pci -o <Obey$Dir>.ResultT
+Run <Obey$Dir>.vcenctest -t -s 1920x1080 -n 300 -r 30 -b 15000000 -B 4 -o <Obey$Dir>.ResultT

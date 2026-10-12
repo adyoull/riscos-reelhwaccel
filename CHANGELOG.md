@@ -1,5 +1,44 @@
 # Changes
 
+## vcenc 0.1, VCEncTest 0.1: H.264 encoding on the VideoCore (2026-10-12)
+
+The next step after decoding: the VideoCore's H.264 encoder, for FFmpeg
+(and so for recording or converting video on RISC OS). Not yet tried on a
+Pi: VCEncTest 0.1 is its first run there.
+
+- vcenc (`vcdec/vcenc.c`, `vcenc.h`, in libvcdec): the firmware's
+  ril.video_encode over VCHIQ and MMAL, with vcdec's Pi-proven transport
+  (buffers numbered from 1, each receive queued as its message arrives,
+  contiguous cacheable pools or PCI memory, data of up to 128 bytes in the
+  message). Set up as Linux's bcm2835-codec sets the encoder: I420 input
+  in whole rows (width to 32, height to 16, the edges repeated into the
+  padding, the picture's size as the crop), profile and level (the level
+  chosen from the size, rate and bit rate unless given), bit rate,
+  variable or constant, keyframe period, quantiser limits, SPS and PPS
+  before keyframes, timing in the SPS. A program polled from null events
+  sends pictures until the input is full and takes packets: whole access
+  units in order with their pts, the SPS and PPS first on their own
+  (CONFIG), keyframes flagged, a keyframe on request. Up to 1920x1088;
+  1080p needs gpu_mem=128.
+- VCEncTest 0.1 (`tools/vcenctest`): test pictures encoded as a program
+  would, the stream checked (SPS and PPS first, order, pts, keyframes),
+  kept with -w, and with -d decoded again by vcdec and compared (luma
+  PSNR). Obey files: Verbose (every MMAL message), Test (360p, 720p,
+  1080p), Options (each setting), Speed.
+- Tests: `tests/host/vcenc_test.c`, a fake ril.video_encode on the fake
+  VCHIQ (which now models a write-back cache: a picture not cleaned out
+  of a cached pool isn't what the VideoCore reads): every packet's
+  picture checked by its Adler-32, edges in the padding, pts, keyframes
+  and headers; a slow encoder that holds inputs (input full), late
+  receives, units in two pieces with the pts on either, bigger output
+  buffers, settings refused, an encoder that goes quiet or reports an
+  error, bad calls; VCEncTest on the fake. Mutants caught: no cache clean
+  before a transmit, padding not repeated, short data ignored, a packet
+  per buffer, pts or key flag lost, no keyframe request, no inline
+  headers, no buffer growth, input not marked busy.
+- devkit/build.sh (for 0.2.12, not built yet): libvcdec.a with vcenc,
+  and vcenc.h.
+
 ## hevcdec 0.1.12, HEVCTest 0.1.13: converting into each kind of memory, timed (2026-10-12)
 
 Reel's halved 4K 10-bit conversion straight into its VideoOverlay buffer

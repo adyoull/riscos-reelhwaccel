@@ -1,0 +1,11 @@
+| Verbose: 320x180, 10 pictures, every MMAL message to and from the
+| encoder in the report (how the firmware answers: the ports, the
+| settings, the buffers coming back). Reports to ResultV.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 40960K -max 40960K
+Remove <Obey$Dir>.ResultV
+Run <Obey$Dir>.vcenctest -v -d -s 320x180 -n 10 -g 5 -o <Obey$Dir>.ResultV

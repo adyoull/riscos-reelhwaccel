@@ -1,0 +1,14 @@
+| Test: 640x360, 1280x720 and 1920x1080 test pictures encoded with vcenc
+| (60 each), then decoded again by the VideoCore (vcdec) and compared with
+| the pictures sent. The 360p and 1080p streams are kept (Stream360,
+| Stream1080). 1080p needs gpu_mem=128. Reports to Result.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 40960K -max 40960K
+Remove <Obey$Dir>.Result
+Run <Obey$Dir>.vcenctest -d -s 640x360 -n 60 -g 30 -w <Obey$Dir>.Stream360 -o <Obey$Dir>.Result
+Run <Obey$Dir>.vcenctest -d -s 1280x720 -n 60 -b 5000000 -o <Obey$Dir>.Result
+Run <Obey$Dir>.vcenctest -d -s 1920x1080 -n 60 -r 30 -b 10000000 -w <Obey$Dir>.Stream1080 -o <Obey$Dir>.Result

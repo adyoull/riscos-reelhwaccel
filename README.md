@@ -10,6 +10,11 @@ top:
 | `vcdec` (0.4.2) | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264 (8-bit 4:2:0, up to 1080p), Motion JPEG | Pi 4 (tested); Pi 2, 3 (untested) | `h264_vchiq` |
 | `hevcdec` (0.1.12) | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by Raspberry Pi's `rpivid_h265.c` | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 | `hevc_hwdec` |
 
+`vcdec` also holds `vcenc` (0.1, new, not yet tried on a Pi): the
+VideoCore's H.264 encoder, through the same VCHIQ and MMAL route
+(`vcdec/vcenc.h`). VCEncTest is its first Pi test; an FFmpeg encoder on
+it comes once that passes.
+
 Reel and FFmpeg use them through this project's devkit (0.2.11): both
 libraries, their headers and the two FFmpeg 5.1.10 patches (`devkit/`,
 and `devkit/README.md` for how to use them). The decoders are
@@ -44,6 +49,9 @@ drive the hardware from RISC OS, and check it:
 - **VCDecTest** (`tools/vcdectest`): vcdec as a player drives it: every
   picture checked, seeks before and after the end of the stream, zero
   copy, memory, speed.
+- **VCEncTest** (`tools/vcenctest`): vcenc as a program drives it: test
+  pictures encoded, the stream checked and decoded again by vcdec
+  (PSNR), each setting in turn, speed.
 - **HEVCTest** (`tools/hevctest`): replays traces of FFmpeg's HEVC
   decoder (made on the host by `tools/hevctrace`) through hevcdec and
   checks every picture, 1:1, halved and 10-bit, blocking and pipelined,
@@ -75,7 +83,7 @@ it took:
 ## Building
 
     ./build.sh                 # every Pi test zip, into dist/
-    vcdec/build.sh OUTDIR      # libvcdec.a and vcdec.h, for RISC OS
+    vcdec/build.sh OUTDIR      # libvcdec.a (vcdec and vcenc), vcdec.h and vcenc.h, for RISC OS
     hevcdec/build.sh OUTDIR    # libhevcdec.a and hwhevcdec.h, for RISC OS
     tools/hevctrace/build.sh .../ffmpeg-5.1.10.tar.xz   # the host ffmpeg that writes traces (HEVC_TRACE=file)
     devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.11)
@@ -105,7 +113,8 @@ licence as Linux's drivers that ReelHWAccel was made against.
   no published specification of the protocol. It contains none of the
   driver's code, but because it used the driver as its reference, it is
   treated as derived from it, and so has the driver's licence: GPL
-  version 2.
+  version 2. vcenc, its encoder, is the same, with Linux's
+  bcm2835-codec driver as its reference for how the encoder is set up.
 - hevcdec is the same for the HEVC block: its own code over RISC OS,
   with Linux's rpivid driver (GPL version 2) as its reference for the
   block's registers and for what `rpivid_h265.c` expects of the rest of
@@ -125,6 +134,7 @@ What it's built from, and how:
 |---|---|---|
 | Raspberry Pi userland, MMAL client (`interface/mmal/vc/mmal_vc_msgs.h`, `mmal_vc_client.c`) | BSD-3-Clause (Broadcom) | MMAL message layouts and how the client handles them, checked against these: no code copied |
 | Linux `vchiq-mmal` (`mmal-msg*.h`, `mmal-vchiq.c`) | GPL-2.0 only | the reference for the MMAL message formats and how the client handles them: none of its code, but treated as derived from it (hence GPL version 2) |
+| Linux `bcm2835-codec` (`bcm2835-v4l2-codec.c`) and userland's `mmal_parameters_video.h` | GPL-2.0 only; BSD-3-Clause | vcenc's encoder setup (the parameters, and the order Linux sets them in) and their numbers: no code copied |
 | Linux `rpivid` (`rpivid_hw.h`, `rpivid.h`, `rpivid_hw.c`, `rpivid_video.c`) and device tree (`bcm2711*.dtsi`) | GPL-2.0 only | the reference for the HEVC block's registers, addresses, clock and interrupt, and what `rpivid_h265.c` expects of the rest of the driver: none of their code (hevcdec's `rpivid.h`, `rpivid_hw.h` and `rpivid_video.h` are our own), but treated as derived from them |
 | Linux `rpivid_h265.c` (rpi-6.6.y) | GPL-2.0-or-later | `hevcdec/rpivid_h265.c`, unchanged: the block's commands for each picture |
 | Linux `hevc-ctrls.h` (V4L2 stateless HEVC controls) | BSD-3-Clause or GPL-2.0 (uAPI) | `hevcdec/hevc_ctrls.h`, with plain types |

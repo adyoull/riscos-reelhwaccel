@@ -54,6 +54,15 @@ grep "FAIL\|vcdec_test:" "$O/vcdec_test.out"
 # ... and VCDecTest's MP4 reader against real MP4s (as mmaldecode's)
 "$HERE/mp4_check.sh" "$O/vcdec_test" "$O/vcdectest" || bad=1
 
+# vcdec/vcenc.c: the H.264 encoder, against a fake MMAL ril.video_encode on the same fake VCHIQ
+arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DVCDEC_HOST -DPROBE_TEST -I$HERE/fake -I$TOP/vcdec -Wall \
+  -Wno-unused-function -no-pie -o "$O/vcenc_test" "$HERE/vcenc_test.c" "$TOP/vcdec/vcenc.c" "$TOP/vcdec/vcdec.c" "$TOP/vcdec/vcdec_copy.S" \
+  "$TOP/tools/vcenctest/vcenctest.c" -lm || bad=1
+echo "== vcenc_test (pictures in through pools and PCI memory, packets in order with pts, keyframes and headers,"
+echo "   input full, late receives, bigger buffers, settings refused, encoders that misbehave, bad calls; VCEncTest)"
+"$TOP/tests/qemu/aligntrap.sh" "$O/vcenc_test" > "$O/vcenc_test.out" || bad=1
+grep "FAIL\|vcenc_test:" "$O/vcenc_test.out"
+
 # ffmpeg/: the h264_vchiq decoder built into FFmpeg 5.1.10 (FFMPEG_TARBALL; skipped without it)
 "$HERE/ffmpeg/run.sh" "$O" || bad=1
 

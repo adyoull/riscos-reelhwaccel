@@ -1,27 +1,27 @@
 #!/bin/bash
-# devkit/build.sh [VERSION] - dist/riscos-reelhwaccel-devkit-VERSION.tgz: libvcdec.a and
-# vcdec.h, libhevcdec.a with hwhevcdec.h and hevc_ctrls.h (GCCSDK GCC 10 at CROSS), the FFmpeg
-# patches (0001 h264_vchiq, 0002 hevc_hwdec), README and COPYING.
+# devkit/build.sh [VERSION] - dist/riscos-reelhwaccel-devkit-VERSION.tgz: libvcdec.a with
+# vcdec.h and vcenc.h (0.2.12), libhevcdec.a with hwhevcdec.h and hevc_ctrls.h (GCCSDK GCC 10
+# at CROSS), the FFmpeg patches (0001 h264_vchiq, 0002 hevc_hwdec), README and COPYING.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
-V=${1:-0.2.11}
+V=${1:-0.2.12}
 CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V
 mkdir -p "$D/include" "$D/lib" "$D/ffmpeg"
 CROSS=$CROSS "$TOP/vcdec/build.sh" "$TMP/build"
 cp "$TMP/build/libvcdec.a" "$D/lib/"
-cp "$TOP/vcdec/vcdec.h" "$D/include/"
+cp "$TOP/vcdec/vcdec.h" "$TOP/vcdec/vcenc.h" "$D/include/"
 cp "$TOP/ffmpeg/0001-avcodec-h264_vchiq.patch" "$TOP/ffmpeg/0002-avcodec-hevc_hwdec.patch" "$D/ffmpeg/"
 CROSS=$CROSS "$TOP/hevcdec/build.sh" "$TMP/hbuild"
 cp "$TMP/hbuild/libhevcdec.a" "$D/lib/"
 cp "$TOP/hevcdec/hwhevcdec.h" "$TOP/hevcdec/hevc_ctrls.h" "$D/include/"
 cp "$HERE/README.md" "$TOP/COPYING" "$D/"
 # the packaged library must link on its own: both objects in it, a program built with GCCSDK
-[ "$(${CROSS}ar t "$D/lib/libvcdec.a" | tr '\n' ' ')" = "vcdec.o vcdec_copy.o " ] ||
-  { echo "devkit: libvcdec.a doesn't hold vcdec.o and vcdec_copy.o"; exit 1; }
-printf '#include "vcdec.h"\nint main(void)\n{\n    vcdec *d;\n    vcdec_config c;\n    vcdec_config_init(&c);\n    return vcdec_open(&d, &c) == VCDEC_OK && vcdec_gpu_mem() > 0;\n}\n' > "$TMP/t.c"
+[ "$(${CROSS}ar t "$D/lib/libvcdec.a" | tr '\n' ' ')" = "vcdec.o vcenc.o vcdec_copy.o " ] ||
+  { echo "devkit: libvcdec.a doesn't hold vcdec.o, vcenc.o and vcdec_copy.o"; exit 1; }
+printf '#include "vcdec.h"\n#include "vcenc.h"\nint main(void)\n{\n    vcdec *d;\n    vcdec_config c;\n    vcenc *e;\n    vcenc_config ec;\n    vcdec_config_init(&c);\n    vcenc_config_init(&ec);\n    return vcdec_open(&d, &c) == VCDEC_OK && vcdec_gpu_mem() > 0 && vcenc_open(&e, &ec) == VCENC_OK;\n}\n' > "$TMP/t.c"
 ${CROSS}gcc -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -I"$D/include" "$TMP/t.c" -L"$D/lib" -lvcdec -o "$TMP/t" ||
   { echo "devkit: a program doesn't link with the packaged libvcdec.a"; exit 1; }
 [ "$(${CROSS}ar t "$D/lib/libhevcdec.a" | sort | tr '\n' ' ')" = "hevcdec.o hevcdec_conv.o hevcdec_hw.o hevcdec_svc.o rpivid_h265.o " ] ||

@@ -1,0 +1,21 @@
+| Options: 640x360, each of vcenc's settings in turn, each stream decoded
+| again and compared: Main, Baseline, SPS/PPS before every keyframe with
+| a keyframe every 10, constant 2 Mbit/s, a keyframe asked for at picture
+| 17, PCI memory, 4 input buffers, quantisers 20 to 30, level 4.0.
+| Reports to ResultO.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 40960K -max 40960K
+Remove <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -p main -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -p baseline -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -i -g 10 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -c -b 2000000 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -k 17 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -m pci -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -B 4 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -q 20,30 -o <Obey$Dir>.ResultO
+Run <Obey$Dir>.vcenctest -d -t -s 640x360 -n 40 -l 40 -o <Obey$Dir>.ResultO
