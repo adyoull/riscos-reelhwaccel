@@ -1,0 +1,18 @@
+| GiveBack: every frame given back to RISC OS (hevcdec_frame_free) as soon
+| as no picture to come refers to it, before the next picture is given to
+| the block, as FFmpeg's hevc_hwdec now does with its spare ones. The
+| picture before may still be reading it: hevcdec frees it once the block
+| is past. Pipelined (-p -G), every picture checked, 1080p and 4K. Each
+| run says how many frames were given back. Reports to ResultG.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 98304K -max 98304K
+Remove <Obey$Dir>.ResultG
+Run <Obey$Dir>.hevctest -p -G -o <Obey$Dir>.ResultG <Obey$Dir>.clips.small.trace
+Run <Obey$Dir>.hevctest -p -G -o <Obey$Dir>.ResultG <Obey$Dir>.clips.hd.trace
+Run <Obey$Dir>.hevctest -p -G -o <Obey$Dir>.ResultG <Obey$Dir>.clips.hd10.trace
+Run <Obey$Dir>.hevctest -p -G -f 10 -o <Obey$Dir>.ResultG <Obey$Dir>.clips.uhd.trace
+Run <Obey$Dir>.hevctest -p -G -f 10 -o <Obey$Dir>.ResultG <Obey$Dir>.clips.uhd10.trace

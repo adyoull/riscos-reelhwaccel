@@ -10,9 +10,9 @@ codec on top:
 |---|---|---|---|---|
 | `vcdec` (0.4.2) | the VideoCore's decoder, through RISC OS's VCHIQ module and the firmware's MMAL service | H.264 (8-bit 4:2:0, up to 1080p), Motion JPEG | Pi 4 (tested); Pi 2, 3 (untested) | `h264_vchiq` |
 | `vcenc` (0.1.3, in libvcdec) | the VideoCore's encoder, the same way | H.264 encoding (8-bit 4:2:0, up to 1080p) | Pi 4 (tested) | `h264_encvchiq` |
-| `hevcdec` (0.1.12) | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by `rpivid_h265.c` from the Raspberry Pi Linux kernel, unmodified | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 | `hevc_hwdec` |
+| `hevcdec` (0.1.13) | the Pi 4's HEVC block ("rpivid" on Linux) directly: its registers, clock and memory from RISC OS, its commands built by `rpivid_h265.c` from the Raspberry Pi Linux kernel, unmodified | HEVC (H.265), 8-bit and 10-bit 4:2:0, up to 4096x4096 (4K) | Pi 4, 400, CM4 | `hevc_hwdec` |
 
-Reel and FFmpeg use them through this project's devkit (0.2.14): the
+Reel and FFmpeg use them through this project's devkit (0.2.15): the
 libraries, their headers and the three FFmpeg 5.1.10 patches: two
 decoders and one encoder (`devkit/`, and `devkit/README.md` for how to
 use them). The decoders are `h264_vchiq` and `hevc_hwdec`, not

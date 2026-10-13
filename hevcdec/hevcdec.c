@@ -33,6 +33,8 @@ struct hevcdec_frame {
     int cached;                          /* cacheable: invalidated before it's read */
     int submitted;                       /* given to the block: decoded when vb.state is set */
     int clean;                           /* (0.1.11) cleaned and invalidated since the block wrote it */
+    int free_pending;                    /* (0.1.13) hevcdec_frame_free'd: goes once the block is past it */
+    unsigned free_after;                 /* (0.1.13) ... once pics_done reaches this */
     char err[160];                       /* why the block failed it */
     hevcdec *d;                          /* (its decoder) */
 };
@@ -62,6 +64,8 @@ struct hevcdec {
     struct v4l2_ctrl_hevc_scaling_matrix flat;
     char err[256];
     hevcdec_frame *frames[MAX_FRAMES];
+    unsigned pics_given, pics_done;      /* (0.1.13) pictures given to the block, and finished by it */
+    int frees_pending;
     /* the slices sent, contiguous copies: a picture's last slice is read by
        phase 1 from here, so a ring (as rpivid's bitstream copies), one a
        picture, each free again once that picture's phase 1 is done */
@@ -78,6 +82,7 @@ struct hevcdec {
 };
 
 static char open_err[256];
+static void reap(hevcdec *d);
 static hevcdec *cur;                     /* (one block, one decoder: for kshim's calls) */
 
 /* ---- log ---- */
@@ -222,6 +227,9 @@ void hevcdec_buf_done(struct vb2_v4l2_buffer *vb, enum vb2_buffer_state state)
 {
     if (!vb) return;
     vb->state = (int)state;
+    if (cur)                                               /* (0.1.13) a frame's picture: finished */
+        for (int i = 0; i < MAX_FRAMES; i++)
+            if (cur->frames[i] && &cur->frames[i]->vb == vb && cur->frames[i]->submitted) cur->pics_done++;
     if (state == VB2_BUF_STATE_ERROR && cur)               /* (a frame: why, kept with it) */
         for (int i = 0; i < MAX_FRAMES; i++)
             if (cur->frames[i] && &cur->frames[i]->vb == vb)
@@ -253,6 +261,10 @@ void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s)
     s->overrun_max = d->overrun_max;
     s->overrun_what = d->overrun_what;
     s->app_page_moves = hevcdec_hw_app_page_moves(d->hw);
+    s->frames = 0;
+    s->frames_bytes = 0;
+    for (int i = 0; i < MAX_FRAMES; i++)
+        if (d->frames[i]) { s->frames++; s->frames_bytes += d->frames[i]->vb.planes[0].length; }
 }
 
 int hevcdec_open(hevcdec **out, const hevcdec_config *c)
@@ -319,6 +331,7 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
 {
     hevcdec_frame *fr;
     int i;
+    reap(d);
     for (i = 0; i < MAX_FRAMES && d->frames[i]; i++) {}
     if (i == MAX_FRAMES) { fail(d, "More than %d frames", MAX_FRAMES); return NULL; }
     if (!(fr = calloc(1, sizeof *fr))) { fail(d, "Out of memory"); return NULL; }
@@ -334,6 +347,39 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
     }
     d->frames[i] = fr;
     return fr;
+}
+
+/* (0.1.13) frees the frames hevcdec_frame_free left for later, once every
+   picture given to the block before then has finished (it may have been a
+   reference of one of them, or that picture's destination), or the block
+   has nothing at all. Not while the decoder is dead: the block may still
+   be at work, as for hevcdec_close. */
+static int idle(const hevcdec *d);
+static void reap(hevcdec *d)
+{
+    if (!d->frees_pending || d->dead) return;
+    for (int i = 0; i < MAX_FRAMES; i++) {
+        hevcdec_frame *f = d->frames[i];
+        if (!f || !f->free_pending || ((int)(d->pics_done - f->free_after) < 0 && !idle(d))) continue;
+        dma_put(d, f->vb.vaddr);
+        free(f);
+        d->frames[i] = NULL;
+        d->frees_pending--;
+        d->stats.frames_freed++;
+    }
+}
+
+int hevcdec_frame_free(hevcdec *d, hevcdec_frame *f)
+{
+    int i;
+    if (!d || !f) return HEVCDEC_OK;
+    for (i = 0; i < MAX_FRAMES && d->frames[i] != f; i++) {}
+    if (i == MAX_FRAMES || f->free_pending) return fail(d, "hevcdec_frame_free: not one of this decoder's frames, or freed already");
+    f->free_pending = 1;
+    f->free_after = d->pics_given;
+    d->frees_pending++;
+    reap(d);
+    return HEVCDEC_OK;
 }
 
 /* ---- the two phases: claims, completions (polled), waiting ---- */
@@ -445,7 +491,9 @@ int hevcdec_frame_wait(hevcdec *d, hevcdec_frame *f)
 
 int hevcdec_finish(hevcdec *d)
 {
-    return wait_for(d, all_done, NULL);
+    int r = wait_for(d, all_done, NULL);
+    reap(d);
+    return r;
 }
 
 /* (0.1.10) What Linux's control core and the V4L2 request API check
@@ -494,6 +542,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
     const struct v4l2_ctrl_hevc_scaling_matrix *scaling = pic->scaling;
     if (d->dead) return fail(d, "The block didn't finish a picture: restart the machine before decoding again");
     d->err[0] = 0;
+    reap(d);
     if (sps->chroma_format_idc != 1 || sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8 ||
         sps->bit_depth_luma_minus8 + 8 != d->cfg.bit_depth)
         return fail(d, "Chroma format %u, %u-bit (chroma %u-bit): this decoder is for %d-bit 4:2:0", sps->chroma_format_idc,
@@ -587,6 +636,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         }
     }
     f->submitted = 1;
+    d->pics_given++;
     d->src_next = (d->src_next + 1) % RPIVID_P1BUF_COUNT;
     d->stats.pictures++;
     if (d->cfg.pipelined) return poll_phases(d) ? HEVCDEC_ERROR : HEVCDEC_OK;
@@ -626,7 +676,7 @@ static const uint8_t *frame_ready(hevcdec *d, const hevcdec_frame *f)
 
 int hevcdec_frame_done(hevcdec *d, const hevcdec_frame *f)
 {
-    if (!d->dead) poll_phases(d);
+    if (!d->dead) { poll_phases(d); reap(d); }
     return !f->submitted || f->vb.state != 0 || d->dead;
 }
 

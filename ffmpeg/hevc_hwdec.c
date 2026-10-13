@@ -79,7 +79,7 @@ extern const FFCodec ff_hevc_decoder;
 #define MAGIC      0x48574443u  /* "HWDC": an inner decoder's opaque is ours */
 
 typedef struct PoolEntry {
-    hevcdec_frame *f;
+    hevcdec_frame *f;           /* (NULL: given back, a place for a new one) */
     int in_use;                 /* a frame of FFmpeg's holds it */
     int failed;                 /* not (yet) decoded by the block: refused, or never given to it */
 } PoolEntry;
@@ -92,6 +92,7 @@ typedef struct HWDecShared {
     PoolEntry pool[MAX_POOL];
     int npool;
     int refs;                   /* the decoder's, and one a frame in use */
+    int spare;                  /* frames kept free for reuse; more go back to RISC OS (spare_frames) */
     AVCodecContext *log;        /* hevcdec's messages: the decoder's, NULL once it's closed (hevcdec may
                                    close later, with a caller's last frame, and say so) */
 } HWDecShared;
@@ -129,6 +130,7 @@ typedef struct HWDecContext {
     int output_8bit;            /* 10-bit streams given out as YUV420P (each sample's top 8 bits) */
     int64_t drop_before;        /* pictures with an earlier pts (pkt_timebase) are decoded but not converted or given out */
     int output_hw;              /* frames given out unconverted (AV_PIX_FMT_HEVCDEC): the caller converts them */
+    int spare_frames;           /* hevcdec frames kept free for reuse (32: all, as before 0.2.15) */
     unsigned dropped;
     int64_t skipped;            /* non-reference pictures not given to the block (skip_frame >= AVDISCARD_NONREF) */
 } HWDecContext;
@@ -536,11 +538,21 @@ static int hwaccel_init(AVCodecContext *inner)
     return ensure_open(w, sps->width, sps->height, sps->bit_depth);
 }
 
+/* a frame of FFmpeg's freed: its hevcdec frame free again, and given back
+   to RISC OS (hevcdec_frame_free) if more than spare_frames are free: a 4K
+   10-bit frame is 16.6 MB of memory and logical address space, and the
+   pool otherwise stays at the most a player ever held */
 static void pool_release(void *opaque, uint8_t *data)
 {
+    HWDecShared *sh = opaque;
     PoolEntry *e = (PoolEntry *)data;
     e->in_use = 0;
-    shared_unref(opaque);
+    if (sh->d && e->f) {
+        int idle = 0;
+        for (int i = 0; i < sh->npool; i++) idle += !sh->pool[i].in_use && sh->pool[i].f;
+        if (idle > sh->spare && hevcdec_frame_free(sh->d, e->f) == HEVCDEC_OK) e->f = NULL;
+    }
+    shared_unref(sh);
 }
 
 /* a frame for a picture: one of hevcdec's, as data[3] */
@@ -550,19 +562,21 @@ static int hwaccel_alloc_frame(AVCodecContext *inner, AVFrame *frame)
     PoolEntry *e = NULL;
     int i;
     if (!w || !w->sh->d) return AVERROR(ENOSYS);
-    for (i = 0; i < w->sh->npool && !e; i++)
+    for (i = 0; i < w->sh->npool && !e; i++)            /* a free frame */
+        if (!w->sh->pool[i].in_use && w->sh->pool[i].f) e = &w->sh->pool[i];
+    for (i = 0; i < w->sh->npool && !e; i++)            /* else a place one was given back from */
         if (!w->sh->pool[i].in_use) e = &w->sh->pool[i];
     if (!e) {
         if (w->sh->npool == MAX_POOL) {
             av_log(w->avctx, AV_LOG_ERROR, "All %d of hevcdec's frames are in use\n", MAX_POOL);
             return AVERROR(ENOMEM);
         }
-        e = &w->sh->pool[w->sh->npool];
-        if (!(e->f = hevcdec_frame_new(w->sh->d))) {
-            av_log(w->avctx, AV_LOG_ERROR, "No frame: %s\n", hevcdec_error(w->sh->d));
-            return AVERROR(ENOMEM);
-        }
-        w->sh->npool++;
+        e = &w->sh->pool[w->sh->npool++];
+        e->f = NULL;
+    }
+    if (!e->f && !(e->f = hevcdec_frame_new(w->sh->d))) {
+        av_log(w->avctx, AV_LOG_ERROR, "No frame: %s\n", hevcdec_error(w->sh->d));
+        return AVERROR(ENOMEM);
     }
     frame->buf[0] = av_buffer_create((uint8_t *)e, sizeof(*e), pool_release, w->sh, 0);
     if (!frame->buf[0]) return AVERROR(ENOMEM);
@@ -748,6 +762,7 @@ static av_cold int hwdec_init(AVCodecContext *avctx)
     if (!(w->sh = av_mallocz(sizeof(*w->sh)))) return AVERROR(ENOMEM);
     w->sh->refs = 1;
     w->sh->log = avctx;
+    w->sh->spare = w->spare_frames;
     if (!(w->pkt = av_packet_alloc()) || !(w->hwf = av_frame_alloc()) || !(w->held = av_frame_alloc()))
         return AVERROR(ENOMEM);
     if (!(w->inner = avcodec_alloc_context3(&ff_hevc_decoder.p))) return AVERROR(ENOMEM);
@@ -949,6 +964,8 @@ static void hwdec_flush(AVCodecContext *avctx)
 #define OFFSET(x) offsetof(HWDecContext, x)
 #define VD AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_DECODING_PARAM
 static const AVOption options[] = {
+    { "spare_frames", "free frames kept for reuse; more are given back to RISC OS (32: keep them all)",
+      OFFSET(spare_frames), AV_OPT_TYPE_INT, { .i64 = 2 }, 0, 32, VD },
     { "pipelined", "give pictures to the block without waiting for each", OFFSET(pipelined), AV_OPT_TYPE_BOOL,
       { .i64 = 1 }, 0, 1, VD },
     { "cached_frames", "the block's frames cacheable (much quicker to convert)", OFFSET(cached_frames),

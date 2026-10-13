@@ -20,6 +20,8 @@ typedef struct {
     int no_cache;                     /* no cache maintenance: frames must be uncached */
     int p1_fail;                      /* this phase 1 (counting from 1) fails: CFSTATUS short, no status */
     int cached_allocs, cache_ops, evictions;
+    int frees;                       /* buffers freed (hevcdec_hw_free) */
+    unsigned long long live_bytes, peak_bytes;   /* the block's memory now, and at most (logical address space) */
     int p1_ticks, p2_ticks;           /* reads of the interrupt control register each phase takes (1) */
     int overlaps;                     /* reads seen with both phases running */
 } fake_hevc_state;

@@ -260,6 +260,18 @@ static void phase2_done(void)
     const void *py = NULL, *pu = NULL, *pv = NULL;
     uint8_t *out;
     fake_hevc.phase2s++;
+    if (p2_rec >= 0)                                     /* (the block reads its references all through phase 2: */
+        for (int i = 0; i < recs[p2_rec].nrefs; i++) {   /* still there, and still those pictures, at the end) */
+            int found;
+            uint64_t ra = (uint64_t)s2[(0x9000 + 16 * recs[p2_rec].refs[i].dpb) / 4] << 6;
+            uint32_t rp = poc_of(ra, &found);
+            if (!found || rp != recs[p2_rec].refs[i].poc) {
+                fake_hevc.ref_errors++;
+                CHECK(0, "reference DPB %u gone or changed while phase 2 read it: frame &%llx holds poc %u%s, not %u",
+                      recs[p2_rec].refs[i].dpb, (unsigned long long)ra, (unsigned)rp, found ? "" : " (nothing)",
+                      (unsigned)recs[p2_rec].refs[i].poc);
+            }
+        }
     have_hash = 0; factors_wrong = 0;
     if (p2_rec >= 0) {                                   /* (its phase 1's findings) */
         pic_hash = recs[p2_rec].hash;
@@ -433,6 +445,8 @@ void *hevcdec_hw_alloc(void *hw, size_t size, uint64_t *bus, int cached)
             if (fake_hevc.memory_left) fake_hevc.memory_left -= size;
             *bus = (uint64_t)(uintptr_t)allocs[i].ram;
             fake_hevc.allocs++;
+            fake_hevc.live_bytes += n;
+            if (fake_hevc.live_bytes > fake_hevc.peak_bytes) fake_hevc.peak_bytes = fake_hevc.live_bytes;
             return allocs[i].p;
         }
     return NULL;
@@ -488,6 +502,8 @@ void hevcdec_hw_free(void *hw, void *p)
             if (allocs[i].cached) { free(allocs[i].ram); free(allocs[i].synced); }
             free(p);
             allocs[i].p = NULL;
+            fake_hevc.frees++;
+            fake_hevc.live_bytes -= allocs[i].n;
             return;
         }
     CHECK(0, "freeing memory that isn't the block's");

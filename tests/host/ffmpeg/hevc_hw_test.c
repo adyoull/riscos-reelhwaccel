@@ -6,6 +6,9 @@
  * (hevcdec_frame_to_i420_half); the last frames kept past
  * avcodec_free_context and converted after it, nothing logged through the
  * freed context (hevcdec closes with the last frame, and says so).
+ * (0.2.15) At the end of the stream all but one queued frame are shown and
+ * freed with the decoder still open: hevcdec's frames then drop to that one
+ * and spare_frames (2), however many the queue held (hevcdec_frame_free).
  *
  *   hevc_hw_test IN.mp4 OUT.yuv HALF.yuv [queue [drop_before [noref_from]]]
  * (noref_from: skip_frame AVDISCARD_NONREF set from that packet on, as a
@@ -31,6 +34,7 @@
 
 static AVFrame *q[QMAX];
 static int nq, shown, depth;
+static unsigned frames_most;
 static FILE *out1, *outh;
 static const void *freed_ctx;              /* (the decoder's context, once freed) */
 static int logged_freed, logged_after;
@@ -108,6 +112,11 @@ int main(int argc, char **argv)
             ret = avcodec_receive_frame(c, f);
             if (ret < 0) { av_frame_free(&f); break; }
             q[nq++] = f;                         /* (kept, as Reel's queue) */
+            {
+                hevcdec_stats st;
+                hevcdec_get_stats(hevcdec_frame_decoder((hevcdec_frame *)f->data[3]), &st);
+                if (st.frames > frames_most) frames_most = st.frames;
+            }
             if (nq == qn) {                      /* the oldest shown: converted now, then freed */
                 if (show(q[0])) return 1;
                 av_frame_free(&q[0]);
@@ -118,6 +127,18 @@ int main(int argc, char **argv)
     if (av_opt_get_int(c, "skipped", AV_OPT_SEARCH_CHILDREN, &skipped) < 0) {
         fprintf(stderr, "FAIL: no \"skipped\" option\n");
         return 1;
+    }
+    /* the queue emptied but for one, the decoder still open: frames given back */
+    unsigned frames_after = 0;
+    while (nq > 1) {
+        if (show(q[0])) return 1;
+        av_frame_free(&q[0]);
+        memmove(q, q + 1, (size_t)--nq * sizeof q[0]);
+    }
+    if (nq) {
+        hevcdec_stats st;
+        hevcdec_get_stats(hevcdec_frame_decoder((hevcdec_frame *)q[0]->data[3]), &st);
+        frames_after = st.frames;
     }
     /* the decoder closed with frames still held: they stay convertible */
     av_log_set_level(AV_LOG_DEBUG);
@@ -135,6 +156,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "FAIL: %d messages through the freed context (%d after it was freed)\n", logged_freed, logged_after);
         return 1;
     }
-    printf("hevc_hw_test: %d pictures shown, %d-bit, %lld skipped\n", shown, depth, (long long)skipped);
+    printf("hevc_hw_test: %d pictures shown, %d-bit, %lld skipped; hevcdec's frames: at most %u, %u once the queue "
+           "emptied\n", shown, depth, (long long)skipped, frames_most, frames_after);
     return 0;
 }

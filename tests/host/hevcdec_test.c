@@ -324,6 +324,23 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
           "hevctest -P 5 %s (%d): %d references wrong, %d phase 2s, %d overlaps:\n%s", trace, ret, fake_hevc.ref_errors,
           fake_hevc.phase2s, fake_hevc.overlaps, o);
     cleaned("-P 5");
+    {   /* (0.1.13) frames given back as soon as no picture to come refers to them (-G), with phase 2
+           slow: the picture before may still be reading one; it goes once the block is past it */
+        static const char *const gopts[2] = { "-p -G", "-P 5 -G" };
+        for (int g = 0; g < 2; g++) {
+            unsigned back = 0;
+            const char *at;
+            fake_hevc_reset();
+            fake_hevc.p2_ticks = 9;
+            o = run_app(&ret, trace, gopts[g]);
+            for (at = strstr(o, "hevcdec: "); at && !sscanf(at, "hevcdec: %u frames given back", &back); at = strstr(at + 1, "hevcdec: ")) {}
+            CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_hevc.ref_errors &&
+                  !fake_hevc.unknown_pictures && fake_hevc.phase2s == nmap && (g || back > 0),
+                  "hevctest %s %s (%d): %d references wrong, %d unknown, %u given back:\n%s", gopts[g], trace, ret,
+                  fake_hevc.ref_errors, fake_hevc.unknown_pictures, back, o);
+            cleaned(gopts[g]);
+        }
+    }
     fake_hevc_reset();                          /* converting a picture still being decoded waits for it */
     fake_hevc.p2_ticks = 6;
     o = run_app(&ret, trace, "-p -w");

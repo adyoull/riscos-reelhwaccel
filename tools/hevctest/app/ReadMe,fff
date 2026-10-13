@@ -28,7 +28,11 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   and 4K (new in 0.1.8): uhd and uhd10, 3840x2160, 30 pictures, 8-bit and
   10-bit
 
-Running it (please send back Result, ResultT, ResultP, ResultK and ResultC):
+Running it (for 0.1.14, please send back ResultG):
+  GiveBack New: frames given back as soon as they may be, pipelined, every
+           picture checked (1080p and 4K). Writes ResultG.
+
+And as before (Result, ResultT, ResultP, ResultK and ResultC):
   Test     Every clip but the 4K ones, every picture checked. Writes
            Result.
   Speed    The 1080p clips (8-bit, 10-bit) without checks: pictures a
@@ -87,6 +91,15 @@ error and address first ("hevctest: signal ...").
 That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
+
+0.1.14 (hevcdec 0.1.13): GiveBack (-G, to ResultG). Users were running
+short of logical address space, and a 4K 10-bit frame is 16.6 MB of it.
+FFmpeg's hevc_hwdec used to keep every frame it had ever needed until the
+film closed; now it gives frames beyond two spare back to RISC OS. A frame
+given back may still be read by the block, as a reference of the picture
+given just before, so hevcdec frees it only once the block is past that
+picture. GiveBack does this as hard as it can (every frame, as soon as it
+may) with every picture checked: please run it and send ResultG.
 
 0.1.13 (hevcdec 0.1.12): Memory (-O, to ResultO) times converting into
 each kind of memory a player might write to: ordinary cached memory,

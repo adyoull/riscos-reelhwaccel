@@ -496,6 +496,7 @@ static int mem_bench(hevcdec *d, hevcdec_frame *f, const pic_t *p)
 int probe_main(int argc, char **argv)
 {
     const char *name = NULL;
+    int give_back = 0;                     /* -G: frames no picture can refer to again given back (hevcdec_frame_free) */
     int verbose = 0, keep_going = 0, timing = 0, count = 0, nframes = 17, r, i, wrong = 0, done = 0, fatal = 0;
     int flat = 0;                          /* -s: flat scaling lists given where the stream has none */
     int overran = 0;                       /* the block wrote past a buffer's end */
@@ -544,6 +545,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-K")) bench = 1;
         else if (!strcmp(argv[i], "-O")) obench = 1;
         else if (!strcmp(argv[i], "-p")) pipelined = 1;
+        else if (!strcmp(argv[i], "-G")) give_back = 1;
         else if (!strcmp(argv[i], "-P") && i + 1 < argc) pipelined = 1, lag = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
             if (!(dump = fopen(argv[++i], "wb"))) { printf("Can't write %s\n", argv[i]); return 1; }
@@ -645,6 +647,21 @@ int probe_main(int argc, char **argv)
             pic_t *p = &pics[i];
             hevcdec_picture hp;
             int k, slot = -1;
+            if (give_back)   /* (-G) before this picture is given, as FFmpeg does: frames outside its DPB, which
+                                nothing to come refers to, though the picture given last may, still with the block */
+                for (k = 0; k < nframes; k++) {
+                    int in_dpb = 0, pending = 0;
+                    if (!frames[k] || !holds[k]) continue;
+                    for (int e = 0; e < p->dec.num_active_dpb_entries; e++) in_dpb |= p->dec.dpb[e].timestamp == holds[k];
+                    for (int q = 0; q < npend; q++) pending |= pend_slot[q] == k;
+                    if (in_dpb || pending) continue;
+                    if (hevcdec_frame_free(d, frames[k]) != HEVCDEC_OK) {
+                        say("hevcdec_frame_free: %s\n", hevcdec_error(d));
+                        fatal = 1;
+                    }
+                    frames[k] = NULL;
+                    holds[k] = 0;
+                }
             /* a frame no reference of this picture is in (nor the picture
                given last, still to be checked: -p) */
             for (k = 0; k < nframes && slot < 0; k++) {
@@ -655,6 +672,11 @@ int probe_main(int argc, char **argv)
                 if ((!in_dpb || !holds[k]) && !pending) slot = k;
             }
             if (slot < 0) { say("Picture %u: no free frame (%d in use)\n", (unsigned)p->number, nframes); fatal = 1; break; }
+            if (!frames[slot] && !(frames[slot] = hevcdec_frame_new(d))) {   /* (-G: given back before) */
+                say("Picture %u: no frame: %s\n", (unsigned)p->number, hevcdec_error(d));
+                fatal = 1;
+                break;
+            }
             hp.sps = &p->sps; hp.pps = &p->pps; hp.dec = &p->dec; hp.scaling = p->has_scaling ? &p->scaling : NULL;
             hp.nslices = p->nslices; hp.slices = p->slices;
             t0 = now_cs();
@@ -735,6 +757,7 @@ int probe_main(int argc, char **argv)
         wrong++;
     }
     if (!timing) say("%d checked against FFmpeg: %d wrong\n", done, wrong);
+    if (give_back) say("hevcdec: %u frames given back (-G), %u frames at the end\n", st.frames_freed, st.frames);
     if (st.overruns) {
         say("hevcdec: the block wrote past the end of %u buffers, at most %u bytes past %s (into their guard areas)\n",
             st.overruns, st.overrun_max, st.overrun_what ? st.overrun_what : "one");

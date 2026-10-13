@@ -13,6 +13,6 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 "$HERE/tools/vcenctest/build.sh" "${VCENCTEST:-0.1.3}"
 "$HERE/tools/hevcprobe/build.sh" "${HEVCPROBE:-0.1}"
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"
-if [ -n "${FFMPEG_TARBALL:-}" ]; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.13}"
+if [ -n "${FFMPEG_TARBALL:-}" ]; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.14}"
 else echo "HEVCTest: skipped (set FFMPEG_TARBALL for its traces)"; fi
-"$HERE/devkit/build.sh" "${DEVKIT:-0.2.14}"
+"$HERE/devkit/build.sh" "${DEVKIT:-0.2.15}"

@@ -1,5 +1,48 @@
 # Changes
 
+## devkit 0.2.15, hevcdec 0.1.13, HEVCTest 0.1.14: HEVC frames given back to RISC OS (2026-10-13)
+
+Users have been running out of logical address space ("Unable to allocate
+logical address space"; see AddrSpace). ReelHWAccel has no heap areas of
+its own: the test programs' heaps are in their Wimp slots, and each
+hardware buffer is a Physical Memory Pool reserving exactly its size. The
+big consumer was `hevc_hwdec`'s frame pool at 4K. Measured on the fake
+block (FFmpeg + hevc_hwdec, 4-picture clips), 4K 10-bit is 19 pools and
+116 MB: about 50 MB of working buffers, plus 16.6 MB per frame. The pool
+made a frame whenever none was free and kept them all until the decoder
+closed (up to 32), so a player holding pictures decoded ahead kept its
+peak for the whole film: 14 frames at 4K 10-bit is about 280 MB.
+
+- **hevcdec 0.1.13: `hevcdec_frame_free`.** A frame no longer wanted goes
+  back to RISC OS without waiting: at once if the block has finished every
+  picture given so far, otherwise once it has (counted: pictures given,
+  pictures finished), since the picture given last may still read it as a
+  reference. Checked at hevcdec_decode, _frame_new, _frame_done and
+  _finish. A dead decoder keeps its memory, as at close. `hevcdec_stats`
+  gains `frames`, `frames_freed` and `frames_bytes` (rebuild with the new
+  header: the struct is bigger).
+- **hevc_hwdec (patch 0002): `spare_frames`** (default 2). A frame FFmpeg
+  and the caller have let go of goes back to RISC OS when more than that
+  many are free; 32 keeps them all, as before. The pool reuses the freed
+  places.
+- **HEVCTest 0.1.14: `-G`** gives every frame back as soon as no picture
+  to come refers to it, before the next picture is given (as FFmpeg
+  frees). The GiveBack Obey file (ResultG) does it pipelined, every
+  picture checked, at 1080p and 4K, for the Pi.
+- **Tests:**
+  - The fake block now checks that the references are still there, and
+    still the same pictures, when phase 2 finishes, not just when it
+    starts (the block reads them throughout).
+  - hevcdec_test: `-p -G` and `-P 5 -G` on every trace with a slow
+    phase 2.
+  - FFmpeg: `-spare_frames 32` against `0` (every picture exact, frames
+    remade, no higher peak).
+  - hevc_hw_test (output_hw, a 12-picture queue): hevcdec's frames drop
+    from 15 to 7 once the queue empties.
+  - The fake reports allocations and peak KB.
+  - Mutants caught: freeing at once (79 failures), waiting one picture
+    too few (18), hevc_hwdec never giving back (6).
+
 ## v0.2.14: devkit 0.2.14, vcenc 0.1.3, h264_encvchiq, VCEncTest 0.1.3 (2026-10-12)
 
 riscos-ffmpeg released the encoder in riscos21 / Reel 0.1.28 (their

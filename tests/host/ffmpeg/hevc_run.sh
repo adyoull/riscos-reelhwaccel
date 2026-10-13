@@ -102,6 +102,30 @@ for clip in small:352x288 slices:416x240 nowpp:416x240 odd:426x240 small10:352x2
   clean "$O/$n.hevc_hwdec.err" || { echo "FAIL: the fake after -ss $n:"; cat "$O/$n.hevc_hwdec.err"; bad=1; }
 done
 
+# (0.2.15) frames given back to RISC OS: -spare_frames 32 keeps every frame (as before), 0 gives each
+# back as it's released, while the slow phase 2 still has pictures that may read it (hevcdec frees it
+# once those finish). Every picture FFmpeg's, nothing wrong, more allocations, and no higher a peak
+for n in small slices odd10 uhd10; do
+  case $n in small) sz=352x288 ;; slices) sz=416x240 ;; odd10) sz=426x240 ;; uhd10) sz=3840x2160 ;; esac
+  pf=yuv420p; case $n in *10) pf=yuv420p10le ;; esac
+  export HEVC_FAKE_TRACE=$C/$n.trace HEVC_FAKE_YUV=$C/$n.yuv HEVC_FAKE_SIZE=$sz
+  for sp in 32 0; do
+    HEVC_FAKE_P2=4 "$Q" "$FF" -nostdin -loglevel error -c:v hevc_hwdec -spare_frames $sp -i "$C/$n.mp4" -f rawvideo \
+      -pix_fmt $pf -y "$O/spare$sp.yuv" 2> "$O/spare$sp.err" || { echo "FAIL: -spare_frames $sp $n:"; cat "$O/spare$sp.err"; bad=1; }
+    cmp -s "$O/spare$sp.yuv" "$C/$n.yuv" || { echo "FAIL: -spare_frames $sp $n: not FFmpeg's pictures"; bad=1; }
+    clean "$O/spare$sp.err" || { echo "FAIL: the fake after -spare_frames $sp $n:"; cat "$O/spare$sp.err"; bad=1; }
+  done
+  a32=$(sed -n 's/.* \([0-9]*\) allocations, peak \([0-9]*\) KB/\1 \2/p' "$O/spare32.err")
+  a0=$(sed -n 's/.* \([0-9]*\) allocations, peak \([0-9]*\) KB/\1 \2/p' "$O/spare0.err")
+  if [ $n = uhd10 ]; then                  # (4 pictures: all held to the end, nothing to give back)
+    echo "  $n: allocations and peak KB, every frame kept: $a32; given back: $a0"
+  elif [ -z "$a0" ] || [ -z "$a32" ] || [ "${a0% *}" -le "${a32% *}" ] || [ "${a0#* }" -gt "${a32#* }" ]; then
+    echo "FAIL: -spare_frames 0 $n gave nothing back (allocations and peak KB: kept $a32, given back $a0)"; bad=1
+  else
+    echo "  $n: allocations and peak KB, every frame kept: $a32; given back: $a0"
+  fi
+done
+
 # a raw stream (no extradata: hevcdec opened at the first picture)
 export HEVC_FAKE_TRACE=$C/small.trace HEVC_FAKE_YUV=$C/small.yuv HEVC_FAKE_SIZE=352x288
 ffmpeg -v error -y -i "$C/small.mp4" -c copy -bsf:v hevc_mp4toannexb -f hevc "$O/small.hevc" || bad=1
@@ -171,7 +195,8 @@ for t in small:small.mp4:352x288:8:small.yuv small10:small10.mp4:352x288:10:smal
   export HEVC_FAKE_TRACE=$C/${n/crop10/small10}.trace HEVC_FAKE_YUV=$C/${n/crop10/small10}.yuv HEVC_FAKE_SIZE=352x288
   "$Q" "$O/hevc_hw_test" "$mpp" "$O/hw.$n.yuv" "$O/hw.$n.half.yuv" 12 > "$O/hw.$n.out" 2> "$O/hw.$n.err" &&
     python3 "$HERE/halve.py" "$refp" "$sz" "$bits" "$O/hw.$n.want.half.yuv" &&
-    cmp -s "$O/hw.$n.yuv" "$refp" && cmp -s "$O/hw.$n.half.yuv" "$O/hw.$n.want.half.yuv" && clean "$O/hw.$n.err" ||
+    cmp -s "$O/hw.$n.yuv" "$refp" && cmp -s "$O/hw.$n.half.yuv" "$O/hw.$n.want.half.yuv" && clean "$O/hw.$n.err" &&
+    awk '{ most = $(NF-5) + 0; after = $(NF-4) + 0; if (most >= 12 && after > most - 8) exit 1 }' "$O/hw.$n.out" ||
     { echo "FAIL: output_hw, $n: $(cat "$O/hw.$n.out")"; cmp "$O/hw.$n.yuv" "$refp"; cmp "$O/hw.$n.half.yuv" "$O/hw.$n.want.half.yuv";
       cat "$O/hw.$n.err"; bad=1; }
 done
@@ -194,7 +219,7 @@ done
 # and set part way, as a player behind would, through output_hw: every picture shown or skipped, the count read
 export HEVC_FAKE_TRACE=$C/small.trace HEVC_FAKE_YUV=$C/small.yuv HEVC_FAKE_SIZE=352x288
 "$Q" "$O/hevc_hw_test" "$C/small.mp4" "$O/hwn.yuv" "$O/hwn.half.yuv" 12 - 8 > "$O/hwn.out" 2> "$O/hwn.err" &&
-  sh=$(sed -n 's/.*: \([0-9]*\) pictures shown, 8-bit, \([0-9]*\) skipped/\1 \2/p' "$O/hwn.out") &&
+  sh=$(sed -n 's/.*: \([0-9]*\) pictures shown, 8-bit, \([0-9]*\) skipped;.*/\1 \2/p' "$O/hwn.out") &&
   [ -n "$sh" ] && [ "${sh#* }" -gt 0 ] && [ $(( ${sh% *} + ${sh#* } )) = 20 ] && clean "$O/hwn.err" ||
   { echo "FAIL: skip_frame noref set part way (output_hw): $(cat "$O/hwn.out")"; cat "$O/hwn.err"; bad=1; }
 

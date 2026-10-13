@@ -62,9 +62,10 @@ static uint8_t *slurp(const char *name, long *n)
 static void report(void)
 {
     fprintf(stderr, "fake_hevc: %d complaints, %d phase 1s, %d phase 2s, %d references wrong, %d pictures unknown, "
-            "%d stale factors, %d evictions, %d buffers not freed, %d overlaps\n", fake_hevc.fails, fake_hevc.phase1s,
-            fake_hevc.phase2s, fake_hevc.ref_errors, fake_hevc.unknown_pictures, fake_hevc.factors_wrong,
-            fake_hevc.evictions, fake_hevc_live(), fake_hevc.overlaps);
+            "%d stale factors, %d evictions, %d buffers not freed, %d overlaps, %d allocations, peak %llu KB\n",
+            fake_hevc.fails, fake_hevc.phase1s, fake_hevc.phase2s, fake_hevc.ref_errors, fake_hevc.unknown_pictures,
+            fake_hevc.factors_wrong, fake_hevc.evictions, fake_hevc_live(), fake_hevc.overlaps, fake_hevc.allocs,
+            fake_hevc.peak_bytes >> 10);
 }
 
 /* a clip's pictures (its trace's slice hashes, FFmpeg's decode) added to the map */
