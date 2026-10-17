@@ -8,9 +8,8 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
+. "$TOP/common/toolchain.sh"
 V=${1:-0.1}
-CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
-ELF2AIF=${ELF2AIF:-$TOP/tools/elf2aif/elf2aif}
 FFMPEG=${FFMPEG:-ffmpeg}
 TMP=$(mktemp -d)
 mkdir -p "$TMP/VCDecTest/clips"
@@ -18,6 +17,7 @@ CROSS=$CROSS "$TOP/vcdec/build.sh" "$TMP/lib"
 ${CROSS}gcc -O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -fstack-clash-protection -Wall -static -I"$TMP/lib" \
   -o "$TMP/vcdectest.elf" "$HERE/vcdectest.c" -L"$TMP/lib" -lvcdec
 "$ELF2AIF" -e "$TMP/vcdectest.elf" "$TMP/VCDecTest/vcdectest,ff8" >/dev/null
+[ -z "${KEEP_ELF:-}" ] || { mkdir -p "$KEEP_ELF"; cp "$TMP/vcdectest.elf" "$KEEP_ELF/"; }   # for ci/checks.sh
 C="$TMP/VCDecTest/clips"
 $FFMPEG -v error -y -f lavfi -i testsrc2=size=640x360:rate=25 -frames:v 60 -c:v libx264 -profile:v main -bf 2 -g 20 \
   -pix_fmt yuv420p "$C/small.mp4"

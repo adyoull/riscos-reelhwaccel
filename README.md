@@ -115,25 +115,46 @@ it took:
 
 ## Building
 
-    ./build.sh                 # every Pi test zip, into dist/
+    ./build.sh                 # every Pi test zip and the devkit, into dist/
+    ci/build.sh                # ./build.sh, then riscos-crossdev's checks (as GitHub runs it)
     vcdec/build.sh OUTDIR      # libvcdec.a (vcdec and vcenc), vcdec.h and vcenc.h, for RISC OS
     hevcdec/build.sh OUTDIR    # libhevcdec.a and hwhevcdec.h, for RISC OS
     tools/hevctrace/build.sh .../ffmpeg-5.1.10.tar.xz   # the host ffmpeg that writes traces (HEVC_TRACE=file)
-    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.11)
+    devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.15)
     FFMPEG_TARBALL=.../ffmpeg-5.1.10.tar.xz tests/host/run.sh   # the host tests
     ffmpeg/mkpatch.sh .../ffmpeg-5.1.10.tar.xz   # patch 0001, after vchiqdec.c changes
     ffmpeg/mkpatch-hevc.sh .../ffmpeg-5.1.10.tar.xz   # patch 0002, after hevc_hwdec.c changes
+    ffmpeg/mkpatch-enc.sh .../ffmpeg-5.1.10.tar.xz    # patch 0003, after vchiqenc.c changes
 
-`build.sh` needs GCCSDK GCC 10 (`CROSS=.../arm-riscos-gnueabihf-`),
-`tools/elf2aif` built (`make -C tools/elf2aif GCCSDK_SRC=<gccsdk>`), and
-the host's ffmpeg with libx264 for MMALDecode's clips and libx265 for
-HEVCTest's (with `FFMPEG_TARBALL` set, for the tracing ffmpeg). The HEVCHW module
-is built with `arm-linux-gnueabihf-gcc` (position independent, no GOT).
-The host tests run each tool as an arm-linux program under a QEMU that
-traps unaligned accesses as RISC OS does (`tests/qemu/build-qemu.sh`),
+**The toolchain** (`common/toolchain.sh`) is
+[riscos-crossdev](https://github.com/adyoull/riscos-crossdev)'s, at
+`$RISCOS_TOOLCHAIN` (set in its container image and by its `env.sh`), or a
+GCCSDK GCC 10 environment (`CROSS=.../arm-riscos-gnueabihf-`, with
+`tools/elf2aif` built: `make -C tools/elf2aif GCCSDK_SRC=<gccsdk>`). The
+HEVCHW module is built with `arm-linux-gnueabihf-gcc` (position
+independent, no GOT).
+
+**Test zips with clips** need more, and `build.sh` skips them (saying so)
+without it: MMALDecode and VCDecTest need the host's ffmpeg with libx264,
+HEVCTest needs libx265 and `FFMPEG_TARBALL` (for the tracing ffmpeg).
+
+**On GitHub,** every push builds with `ci/build.sh` in riscos-crossdev's
+container image, the version named in `.riscos-deps`, and keeps `dist/` as
+the run's artifact. `ci/build.sh` runs riscos-crossdev's checks on each
+program and on both libraries: static linking, stack probes, no
+VFPv4-only instructions (so they run on VFPv3 machines), UnixLib
+consistency, and casts that could load unaligned. Once a day a second
+workflow looks for a newer riscos-crossdev release and opens a pull
+request moving `.riscos-deps` to it, saying whether the build passed.
+Neither runs anything on RISC OS, and neither releases.
+
+**The host tests** run each tool as an arm-linux program under a QEMU that
+traps unaligned accesses as RISC OS does (`tests/qemu/build-qemu.sh`, or
+riscos-crossdev's: `QEMU=$RISCOS_TOOLCHAIN/bin/qemu-arm-aligntrap`),
 against fakes of the VCHIQ module, the MMAL firmware, the firmware
 mailbox and the HEVC block; the fakes behave as the Pi did in each of
-the runs above.
+the runs above. They need `FFMPEG_TARBALL`, libx264 and libx265, so they
+are run before each release rather than on GitHub.
 
 ## Licence
 

@@ -1,5 +1,24 @@
 # Changes
 
+## Built on GitHub with riscos-crossdev (2026-10-17)
+
+- **`.riscos-deps`** pins riscos-crossdev v1.8.1, whose container image
+  GitHub builds in.
+- **`.github/workflows/riscos-build.yml`** (from riscos-crossdev's `ci/`):
+  every push and pull request runs `ci/build.sh` and keeps `dist/`.
+- **`.github/workflows/riscos-deps-update.yml`:** once a day, a pull
+  request when riscos-crossdev has a newer release, built with it.
+- **`ci/build.sh`:** `./build.sh`, then riscos-crossdev's checks on every
+  program linked (the tool build scripts keep their ELFs in `KEEP_ELF`)
+  and on libvcdec.a and libhevcdec.a, and its unaligned-cast check on our
+  sources (`ci/unaligned-safe` lists the casts checked by hand).
+- **`common/toolchain.sh`:** every build script finds the RISC OS
+  compiler and elf2aif there: `$RISCOS_TOOLCHAIN` (riscos-crossdev), else
+  `CROSS`/`ELF2AIF` as before, else `~/gccsdk/env`. No path is assumed.
+- **`build.sh`** also builds the devkit, and skips (saying so) the zips
+  whose clips need what the image lacks: MMALDecode and VCDecTest
+  (libx264), HEVCTest (libx265, `FFMPEG_TARBALL`).
+
 ## devkit 0.2.15, hevcdec 0.1.13, HEVCTest 0.1.14: HEVC frames given back to RISC OS (2026-10-13)
 
 Users have been running out of logical address space ("Unable to allocate

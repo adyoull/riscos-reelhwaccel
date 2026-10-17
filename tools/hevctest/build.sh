@@ -7,9 +7,8 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
+. "$TOP/common/toolchain.sh"
 V=${1:-0.1.13}
-CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
-ELF2AIF=${ELF2AIF:-$TOP/tools/elf2aif/elf2aif}
 FFMPEG=${FFMPEG:-ffmpeg}
 : "${FFMPEG_TARBALL:?FFMPEG_TARBALL (ffmpeg-5.1.10.tar.xz) is needed for the traces}"
 TRACER=$("$TOP/tools/hevctrace/build.sh" "$FFMPEG_TARBALL" "$TOP/out/hevctrace" | tail -1 | sed 's/ (up to date)//')
@@ -19,6 +18,7 @@ CROSS=$CROSS "$TOP/hevcdec/build.sh" "$TMP/lib"
 ${CROSS}gcc -O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -fstack-clash-protection -Wall -static -I"$TMP/lib" \
   -o "$TMP/hevctest.elf" "$HERE/hevctest.c" -L"$TMP/lib" -lhevcdec
 "$ELF2AIF" -e "$TMP/hevctest.elf" "$TMP/HEVCTest/hevctest,ff8" >/dev/null
+[ -z "${KEEP_ELF:-}" ] || { mkdir -p "$KEEP_ELF"; cp "$TMP/hevctest.elf" "$KEEP_ELF/"; }   # for ci/checks.sh
 C="$TMP/HEVCTest/clips"
 clip() {   # name size frames x265-params [pix_fmt [hevc_metadata crop]]
   local pf=${5:-yuv420p} size

@@ -5,8 +5,9 @@
 # (no warnings about signedness or unused parameters).
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
+TOP=$(cd "$HERE/.." && pwd)
+. "$TOP/common/toolchain.sh"
 O=${1:?usage: hevcdec/build.sh OUTDIR}
-CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 CF="-O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -fstack-clash-protection -Wall"
 mkdir -p "$O"
 ${CROSS}gcc $CF -Wextra -I"$HERE" -c -o "$O/hevcdec.o" "$HERE/hevcdec.c"

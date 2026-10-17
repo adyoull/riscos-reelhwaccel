@@ -8,15 +8,15 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
+. "$TOP/common/toolchain.sh"
 V=${1:-0.1}
-CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
-ELF2AIF=${ELF2AIF:-$TOP/tools/elf2aif/elf2aif}
 FFMPEG=${FFMPEG:-ffmpeg}
 TMP=$(mktemp -d)
 mkdir -p "$TMP/MMALDecode/clips"
 ${CROSS}gcc -O2 -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -fstack-clash-protection -Wall -static \
   -o "$TMP/mmaldecode.elf" "$HERE/mmaldecode.c"
 "$ELF2AIF" -e "$TMP/mmaldecode.elf" "$TMP/MMALDecode/mmaldecode,ff8" >/dev/null
+[ -z "${KEEP_ELF:-}" ] || { mkdir -p "$KEEP_ELF"; cp "$TMP/mmaldecode.elf" "$KEEP_ELF/"; }   # for ci/checks.sh
 C="$TMP/MMALDecode/clips"
 # Each clip is encoded straight to MP4 (so it has real pts: B frames in
 # display order), then the same bitstream as raw H.264 (Annex B, FFmpeg's

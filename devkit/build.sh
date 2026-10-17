@@ -1,13 +1,13 @@
 #!/bin/bash
 # devkit/build.sh [VERSION] - dist/riscos-reelhwaccel-devkit-VERSION.tgz: libvcdec.a with
-# vcdec.h and vcenc.h (0.2.12), libhevcdec.a with hwhevcdec.h and hevc_ctrls.h (GCCSDK GCC 10
-# at CROSS), the FFmpeg patches (0001 h264_vchiq, 0002 hevc_hwdec, 0003 h264_encvchiq),
+# vcdec.h and vcenc.h (0.2.12), libhevcdec.a with hwhevcdec.h and hevc_ctrls.h (the RISC OS
+# toolchain common/toolchain.sh finds), the FFmpeg patches (0001 h264_vchiq, 0002 hevc_hwdec, 0003 h264_encvchiq),
 # README and COPYING.
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
+. "$TOP/common/toolchain.sh"
 V=${1:-0.2.15}
-CROSS=${CROSS:-/root/gccsdk/env/bin/arm-riscos-gnueabihf-}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V
 mkdir -p "$D/include" "$D/lib" "$D/ffmpeg"
