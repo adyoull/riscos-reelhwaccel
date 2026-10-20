@@ -225,6 +225,17 @@ struct vcenc {
 
 static char open_err[200];
 
+/* (0.1.4) every encoder not yet closed, for vcenc_close_all at exit */
+#define MAX_LIVE 8
+static vcenc *live[MAX_LIVE];
+static int nlive, exit_set;
+static void live_add(vcenc *e) { if (nlive < MAX_LIVE) live[nlive++] = e; }
+static void live_remove(vcenc *e)
+{
+    for (int i = 0; i < nlive; i++)
+        if (live[i] == e) { live[i] = live[--nlive]; return; }
+}
+
 /* ---- small things ---- */
 
 static void logf_(vcenc *e, const char *fmt, ...)
@@ -937,10 +948,12 @@ int vcenc_open(vcenc **out, const vcenc_config *c)
                  "in CONFIG/TXT", mb, c->width, c->height);
         return VCENC_UNSUPPORTED;
     }
+    if (!exit_set) { atexit(vcenc_close_all); exit_set = 1; }
     if (!(e = calloc(1, sizeof *e))) {
         snprintf(open_err, sizeof open_err, "Out of memory");
         return VCENC_ERROR;
     }
+    live_add(e);
     e->cfg = *c;
     if (!e->cfg.fps_num || !e->cfg.fps_den) { e->cfg.fps_num = 25; e->cfg.fps_den = 1; }
     if (!e->cfg.bitrate) e->cfg.bitrate = 10000000u;
@@ -1006,6 +1019,7 @@ void vcenc_close(vcenc *e)
 {
     _kernel_oserror *er;
     if (!e) return;
+    live_remove(e);
     if (e->opened) destroy_component(e);
     /* (the receives queued before: finished before their memory goes) */
     {
@@ -1028,6 +1042,18 @@ void vcenc_close(vcenc *e)
     free(e->pkt);
     free(e->hdr);
     free(e);
+}
+
+/* (0.1.4) every encoder still open closed: run at exit (atexit, from the
+   first vcenc_open), or by a program's own handler for the signals that
+   end it (UnixLib doesn't run atexit's then) */
+void vcenc_close_all(void)
+{
+    while (nlive) {
+        vcenc *e = live[nlive - 1];
+        e->cfg.log = NULL;                 /* (its handle may be gone) */
+        vcenc_close(e);
+    }
 }
 
 int vcenc_poll(vcenc *e)

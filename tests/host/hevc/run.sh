@@ -59,4 +59,7 @@ echo "   references, frames, 128-byte columns; PU buffer grown; phases that neve
 "$TOP/tests/qemu/aligntrap.sh" "$O/hevcdec_test" "${args[@]}" > "$O/hevcdec_test.out" 2>&1 || bad=1
 grep "^FAIL\|hevcdec_test:\|matched" "$O/hevcdec_test.out"
 grep -q "hevcdec_test: all passed" "$O/hevcdec_test.out" || bad=1
+"$TOP/tests/qemu/aligntrap.sh" "$O/hevcdec_test" --exit > "$O/hevcdec_exit.out" 2>&1 || bad=1
+grep "FAIL\|hevcdec_test --exit:" "$O/hevcdec_exit.out"
+grep -q "hevcdec_test --exit: all passed" "$O/hevcdec_exit.out" || bad=1
 exit $bad

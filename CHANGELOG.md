@@ -1,5 +1,52 @@
 # Changes
 
+## devkit 0.2.16, vcdec 0.4.3, vcenc 0.1.4, hevcdec 0.1.14, VCDecTest 0.3.4: VideoCore memory given back (2026-10-20)
+
+VCDecTest 0.3.3's Multi on a Pi 4 (gpu_mem=128): a decoder takes its share
+of the VideoCore's memory as its stream starts, and one 1080p decoder
+fills it. A second opens without an error and then sends nothing until
+the first is closed. With four open none started; at six the VideoCore
+stopped answering and the machine locked up. Earlier the same day, every
+decoder was refused (ENOMEM): memory still held by decoders a program
+had left open, which on RISC OS nothing frees until a restart.
+
+- **vcdec 0.4.3, free at the end:** once the end of the stream is taken
+  (VCDEC_EOF), the decoder is destroyed, so its memory is free while the
+  caller keeps vcdec open. A flush creates it again, as after any EOS
+  (`stats.freed_at_end`). An EOS with nothing before it frees nothing (no
+  decoder memory was taken).
+- **Closed at exit:** vcdec, vcenc and hevcdec register an `atexit`
+  handler at their first open that closes whatever is still open, with
+  pictures still held. The handlers are `vcdec_close_all`,
+  `vcenc_close_all` and `hevcdec_close_all`. They are public, so a
+  program can call them from its own handler for the signals that end
+  it: UnixLib runs no `atexit` handlers then (Escape, a crash).
+- **vcdec's stall message:** with gpu_mem of 128 or more it now says the
+  VideoCore has no memory left for the decoder (another decoder open, or
+  one left behind). It no longer says "1080p needs gpu_mem=128".
+- **VCDecTest 0.3.4:**
+  - `-X n` exits after n pictures without closing. The Exit Obey file
+    (ResultX) runs three of those, then a whole decode.
+  - Multi goes to 3 decoders at 1080p and 4 at 360p (6 at 1080p wedged
+    the VideoCore).
+- **The fake VideoCore:**
+  - With multi, each decoder takes its memory at its format change, and
+    `multi_room` have it. One that starts with none left keeps its input
+    and sends nothing until one of those is destroyed, as on the Pi.
+  - `fake_gpu_mb` sets what the firmware reports.
+  - Blocks: 160, closer together in multi.
+- **Tests:**
+  - Whole decodes check the decoder was destroyed at its end.
+  - Multi with room for two (the third starts when the first ends, all
+    right).
+  - Multi with room for one and four decoders (the fourth waits past 5 s
+    and says why).
+  - `--exit` runs of vcdec_test (two decoders open, a picture held),
+    vcenc_test and hevcdec_test, each checked after the libraries'
+    handler.
+  - `--exit-app`: VCDecTest `-X`.
+  - 8 mutants, all caught.
+
 ## VCDecTest 0.3.3: several decoders at once (2026-10-20)
 
 Reel Edit (MLT) keeps several clips open, each with its own `h264_vchiq`

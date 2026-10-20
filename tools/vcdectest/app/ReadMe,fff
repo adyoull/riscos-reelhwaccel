@@ -10,6 +10,20 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.4 (vcdec 0.4.3): decoders give their memory back. A decoder
+holds a share of the VideoCore's memory (one 1080p decoder fills
+gpu_mem=128) until it's closed, and before, a program that stopped
+without closing it left that memory taken until a restart. Now vcdec
+closes every decoder as a program exits, and gives a decoder's memory
+back as soon as its last picture has been taken (a seek creates it
+again). Exit checks the first: three runs that stop after 30 pictures
+without closing, then a whole one; all four should work (ResultX).
+Multi now goes to 3 decoders at 1080p and 4 at 360p: 6 at 1080p
+stopped the VideoCore answering. A second 1080p decoder now waits for
+the first to finish, then decodes.
+(A program stopped by Escape, or a crash, is still not covered: UnixLib
+doesn't run exit handlers then. Restart after one.)
+
 New in 0.3.3: Multi. An editor (Reel Edit) keeps several clips open at
 once, each with its own VideoCore decoder. Multi opens 1, 2, 3, 4 and 6
 decoders at once on the hd clip (then 4 and 8 on the small one), and
@@ -55,9 +69,11 @@ The clips (in clips, the same as before):
          multiple of 32, to check the cropping)
   hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
 
-Running it (please send back ResultMulti):
-  Multi    New: several decoders open at once (see above). Writes
-           ResultMulti. Run it on its own, after a restart.
+Running it (please restart first, then send back ResultX and ResultMulti):
+  Exit     New: programs that stop without closing (see above). Writes
+           ResultX.
+  Multi    Several decoders open at once (see above). Writes
+           ResultMulti.
   ZeroCopy The three clips taken without copying, every picture
            checked where it is; then hd holding 4 at a time, to the end,
            a seek after it, and closing with pictures still held. Writes

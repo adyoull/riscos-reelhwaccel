@@ -51,6 +51,13 @@ echo "== vcdec_test (the library: a whole decode, receives finishing late, unali
 echo "   the end, input full, bad calls, unsupported streams, decoders that misbehave; then VCDecTest on the fake)"
 "$TOP/tests/qemu/aligntrap.sh" "$O/vcdec_test" > "$O/vcdec_test.out" || bad=1
 grep "FAIL\|vcdec_test:" "$O/vcdec_test.out"
+# ... and a program that exits with decoders open (vcdec_close_all at exit)
+"$TOP/tests/qemu/aligntrap.sh" "$O/vcdec_test" --exit > "$O/vcdec_exit.out" 2>&1 || bad=1
+grep "FAIL\|vcdec_test --exit:" "$O/vcdec_exit.out"
+grep -q "vcdec_test --exit: all passed" "$O/vcdec_exit.out" || bad=1
+"$TOP/tests/qemu/aligntrap.sh" "$O/vcdec_test" --exit-app > "$O/vcdec_exit_app.out" 2>&1 || bad=1
+grep "FAIL\|vcdec_test --exit:" "$O/vcdec_exit_app.out"
+grep -q "vcdec_test --exit: all passed" "$O/vcdec_exit_app.out" && grep -q "^-X: exiting after 4 pictures" "$O/vcdec_exit_app.out" || bad=1
 # ... and VCDecTest's MP4 reader against real MP4s (as mmaldecode's)
 "$HERE/mp4_check.sh" "$O/vcdec_test" "$O/vcdectest" || bad=1
 
@@ -62,6 +69,9 @@ echo "== vcenc_test (pictures in through pools and PCI memory, packets in order 
 echo "   input full, late receives, bigger buffers, settings refused, encoders that misbehave, bad calls; VCEncTest)"
 "$TOP/tests/qemu/aligntrap.sh" "$O/vcenc_test" > "$O/vcenc_test.out" || bad=1
 grep "FAIL\|vcenc_test:" "$O/vcenc_test.out"
+"$TOP/tests/qemu/aligntrap.sh" "$O/vcenc_test" --exit > "$O/vcenc_exit.out" 2>&1 || bad=1
+grep "FAIL\|vcenc_test --exit:" "$O/vcenc_exit.out"
+grep -q "vcenc_test --exit: all passed" "$O/vcenc_exit.out" || bad=1
 
 # ffmpeg/: the h264_vchiq decoder built into FFmpeg 5.1.10 (FFMPEG_TARBALL; skipped without it)
 "$HERE/ffmpeg/run.sh" "$O" || bad=1

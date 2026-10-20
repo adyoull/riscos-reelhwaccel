@@ -23,6 +23,7 @@
  * pictures out of order, a seek that can't happen.
  */
 #define FAKE_ONLY
+#include <unistd.h>
 #include "mmaldecode_test.c"
 #include "../../vcdec/vcdec.h"
 
@@ -354,7 +355,7 @@ static void whole(unsigned flags, int late, int skew, int extra, const char *wha
 int probe_main(int argc, char **argv);        /* tools/vcdectest */
 
 static int app_move_next_run;
-static int app_multi, app_multi_room, app_multi_way, app_corrupt = -1;   /* the next VCDecTest runs: several decoders (the fake's multi) */                 /* the next VCDecTest run: every pool claim moves the page at &8000 */
+static int app_multi, app_multi_room, app_multi_way, app_corrupt = -1, app_gpu_mb;   /* the next VCDecTest runs: several decoders (the fake's multi) */                 /* the next VCDecTest run: every pool claim moves the page at &8000 */
 
 /* VCDecTest on the fake's MP4, with up to three options */
 static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
@@ -401,6 +402,7 @@ static char *run_apps(int *ret, const char *opts)
     move_on_claim = app_move_next_run; app_move_next_run = 0;
     multi = app_multi; multi_room = app_multi_room; multi_full_way = app_multi_way;
     if (app_multi) corrupt_at = app_corrupt;
+    if (app_gpu_mb) fake_gpu_mb = (unsigned)app_gpu_mb;
     remove("/tmp/vcdec_test.out");
     *ret = probe_main(n, argv);
     mp4_mode = 0;
@@ -517,18 +519,20 @@ static void app_tests(void)
     npci_blocks = 0;
 
     /* -M: several decoders at once (the fake: one decoder state each) */
-    for (int way = 0; way < 5; way++) {
-        static const char *const what[5] = { "-M 3", "-M 3, the third doesn't fit (it stalls)",
+    for (int way = 0; way < 6; way++) {
+        static const char *const what[6] = { "-M 3", "-M 3, room for two (the third waits for the first's end)",
                                              "-M 3, the third doesn't fit (create refused)", "-M 1",
-                                             "-M 2, each decoder's picture 4 within rounding" };
-        int nm = way == 3 ? 1 : way == 4 ? 2 : 3, overlap;
+                                             "-M 2, each decoder's picture 4 within rounding",
+                                             "-M 4, room for one (the fourth waits too long)" };
+        int nm = way == 3 ? 1 : way == 4 ? 2 : way == 5 ? 4 : 3, overlap;
         char opts[32];
         snprintf(opts, sizeof opts, "-M %d", nm);
         reset_fake();
         mp4_mode = 1;
         /* (run_apps resets the fake: the multi switches go in after, through app_multi) */
-        app_multi = 1; app_multi_room = way == 1 || way == 2 ? 2 : 99; app_multi_way = way == 2;
+        app_multi = 1; app_multi_room = way == 1 || way == 2 ? 2 : way == 5 ? 1 : 99; app_multi_way = way == 2;
         app_corrupt = way == 4 ? 3 : -1;
+        app_gpu_mb = way == 5 ? 128 : 0;      /* (enough for one 1080p decoder: the message says why) */
         o = run_apps(&ret, opts);
         printf("%s", o);
         overlap = nm < 2 || (inst_first[1] < inst_last[0] && inst_first[0] < inst_last[1]);
@@ -540,12 +544,15 @@ static void app_tests(void)
                   inst_pictures[2] == 12 && overlap,
                   "%s (%d; fake pictures %d %d %d, overlap %d):\n%s", what[way], ret, inst_pictures[0], inst_pictures[1],
                   inst_pictures[2], overlap, o);
-        else if (way == 1)
-            CHECK(ret == 1 && strstr(o, "Decoder 3: vcdec_receive: Nothing from the decoder in 500 cs") &&
-                  strstr(o, "Multi 3: 3 of 3 decoders opened, 2 decoded every picture right") &&
-                  strstr(o, "Decoder 1: OK; 12 of 12") && strstr(o, "Decoder 2: OK; 12 of 12") &&
-                  strstr(o, "Result: not every decoder worked") && !inst_pictures[2] && overlap,
-                  "%s (%d):\n%s", what[way], ret, o);
+        else if (way == 1)                    /* (vcdec 0.4.3 gives the first's memory back at its end) */
+            CHECK(ret == 0 && strstr(o, "Multi 3: 3 of 3 decoders opened, 3 decoded every picture right") &&
+                  strstr(o, "1: At the end: the decoder destroyed") && inst_pictures[2] == 12 &&
+                  inst_first[2] > inst_last[0] && overlap, "%s (%d; third's first %u, first's last %u):\n%s", what[way],
+                  ret, inst_first[2], inst_last[0], o);
+        else if (way == 5)
+            CHECK(ret == 1 && strstr(o, "Decoder 1: OK; 12 of 12") && strstr(o, "Decoder 2: OK; 12 of 12") &&
+                  strstr(o, "Decoder 4: vcdec_receive: Nothing from the decoder in 500 cs (the VideoCore has no memory left") &&
+                  strstr(o, "Result: not every decoder worked") && !inst_pictures[3], "%s (%d):\n%s", what[way], ret, o);
         else if (way == 2)
             CHECK(ret == 1 && strstr(o, "Decoder 3: not opened (vcdec_open: Create: ") &&
                   strstr(o, "Multi 3: 2 of 3 decoders opened, 2 decoded every picture right") &&
@@ -559,7 +566,7 @@ static void app_tests(void)
                   strstr(o, "Decoder 2: OK; 12 of 12 pictures, 0 wrong, 0 missing (some within rounding)") &&
                   strstr(o, "Multi 2: 2 of 2 decoders opened, 2 decoded every picture right") && overlap,
                   "%s (%d):\n%s", what[way], ret, o);
-        app_corrupt = -1;
+        app_corrupt = -1; app_gpu_mb = 0;
         multi_cleaned(what[way]);
         app_multi = 0;
     }
@@ -595,6 +602,40 @@ static void copy_tests(void)
     CHECK(bad == 0, "vcdec_copy_rows: %d wrong", bad);
 }
 
+/* --exit (0.4.3): a program that exits without closing (two decoders,
+   one picture still held): vcdec_close_all, from atexit, gives everything
+   back. Checked after it (atexit runs the last registered first) */
+static void exit_check(void)
+{
+    multi_cleaned("at exit");
+    printf("vcdec_test --exit: %s\n", fails ? "FAILED" : "all passed");
+    if (fails) _exit(1);
+}
+
+static int exit_test(void)
+{
+    vcdec_config c;
+    vcdec *d1 = NULL, *d2 = NULL;
+    vcdec_picture p;
+    uint8_t *hp[3];
+    int hs[3];
+    vcdec_hold *h = NULL;
+    reset_fake();
+    mp4_mode = 1;
+    multi = 1;
+    atexit(exit_check);
+    vcdec_config_init(&c);
+    c.width = W; c.height = H; c.out_buffers = 6;
+    CHECK(vcdec_open(&d1, &c) == VCDEC_OK && vcdec_open(&d2, &c) == VCDEC_OK, "--exit: open: %s", vcdec_open_error());
+    for (int k = 0; k < 6; k++) vcdec_send(d1, aubuf, make_au(k, 100), (int64_t)mp4_pts[k] * 40000, 0, k ? 0 : 1);
+    for (int k = 0; k < 2; k++) vcdec_send(d2, aubuf, make_au(k, 100), (int64_t)mp4_pts[k] * 40000, 0, k ? 0 : 1);
+    for (int i = 0; i < 300 && !h; i++)
+        if (vcdec_receive_hold(d1, &p, hp, hs, &h) != VCDEC_OK) h = NULL;
+    CHECK(h != NULL && pmp_live > 0, "--exit: no picture held (%d pools)", pmp_live);
+    printf("vcdec_test --exit: exiting with 2 decoders open and a picture held (%d pools, %d PCI blocks)\n", pmp_live, pci_live);
+    exit(0);
+}
+
 int main(int argc, char **argv)
 {
     vcdec *d;
@@ -603,6 +644,18 @@ int main(int argc, char **argv)
     vcdec_stats s;
     int r, before;
 
+    if (argc > 1 && !strcmp(argv[1], "--exit")) return exit_test();
+    if (argc > 1 && !strcmp(argv[1], "--exit-app")) {   /* VCDecTest -X 4: exits part way, vcdec closes at exit */
+        char *av[] = { "vcdectest", "-Z", "-X", "4", "/tmp/mmaldecode_test.mp4", "/tmp/mmaldecode_test4.crc", NULL };
+        make_mp4();
+        reset_fake();
+        mp4_mode = 1;
+        multi = 1;                            /* (multi_cleaned's per-decoder checks) */
+        atexit(exit_check);
+        probe_main(6, av);
+        printf("vcdec_test --exit-app: VCDecTest didn't exit at -X\n");
+        return 1;
+    }
     if (argc > 1) return probe_main(argc, argv);   /* (run.sh's -x check of real MP4s) */
 
     copy_tests();
@@ -622,6 +675,7 @@ int main(int argc, char **argv)
     r = feed(d, 0, 12, 1);
     vcdec_get_stats(d, &s);
     CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.pool_buffers == 3 && !s.pci_buffers && pmp_invalidates >= 12 &&
+          s.freed_at_end == 1 && destroyed == 1 && !comp_enabled && !port_on[1] && !port_on[2] &&   /* (0.4.3: given back at the end) */
           strstr(logbuf, "copied out by LDM 8") && !strstr(logbuf, "No picture pool"),
           "the defaults: %d, %d pictures, %u in pools, %u PCI, %d cleans; log:\n%s", r, ngot, s.pool_buffers, s.pci_buffers,
           pmp_invalidates, logbuf);
@@ -1031,7 +1085,7 @@ int main(int argc, char **argv)
     ngot = wrong_pics = 0;
     r = feed(d, 0, 12, 1);
     vcdec_get_stats(d, &s);
-    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && disables_out == 1 && s.format_changes == 1,
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && disables_out == 2 && s.format_changes == 1,   /* (the reformat's, the end's) */
           "bigger format: %d, %d pictures, %d wrong, %d disables", r, ngot, wrong_pics, disables_out);
     close70(d, "bigger format");
     big_efch = 0;
@@ -1049,7 +1103,7 @@ int main(int argc, char **argv)
         ngot = wrong_pics = 0;
         r = feed(d, 6, 12, 1);
         vcdec_get_stats(d, &s);
-        CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.format_changes == 2 && disables_out == 1,
+        CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.format_changes == 2 && disables_out == 2,
               "format change part way (late %d): %d, %d pictures, %d wrong, %u changes", late, r, ngot, wrong_pics,
               s.format_changes);
         close70(d, "format change part way");

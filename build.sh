@@ -20,7 +20,7 @@ has_encoder() { "$FFMPEG" -hide_banner -encoders 2>/dev/null | grep -q " $1 "; }
 "$HERE/tools/mmalprobe/build.sh" "${MMALPROBE:-0.1}"
 if has_encoder libx264; then
   "$HERE/tools/mmaldecode/build.sh" "${MMALDECODE:-0.17}"
-  "$HERE/tools/vcdectest/build.sh" "${VCDECTEST:-0.3.3}"
+  "$HERE/tools/vcdectest/build.sh" "${VCDECTEST:-0.3.4}"
 else
   echo "MMALDecode, VCDecTest: skipped (their clips need $FFMPEG with libx264)"
 fi
@@ -29,4 +29,4 @@ fi
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"
 if [ -n "${FFMPEG_TARBALL:-}" ] && has_encoder libx265; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.14}"
 else echo "HEVCTest: skipped (its traces need FFMPEG_TARBALL and $FFMPEG with libx265)"; fi
-"$HERE/devkit/build.sh" "${DEVKIT:-0.2.15}"
+"$HERE/devkit/build.sh" "${DEVKIT:-0.2.16}"

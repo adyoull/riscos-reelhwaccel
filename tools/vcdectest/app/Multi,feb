@@ -1,6 +1,6 @@
 | Multi: several decoders open at once, as an editor with several clips
-| open: 1, 2, 3, 4 and 6 decoders on the hd clip, then 4 and 8 on the small
-| one. Every decoder decodes the whole clip, every picture checked. Shows how
+| open: 1, 2 and 3 decoders on the hd clip, then 2, 3 and 4 on the small
+| one (0.3.4: no more than that - 6 at 1080p stopped the VideoCore). Every decoder decodes the whole clip, every picture checked. Shows how
 | many fit in the VideoCore's memory, what each costs, and how fast they go
 | together. Reports to ResultMulti. Run it after a restart.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
@@ -13,7 +13,6 @@ Remove <Obey$Dir>.ResultMulti
 Run <Obey$Dir>.vcdectest -M 1 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
 Run <Obey$Dir>.vcdectest -M 2 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
 Run <Obey$Dir>.vcdectest -M 3 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -M 4 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -M 6 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -M 2 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.vcdectest -M 3 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
 Run <Obey$Dir>.vcdectest -M 4 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
-Run <Obey$Dir>.vcdectest -M 8 -o <Obey$Dir>.ResultMulti <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig

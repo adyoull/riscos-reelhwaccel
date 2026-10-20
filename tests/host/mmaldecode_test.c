@@ -84,6 +84,9 @@ static int vc_full;
 #define MAXI 8
 static int multi, cur_inst, inst_pictures[MAXI];   /* (multi: below) */
 static uint32_t inst_first[MAXI], inst_last[MAXI];   /* (each decoder's first and last picture: the time) */
+static int multi_full_way, multi_room = 99;
+static unsigned fake_gpu_mb = 76;          /* gpu_mem, as the firmware says it */
+static int inst_decoding_others(void);
 static uint32_t held[32]; static int nheld;
 static int big_efch, corrupt_at = -1, go_quiet, error_event, long_event, awaiting_reformat;
 static int mp4_mode, pts_fifo, no_pts_back, efch_after_flush, rx_late, recreated, big_efch_at, efch_ever;
@@ -275,6 +278,10 @@ static void produce(void)
     uint8_t vals[64];
     int n;
     if (need_rx || go_quiet || awaiting_reformat || vc_stuck || vc_full) return;
+    /* multi (way 0): a decoder's memory is taken as its stream starts (its
+       format change); with none left it waits, keeping its input, until a
+       decoder that has it is destroyed (VCDecTest 0.3.3's Multi on the Pi) */
+    if (multi && !multi_full_way && !efch_ever && inst_decoding_others() >= multi_room) { if (getenv("MULTIDBG")) fprintf(stderr, "wait %d at %u\n", cur_inst, time_cs); vc_full = 1; return; }
     if (mp4_mode) {                          /* pictures as access units are decoded */
         if (!aus_decoded) return;
         n = frames_made + nready;
@@ -565,7 +572,7 @@ static void take_tx(void)
 
 /* PCI_RAMAlloc: the only memory VCHIQ's bulk transfers handle (it assumes
    physically contiguous); every bulk range must lie inside one block */
-#define NBLOCKS 96
+#define NBLOCKS 160
 static uint32_t pci_lo[NBLOCKS], pci_hi[NBLOCKS];
 static int npci_blocks, pci_live, no_pci_mem;
 /* vcdec's Physical Memory Pools (VCDEC_OUT_PMP): blocks in the same table,
@@ -710,12 +717,13 @@ static void late_rx_finish(void)
    set, the fake keeps a decoder's state for each (an instance, made when
    its stub is claimed), and the SWIs naming a service handle (or a stub)
    switch to that decoder's. The memory, the PCI blocks and the pools are
-   shared, as on the machine. multi_room decoders fit in the VideoCore;
-   the ones after don't: multi_full_way 0, as the Pi with too little
-   gpu_mem (inputs kept, nothing out: vcdec's stall); 1, the component's
-   create refused (MMAL_ENOMEM). Not measured on the Pi yet: VCDecTest's
-   Multi Obey file is for that. */
-static int multi_room = 99, multi_full_way;
+   shared, as on the machine. As the Pi (VCDecTest 0.3.3's Multi,
+   gpu_mem=128): every decoder opens, but each takes its memory as its
+   stream starts, and multi_room of them have it; one that starts with
+   none left keeps its input and sends nothing until one of those is
+   destroyed (multi_full_way 0). multi_full_way 1: the decoders from the
+   multi_room'th on have their create refused (MMAL_ENOMEM), as the Pi's
+   5th 1080p decoder had its output enable refused. */
 #define INST_VARS X(hijacked) X(held) X(nheld) X(hold_inputs) X(vc_full) X(awaiting_reformat) X(recreated) \
     X(efch_ever) X(first_in_cs) X(disable_refused) X(ports_on_at_destroy) X(nslow) X(slow_ticks) X(slow_running) \
     X(slowq_len) X(created) X(destroyed) X(comp_enabled) X(port_on) X(efch_sent) X(disables_out) X(stub) X(freed) \
@@ -767,7 +775,7 @@ static void inst_new(void)
     inst_load(&inst_fresh);
     big = inst_big[k];
     cur_inst = k;
-    if (k >= multi_room) vc_full = multi_full_way ? 2 : 1;
+    if (k >= multi_room && multi_full_way) vc_full = 2;   /* (way 1: its create refused) */
 }
 static int inst_by_stub(uint32_t a)
 {
@@ -776,6 +784,23 @@ static int inst_by_stub(uint32_t a)
     return -1;
 }
 static int inst_freed(int k) { return k == cur_inst ? freed : inst_saved[k].freed; }
+/* the other decoders that have their memory (started, and not destroyed since) */
+static int inst_decoding_others(void)
+{
+    int n = 0;
+    for (int k = 0; k < ninst; k++)
+        if (k != cur_inst && inst_saved[k].efch_ever && inst_saved[k].created > inst_saved[k].destroyed) n++;
+    return n;
+}
+/* a waiting decoder: on, once there's room (its kept input back) */
+static void inst_wake(void)
+{
+    if (vc_full != 1 || multi_full_way || inst_decoding_others() >= multi_room || !created || created == destroyed) return;
+    vc_full = 0;
+    if (getenv("MULTIDBG")) fprintf(stderr, "wake %d at %u\n", cur_inst, time_cs);
+    while (nheld) buffer_back(1, held[--nheld], 0, 0, UNKNOWN);
+    produce();
+}
 static void inst_reset(void)
 {
     if (ninst) inst_switch(0);
@@ -811,7 +836,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         if (n == 0x59203 || n == 0x59204 || n == 0x59205 || n == 0x59209 || n == 0x5920D || n == 0x5920E || n == 0x5920F) {
             int k = (int)(R[0] >> 16);
             CHECK((R[0] & 0xFFFF) == 0x5E7 && k < ninst, "SWI &%X: handle &%X", n, R[0]);
-            if ((R[0] & 0xFFFF) == 0x5E7 && k < ninst) inst_switch(k);
+            if ((R[0] & 0xFFFF) == 0x5E7 && k < ninst) { inst_switch(k); if (n == 0x59204) inst_wake(); }
         } else if (n == 0x1E && R[0] == 7) {
             int k = inst_by_stub(R[2]);
             if (k >= 0) inst_switch(k);
@@ -834,7 +859,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
     case 0x591C5: {                          /* BCMSupport_SendTempPropertyBuffer: VC memory */
         uint32_t *b = (uint32_t *)(uintptr_t)R[0];
         CHECK(b[2] == 0x00010006, "property tag %08X", b[2]);
-        b[1] = 0x80000000u; b[5] = 0x3B400000; b[6] = 76u << 20;
+        b[1] = 0x80000000u; b[5] = 0x3B400000; b[6] = fake_gpu_mb << 20;
         return NULL;
     }
     case 0x1E:
@@ -941,7 +966,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
             uint32_t *e = (uint32_t *)(uintptr_t)R[1];
             for (uint32_t j = 0; j < R[2]; j++, e += 3) {
                 int b = block_of(e[1]);
-                e[2] = b >= 0 ? 0x20000000u + (uint32_t)b * (multi ? 0x00400000u : 0x01000000u) + (e[1] - pci_lo[b]) : 0xFFFFFFFFu;   /* (multi: closer, for more blocks below 1 GB) */
+                e[2] = b >= 0 ? 0x20000000u + (uint32_t)b * (multi ? 0x00200000u : 0x01000000u) + (e[1] - pci_lo[b]) : 0xFFFFFFFFu;   /* (multi: closer, for more blocks below 1 GB) */
                 if (b >= 0 && pmp_block[b] && pmp_scattered && e[1] - pci_lo[b] >= 4096) e[2] += 0x100000;   /* (not contiguous) */
                 if (b >= 0 && pmp_block[b] && pmp_top) e[2] = 0x40000000u - (pci_hi[b] - pci_lo[b]) + (e[1] - pci_lo[b]);
             }
@@ -1097,7 +1122,7 @@ static void make_files(void)
 static void reset_fake(void)
 {
     inst_reset();
-    multi = 0; multi_room = 99; multi_full_way = 0; vc_full = 0;
+    multi = 0; multi_room = 99; multi_full_way = 0; vc_full = 0; fake_gpu_mb = 76;
     uses = releases = opens = closes = connects = disconnects = freed = created = destroyed = comp_enabled = 0;
     memset(port_on, 0, sizeof port_on);
     shorts = bulks_tx = bulks_rx = efch_sent = disables_out = flushes = aus = au_pieces_max = idr_dropped = 0;

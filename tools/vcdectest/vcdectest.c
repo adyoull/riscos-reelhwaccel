@@ -37,6 +37,8 @@
  *                the oldest released first, the rest after vcdec_close
  *      -R        with -Z -t: every byte of each held picture read once (as a
  *                player showing it would)
+ *      -X n      (0.3.4) after n pictures, exit without vcdec_close (as a
+ *                program that stops part way): vcdec 0.4.3 closes it at exit
  *      -M n      (0.3.3) n decoders open at once (as an editor with n clips
  *                open), each decoding the whole clip: on each loop, each
  *                decoder fed until its input is full, then one picture taken;
@@ -735,7 +737,7 @@ int probe_main(int argc, char **argv)
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
     int verbose = 0, sync = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
-    int multi_n = 0, out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
+    int multi_n = 0, exit_after = 0, out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
     vcdec_hold *holds[16];
     uint32_t read_sum = 0;
     unsigned way = 0, memory = 0;
@@ -765,6 +767,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-B") && i + 1 < argc) out_buffers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-K")) bench = 1;
         else if (!strcmp(argv[i], "-M") && i + 1 < argc) multi_n = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-X") && i + 1 < argc) exit_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-Z")) zero = 1;
         else if (!strcmp(argv[i], "-R")) read_all = 1;
         else if (!strcmp(argv[i], "-H") && i + 1 < argc) { zero = 1; hold_n = atoi(argv[++i]); }
@@ -790,7 +793,7 @@ int probe_main(int argc, char **argv)
     if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16 ||
         multi_n < 0 || multi_n > 8) {
         printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
-               "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] [-M n] stream.mp4 expected.crc [expected.sig]\n");
+               "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] [-M n] [-X n] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
     say("vcdectest: %s through vcdec %s\n", stream_name, VCDEC_VERSION);
@@ -951,6 +954,12 @@ int probe_main(int argc, char **argv)
             if (check_picture(frames, &pic)) { fatal = 1; break; }
             frames++;
             pass_frames++;
+            if (exit_after && frames == exit_after) {
+                say("-X: exiting after %d pictures without vcdec_close (vcdec closes it at exit)\n", frames);
+                if (out2) fclose(out2);
+                out2 = NULL;
+                exit(0);
+            }
             if (seek_after && !seeked && pass_frames == seek_after) break;
         }
         if (fatal) break;

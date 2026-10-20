@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include "hwhevcdec.h"
 #include "fake_hevc.h"
 
@@ -489,12 +490,36 @@ static void log_to(void *h, const char *t)
     if (strlen(logged) + strlen(t) + 2 < sizeof logged) { strcat(logged, t); strcat(logged, "\n"); }
 }
 
+/* --exit (0.1.14): a program that exits with the decoder open; hevcdec_close_all
+   (atexit) closes it, its buffers and the block with it. Checked after it */
+static void exit_check(void)
+{
+    CHECK(fake_hevc.closes == fake_hevc.opens && fake_hevc_live() == 0 && !fake_hevc.fails,
+          "at exit: opens %d closes %d, %d buffers not freed", fake_hevc.opens, fake_hevc.closes, fake_hevc_live());
+    printf("hevcdec_test --exit: %s\n", fails ? "FAILED" : "all passed");
+    if (fails) _exit(1);
+}
+
+static int exit_test(void)
+{
+    hevcdec *d = NULL;
+    hevcdec_config c;
+    fake_hevc_reset();
+    atexit(exit_check);
+    hevcdec_config_init(&c);
+    c.width = 352; c.height = 288; c.bit_depth = 8;
+    CHECK(hevcdec_open(&d, &c) == HEVCDEC_OK && fake_hevc_live() > 0, "--exit: open: %s", hevcdec_open_error());
+    printf("hevcdec_test --exit: exiting with the decoder open (%d buffers)\n", fake_hevc_live());
+    exit(0);
+}
+
 int main(int argc, char **argv)
 {
     hevcdec *d;
     hevcdec_config c;
     int r, ret;
 
+    if (argc > 1 && !strcmp(argv[1], "--exit")) return exit_test();
     /* refusals: not a Pi 4, sizes, depth, no memory */
     fake_hevc_reset();
     fake_hevc.no_block = 1;

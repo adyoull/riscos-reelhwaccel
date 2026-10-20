@@ -282,6 +282,10 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
         snprintf(open_err, sizeof open_err, "%d-bit isn't a depth the block decodes (8 or 10)", c->bit_depth);
         return HEVCDEC_UNSUPPORTED;
     }
+    {
+        static int exit_set;
+        if (!exit_set) { atexit(hevcdec_close_all); exit_set = 1; }
+    }
     if (!(d = calloc(1, sizeof *d))) { snprintf(open_err, sizeof open_err, "Out of memory"); return HEVCDEC_ERROR; }
     memset(&d->flat, 16, sizeof d->flat);
     d->cfg = *c;
@@ -774,6 +778,16 @@ int hevcdec_convert_benchmark(hevcdec *d, const hevcdec_frame *f, void *const pl
             return r;
     *cs = hevcdec_hw_now_cs() - t0;
     return HEVCDEC_OK;
+}
+
+/* (0.1.14) the decoder still open (there is at most one) closed, its
+   frames with it: run at exit (atexit, from the first hevcdec_open), or by
+   a program's own handler for the signals that end it */
+void hevcdec_close_all(void)
+{
+    if (!cur) return;
+    cur->cfg.log = NULL;                     /* (its handle may be gone) */
+    hevcdec_close(cur);
 }
 
 void hevcdec_close(hevcdec *d)

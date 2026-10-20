@@ -8,6 +8,7 @@
  * after each run; then VCEncTest (tools/vcenctest) on the fake.
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
+#include <unistd.h>
 #include "fake_vcenc.c"
 /* ---- the pictures ---- */
 
@@ -181,10 +182,37 @@ static void params_check(const char *name, uint32_t profile, uint32_t level, uin
     CHECK(e_in_enc == 0x30323449u && e_out_enc == 0x34363248u, "%s: encodings %08X %08X", name, e_in_enc, e_out_enc);
 }
 
-int main(void)
+/* --exit (0.1.4): a program that exits with an encoder open; vcenc_close_all
+   (atexit) closes it. Checked after it */
+static void exit_check(void)
+{
+    closed_ok("at exit");
+    printf("vcenc_test --exit: %s\n", fails ? "FAILED" : "all passed");
+    if (fails) _exit(1);
+}
+
+static int exit_test(void)
+{
+    vcenc *e = NULL;
+    vcenc_config c;
+    enc_reset();
+    atexit(exit_check);
+    vcenc_config_init(&c);
+    c.width = 70; c.height = 38; c.fps_num = 25; c.fps_den = 1; c.bitrate = 2000000;
+    CHECK(vcenc_open(&e, &c) == VCENC_OK, "--exit: open: %s", vcenc_open_error());
+    for (int k = 0; k < 2 && e; k++) {
+        make_picture(k, 70, 38);
+        vcenc_send(e, src, src_stride, 1000 + 40 * k, 0);
+    }
+    printf("vcenc_test --exit: exiting with an encoder open\n");
+    exit(0);
+}
+
+int main(int argc, char **argv)
 {
     run_t t;
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 1 && !strcmp(argv[1], "--exit")) return exit_test();
 
     /* a whole encode: pools, the first units in the message, the rest by bulk, one in two pieces */
     enc_reset(); e_big_at = 6;

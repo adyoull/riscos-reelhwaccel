@@ -233,9 +233,22 @@ struct vcdec {
     struct vcdec_hold holds[MAX_OUT];
     int nuser;                             /* buffers the caller holds */
     int closing;                           /* vcdec_close done but for the buffers still held */
+    int parked;                            /* (0.4.3) at the end: the decoder destroyed, its memory given back */
 };
 
 static char open_err[200];
+
+/* (0.4.3) every decoder not yet freed, for vcdec_close_all at exit: on
+   RISC OS nothing else gives a program's decoders back to the VideoCore */
+#define MAX_LIVE 16
+static vcdec *live[MAX_LIVE];
+static int nlive, exit_set;
+static void live_add(vcdec *d) { if (nlive < MAX_LIVE) live[nlive++] = d; }
+static void live_remove(vcdec *d)
+{
+    for (int i = 0; i < nlive; i++)
+        if (live[i] == d) { live[i] = live[--nlive]; return; }
+}
 
 /* ---- small things ---- */
 
@@ -967,10 +980,12 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
                  "in CONFIG/TXT", mb, c->width, c->height);
         return VCDEC_UNSUPPORTED;
     }
+    if (!exit_set) { atexit(vcdec_close_all); exit_set = 1; }
     if (!(d = calloc(1, sizeof *d))) {
         snprintf(open_err, sizeof open_err, "Out of memory");
         return VCDEC_ERROR;
     }
+    live_add(d);
     d->cfg = *c;
     d->nout = c->out_buffers > 0 ? (c->out_buffers < MAX_OUT ? c->out_buffers : MAX_OUT) : OUT_BUFS_DEFAULT;
     d->copy_way = c->flags & VCDEC_COPY_NEON ? 2 : c->flags & VCDEC_COPY_LDM8 ? 1 : c->flags & VCDEC_COPY_LDM4 ? 0 : 1;
@@ -1056,7 +1071,26 @@ void vcdec_close(vcdec *d)
 static void free_all(vcdec *d)
 {
     if (d->stub && !d->pool_stuck) swi(OS_Module, 7, 0, d->stub, 0, NULL, NULL);
+    live_remove(d);
     free(d);
+}
+
+/* (0.4.3) every decoder closed and its memory freed, pictures still held
+   included (their holds go with it): run at exit (atexit, from the first
+   vcdec_open), or by a program's own handler for the signals that end it
+   (UnixLib doesn't run atexit's then) */
+void vcdec_close_all(void)
+{
+    while (nlive) {
+        vcdec *d = live[nlive - 1];
+        d->cfg.log = NULL;                 /* (its handle may be gone) */
+        if (!d->closing) vcdec_close(d);
+        if (nlive && live[nlive - 1] == d) {   /* (closed, but with pictures held) */
+            for (int i = 0; i < d->nout; i++) out_free(d, i);
+            d->nuser = 0;
+            free_all(d);
+        }
+    }
 }
 
 /* takes in whatever the decoder has sent; acts on a format change; hands
@@ -1086,9 +1120,15 @@ int vcdec_poll(vcdec *d)
        at gpu_mem=64 with 1080p), or nothing after the EOS with a buffer to
        fill. (Not part way: a decoder can keep input while it waits for
        more, and a paused player sends none.) */
-    if (d->sent_any && !d->heard_output && now - d->t_first_send > STALL_CS)
-        return fail(d, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has %u MB: 1080p needs "
-                    "gpu_mem=128)", STALL_CS, vcdec_gpu_mem());
+    if (d->sent_any && !d->heard_output && now - d->t_first_send > STALL_CS) {
+        unsigned mb = vcdec_gpu_mem();
+        if (mb && mb < 128)
+            return fail(d, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has %u MB: 1080p needs "
+                        "gpu_mem=128)", STALL_CS, mb);
+        /* (0.4.3) one 1080p decoder fills gpu_mem=128: another open one waits for its memory */
+        return fail(d, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has no memory left for it: "
+                    "another decoder open, or one left by a program that stopped without closing)", STALL_CS);
+    }
     if (d->eos_vc && !d->eos_seen && now - d->last_heard > STALL_CS) {
         int outs = 0;
         for (int i = 0; i < d->nout; i++) outs += d->out_state[i] == OB_VC;
@@ -1180,6 +1220,22 @@ int vcdec_send_eos(vcdec *d)
     return VCDEC_AGAIN;
 }
 
+/* (0.4.3) the stream's end has been taken: the decoder is destroyed, so
+   the VideoCore has its memory back (one 1080p decoder fills gpu_mem=128,
+   and a decoder left open at its end kept the next waiting: VCDecTest
+   0.3.3's Multi); a flush creates it again, as after any EOS */
+static int park(vcdec *d)
+{
+    destroy_component(d, 0);
+    if (d->failed) return d->failed;
+    for (int i = 0; i < IN_BUFS; i++) d->in_busy[i] = 0;
+    for (int i = 0; i < d->nout; i++) if (d->out_state[i] != OB_USER) d->out_state[i] = OB_FREE;
+    d->parked = 1;
+    d->stats.freed_at_end++;
+    logf_(d, "At the end: the decoder destroyed, its VideoCore memory given back (a flush creates it again)");
+    return 0;
+}
+
 /* the head picture, if its receive is done: 1; 0 if none yet; VCDEC_EOF;
    or the failure */
 static int head_ready(vcdec *d)
@@ -1187,7 +1243,11 @@ static int head_ready(vcdec *d)
     int r;
     for (;;) {
         if (d->failed) return d->failed;
-        if (!d->nheld) return d->eos_back ? VCDEC_EOF : 0;
+        if (!d->nheld) {
+            if (!d->eos_back) return 0;
+            if (d->created && d->eos_vc && park(d)) return d->failed;   /* (an EOS alone: nothing taken yet) */
+            return VCDEC_EOF;
+        }
         if ((r = received(d, d->held[0].seq)) < 0) return fail(d, VCDEC_ERROR, "A bulk receive was aborted");
         if (!r) return 0;
         if (!(d->held[0].flags & FLAG_EOS) || d->held[0].length) return 1;
@@ -1344,6 +1404,15 @@ int vcdec_flush(vcdec *d)
     int r;
     if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
     d->stats.flushes++;
+    if (d->parked) {                       /* (0.4.3) destroyed at the end: created again */
+        d->parked = 0;
+        d->nheld = 0;
+        d->eos_back = d->eos_seen = 0;
+        d->stats.recreated++;
+        logf_(d, "Flush after the end: the decoder created again");
+        if (create_component(d)) return d->failed;
+        return VCDEC_OK;
+    }
     if (d->eos_sent && !d->eos_vc) {       /* an EOS with nothing before it: nothing to undo */
         d->eos_sent = d->eos_back = 0;
         return VCDEC_OK;

@@ -1,0 +1,17 @@
+| Exit: a program that stops part way without closing its decoder
+| (-X 30: exits after 30 pictures). vcdec 0.4.3 closes it as the program
+| exits; before, its VideoCore memory stayed taken until a restart, and
+| the next decoder couldn't start. Three runs on the hd clip, then a
+| whole one: all four should work. Reports to ResultX. Run it after a
+| restart.
+| (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
+RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
+RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
+RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad System:Modules.ARMEABISupport
+RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
+WimpSlot -min 16384K -max 16384K
+Remove <Obey$Dir>.ResultX
+Run <Obey$Dir>.vcdectest -X 30 -o <Obey$Dir>.ResultX <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -Z -X 30 -o <Obey$Dir>.ResultX <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -X 30 -o <Obey$Dir>.ResultX <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -o <Obey$Dir>.ResultX <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
