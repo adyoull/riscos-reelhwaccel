@@ -10,6 +10,20 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.3: Multi. An editor (Reel Edit) keeps several clips open at
+once, each with its own VideoCore decoder. Multi opens 1, 2, 3, 4 and 6
+decoders at once on the hd clip (then 4 and 8 on the small one), and
+has each decode the whole clip, every picture checked, one picture from
+each in turn. Each decoder holds its own memory in the VideoCore (from
+gpu_mem) and about 20 MB of the Pi's for 1080p. The report says, for
+each decoder, whether it opened, how many pictures came back right, and
+its memory; then how fast they went together. A decoder the VideoCore
+has no room for may be refused at once, or may take its input and send
+nothing back: vcdec gives up on it after 5 seconds ("Nothing from the
+decoder in 500 cs"), as a player would then fall back to the ARM.
+Please restart, run Multi on its own and send ResultMulti. If a run
+stops with "no reply", restart before running anything else.
+
 New in 0.3.2 (vcdec 0.4.2): vcdec's pools never take the running
 program's own page at &8000. RISC OS may offer pages a program is using
 for contiguous memory and quietly copy the program elsewhere, and
@@ -41,12 +55,14 @@ The clips (in clips, the same as before):
          multiple of 32, to check the cropping)
   hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
 
-Running it (please send back ResultZ and ResultT):
-  ZeroCopy New: the three clips taken without copying, every picture
+Running it (please send back ResultMulti):
+  Multi    New: several decoders open at once (see above). Writes
+           ResultMulti. Run it on its own, after a restart.
+  ZeroCopy The three clips taken without copying, every picture
            checked where it is; then hd holding 4 at a time, to the end,
            a seek after it, and closing with pictures still held. Writes
            ResultZ. Run this first.
-  Speed    Changed: hd without checks - vcdec's copy, then zero-copy:
+  Speed    hd without checks - vcdec's copy, then zero-copy:
            held and released, held and read once, with 4 buffers, and 4
            held at a time in 6. Writes ResultT.
   Test     The three clips with vcdec's defaults (a cacheable pool,

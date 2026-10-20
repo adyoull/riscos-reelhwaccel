@@ -1,5 +1,35 @@
 # Changes
 
+## VCDecTest 0.3.3: several decoders at once (2026-10-20)
+
+Reel Edit (MLT) keeps several clips open, each with its own `h264_vchiq`
+decoder, and asked how many the Pi 4 can have open at once and what each
+costs. It has never been measured: every Pi run so far had one decoder.
+
+- **VCDecTest `-M n`:** n decoders open at once, each decoding the whole
+  clip: on each turn, each is fed until its input is full and one
+  picture is taken from it, held and given back (zero copy, 6 output
+  buffers, as `h264_vchiq`). For each decoder: whether it opened, the
+  pictures right, wrong and missing, its pools (MB). Then the pictures a
+  second together. A decoder that fails is closed, and the others go on.
+- **The Multi Obey file** (ResultMulti): 1, 2, 3, 4 and 6 decoders on
+  the 1080p clip, then 4 and 8 on the 360p one.
+- **The fake VideoCore** (`tests/host/mmaldecode_test.c`) can now be
+  several decoders: with `multi`, each RMA stub claimed starts a
+  decoder's state, and the SWIs that name a service handle or a stub
+  switch to it. The memory, PCI blocks and pools stay shared.
+  `multi_room` decoders fit. The ones after either keep their input and
+  send nothing (as one 1080p decoder at gpu_mem=64 on the Pi), or have
+  their create refused (`multi_full_way`). Which of these the Pi does is
+  what Multi will show.
+- **Tests:** -M 3, -M 1, the third stalling (closed after vcdec's 5 s,
+  the other two right), the third refused at open, and a picture within
+  rounding in each of two decoders. The decoders are checked to have
+  overlapped. Every mutant was caught: one picture a turn, release,
+  checksum, the close on failure, the fake's switch, the fake's full
+  decoder, the result.
+- vcdec and the devkit are unchanged.
+
 ## Built on GitHub with riscos-crossdev (2026-10-17)
 
 - **`.riscos-deps`** pins riscos-crossdev v1.8.1, whose container image

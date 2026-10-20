@@ -74,7 +74,7 @@ drive the hardware from RISC OS, and check it:
 
 - **VCDecTest** (`tools/vcdectest`): vcdec as a player drives it: every
   picture checked, seeks before and after the end of the stream, zero
-  copy, memory, speed.
+  copy, memory, speed, and several decoders open at once (Multi).
 - **VCEncTest** (`tools/vcenctest`): vcenc as a program drives it: test
   pictures encoded, the stream checked and decoded again by vcdec
   (PSNR), each setting in turn, speed.

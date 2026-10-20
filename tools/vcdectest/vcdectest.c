@@ -37,6 +37,11 @@
  *                the oldest released first, the rest after vcdec_close
  *      -R        with -Z -t: every byte of each held picture read once (as a
  *                player showing it would)
+ *      -M n      (0.3.3) n decoders open at once (as an editor with n clips
+ *                open), each decoding the whole clip: on each loop, each
+ *                decoder fed until its input is full, then one picture taken;
+ *                zero copy with 6 output buffers, as h264_vchiq (-B to
+ *                change): how many fit, what each costs, how fast together
  *   vcdectest -x out stream.mp4   (host check) the Annex B stream as it
  *      would be sent, to out, and each sample's pts, dts and key flag to
  *      out.pts
@@ -547,6 +552,181 @@ static int count_missing(int64_t p, int show)
     return missing;
 }
 
+/* ---- -M: several decoders at once ---- */
+
+typedef struct {
+    vcdec *d;
+    int opened, failed, done, eos_sent, cur, frames, wrong, close_n, dups, disorder, have_last, copied;
+    int64_t last_pts;
+    uint8_t *seen;
+    uint32_t open_cs;
+    vcdec_stats st;
+    char why[200];
+} mdec;
+
+static void mlog(void *h, const char *text) { say("  - %d: %s\n", (int)(intptr_t)h, text); }
+
+/* one of decoder m's pictures (packed in frame[]) against FFmpeg's */
+static void mcheck(mdec *m, const vcdec_picture *pic)
+{
+    int j = pic->pts == VCDEC_NOPTS ? -1 : want_by_pts(pic->pts);
+    if (j < 0) { m->wrong++; return; }
+    if (m->have_last && pic->pts <= m->last_pts) m->disorder++;
+    m->last_pts = pic->pts;
+    m->have_last = 1;
+    if (m->seen[j]) m->dups++;
+    m->seen[j] = 1;
+    if (adler(0, frame, frame_len) == want[j]) return;
+    if (j < nsig) {
+        float sg[SIGN];
+        frame_sig(sg);
+        if (sig_diff(sg, sig[j]) <= 1.0f) { m->close_n++; return; }
+    }
+    m->wrong++;
+}
+
+static void mfail(mdec *m, int k, const char *what, const char *why)
+{
+    snprintf(m->why, sizeof m->why, "%s: %s", what, why);
+    say("Decoder %d: %s (after %d pictures)\n", k + 1, m->why, m->frames);
+    vcdec_get_stats(m->d, &m->st);
+    vcdec_close(m->d);                     /* (as a player falling back to the ARM: closed now) */
+    m->d = NULL;
+    m->failed = 1;
+}
+
+/* n decoders open at once, each decoding the whole clip: 1 if every one
+   gave every picture right */
+static int multi_run(int n, const vcdec_config *cfg0, const uint8_t *stream)
+{
+    mdec m[8];
+    vcdec_config cfg = *cfg0;
+    uint32_t t0, last_any, t_end;
+    int active = 0, good = 0, opened = 0, total = 0;
+    uint32_t bufsz = ((uint32_t)mp4_w + 31) / 32 * 32 * (((uint32_t)mp4_h + 15) / 16 * 16) * 3 / 2;
+    uint8_t *planes[3] = { frame, frame + want_w * want_h, frame + want_w * want_h + ((want_w + 1) / 2) * ((want_h + 1) / 2) };
+    int strides[3] = { want_w, (want_w + 1) / 2, (want_w + 1) / 2 };
+    if (!cfg.out_buffers) cfg.out_buffers = 6;
+    memset(m, 0, sizeof m);
+    say("Multi: %d decoders open at once, each decoding the whole clip, in turn (zero copy, %d output buffers each, "
+        "as h264_vchiq)\n", n, cfg.out_buffers);
+    for (int k = 0; k < n; k++) {
+        uint32_t t = now_cs();
+        if (!(m[k].seen = calloc((size_t)nwant, 1))) { say("No memory\n"); return 0; }
+        if (cfg0->log) { cfg.log = mlog; cfg.log_handle = (void *)(intptr_t)(k + 1); }
+        if (vcdec_open(&m[k].d, &cfg) != VCDEC_OK) {
+            snprintf(m[k].why, sizeof m[k].why, "vcdec_open: %s", vcdec_open_error());
+            say("Decoder %d: %s\n", k + 1, m[k].why);
+            m[k].d = NULL;
+            m[k].failed = 1;
+            continue;
+        }
+        m[k].open_cs = now_cs() - t;
+        m[k].opened = 1;
+        opened++;
+        active++;
+        say("Decoder %d: open (%u cs)\n", k + 1, (unsigned)m[k].open_cs);
+    }
+    t0 = last_any = now_cs();
+    t_end = t0;
+    while (active) {
+        for (int k = 0; k < n; k++) {
+            mdec *q = &m[k];
+            vcdec_picture pic;
+            int r = VCDEC_OK;
+            if (!q->d || q->done) continue;
+            while (q->cur < nsamples) {     /* send until the input is full */
+                if (to_annexb(stream, &samples[q->cur])) { mfail(q, k, "the MP4", "a sample can't be read"); break; }
+                if (au_len) {
+                    r = vcdec_send(q->d, au, au_len, samples[q->cur].pts, samples[q->cur].dts,
+                                   samples[q->cur].key ? VCDEC_KEYFRAME : 0);
+                    if (r == VCDEC_AGAIN) break;
+                    if (r != VCDEC_OK) { mfail(q, k, "vcdec_send", vcdec_error(q->d)); break; }
+                }
+                q->cur++;
+            }
+            if (!q->d) { active--; continue; }
+            if (q->cur == nsamples && !q->eos_sent) {
+                if ((r = vcdec_send_eos(q->d)) == VCDEC_OK) q->eos_sent = 1;
+                else if (r != VCDEC_AGAIN) { mfail(q, k, "vcdec_send_eos", vcdec_error(q->d)); active--; continue; }
+            }
+            for (;;) {                      /* the next picture: held, checked, given back */
+                uint8_t *hp[3];
+                int hs[3];
+                vcdec_hold *h = NULL;
+                if ((r = vcdec_peek(q->d, &pic)) != VCDEC_OK) break;
+                if (pic.width != want_w || pic.height != want_h) {
+                    q->wrong++;
+                    r = vcdec_receive(q->d, &pic, NULL, NULL);
+                    if (r != VCDEC_OK) break;
+                    continue;
+                }
+                r = vcdec_receive_hold(q->d, &pic, hp, hs, &h);
+                if (r == VCDEC_UNSUPPORTED) {
+                    q->copied++;
+                    r = vcdec_receive(q->d, &pic, planes, strides);
+                } else if (r == VCDEC_OK) {
+                    for (int pl = 0; pl < 3; pl++) {
+                        int pw = pl ? (want_w + 1) / 2 : want_w, ph = pl ? (want_h + 1) / 2 : want_h;
+                        for (int y = 0; y < ph; y++) memcpy(planes[pl] + y * strides[pl], hp[pl] + y * hs[pl], (size_t)pw);
+                    }
+                }
+                if (r != VCDEC_OK) break;
+                mcheck(q, &pic);
+                vcdec_release(h);
+                q->frames++;
+                total++;
+                last_any = now_cs();
+                break;                      /* (one picture a turn each, as an editor showing them together) */
+            }
+            if (r == VCDEC_EOF) {
+                q->done = 1;
+                active--;
+                t_end = now_cs();
+                vcdec_get_stats(q->d, &q->st);
+                say("Decoder %d: to the end, %d pictures (%u.%02u s from the start)\n", k + 1, q->frames,
+                    (unsigned)((t_end - t0) / 100), (unsigned)((t_end - t0) % 100));
+            } else if (r < 0) {
+                mfail(q, k, "vcdec_receive", vcdec_error(q->d));
+                active--;
+            }
+        }
+        if (active && now_cs() - last_any > 1500) {
+            say("No picture from any decoder for 15 s: stopped\n");
+            for (int k = 0; k < n; k++)
+                if (m[k].d && !m[k].done) { mfail(&m[k], k, "stopped", "no picture for 15 s"); }
+            active = 0;
+        }
+    }
+    say("\n");
+    for (int k = 0; k < n; k++) {
+        mdec *q = &m[k];
+        int missing = 0, ok;
+        for (int j = 0; j < nwant; j++) if (!q->seen[j]) missing++;
+        ok = q->done && !q->wrong && !missing && !q->dups && !q->disorder;
+        if (ok) good++;
+        if (!q->opened) say("Decoder %d: not opened (%s)\n", k + 1, q->why);
+        else
+            say("Decoder %d: %s; %d of %d pictures, %d wrong, %d missing%s%s%s; %u output buffers in pools "
+                "(%u.%u MB), %d pictures copied instead of held\n", k + 1,
+                ok ? "OK" : q->failed ? q->why : "unfinished", q->frames, nwant, q->wrong, missing,
+                q->close_n ? " (some within rounding)" : "", q->dups ? ", some twice" : "", q->disorder ? ", out of order" : "",
+                q->st.pool_buffers,
+                (unsigned)(q->st.pool_buffers * bufsz / 1048576), (unsigned)(q->st.pool_buffers * bufsz % 1048576 * 10 / 1048576),
+                q->copied);
+    }
+    if (t_end > t0)
+        say("Together: %d pictures in %u.%02u s, %u a second (%u for each of the %d open)\n", total,
+            (unsigned)((t_end - t0) / 100), (unsigned)((t_end - t0) % 100), (unsigned)(total * 100 / (t_end - t0)),
+            opened ? (unsigned)(total * 100 / (t_end - t0) / (unsigned)opened) : 0, opened);
+    for (int k = 0; k < n; k++) {
+        if (m[k].d) { vcdec_close(m[k].d); m[k].d = NULL; }
+        free(m[k].seen);
+    }
+    say("Multi %d: %d of %d decoders opened, %d decoded every picture right\n", n, opened, n, good);
+    return good == n;
+}
+
 /* ---- main ---- */
 
 int probe_main(int argc, char **argv)
@@ -555,7 +735,7 @@ int probe_main(int argc, char **argv)
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
     int verbose = 0, sync = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
-    int out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
+    int multi_n = 0, out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
     vcdec_hold *holds[16];
     uint32_t read_sum = 0;
     unsigned way = 0, memory = 0;
@@ -584,6 +764,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-t")) timing = 1;
         else if (!strcmp(argv[i], "-B") && i + 1 < argc) out_buffers = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-K")) bench = 1;
+        else if (!strcmp(argv[i], "-M") && i + 1 < argc) multi_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-Z")) zero = 1;
         else if (!strcmp(argv[i], "-R")) read_all = 1;
         else if (!strcmp(argv[i], "-H") && i + 1 < argc) { zero = 1; hold_n = atoi(argv[++i]); }
@@ -606,9 +787,10 @@ int probe_main(int argc, char **argv)
         else stream_name = NULL;
     }
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
-    if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16) {
+    if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16 ||
+        multi_n < 0 || multi_n > 8) {
         printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
-               "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] stream.mp4 expected.crc [expected.sig]\n");
+               "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] [-M n] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
     say("vcdectest: %s through vcdec %s\n", stream_name, VCDEC_VERSION);
@@ -638,7 +820,7 @@ int probe_main(int argc, char **argv)
     }
     say("MP4: %d samples, %ux%u; %d of FFmpeg's pictures expected\n", nsamples, (unsigned)mp4_w, (unsigned)mp4_h, nwant);
     say("The VideoCore has %u MB of memory (gpu_mem)\n", vcdec_gpu_mem());
-    say("Each turn: access units sent until the input is full, then every picture ready taken%s\n\n",
+    if (!multi_n) say("Each turn: access units sent until the input is full, then every picture ready taken%s\n\n",
         sync ? " (-S: each bulk transfer waited for as it arrives)" : "");
     frame_len = (uint32_t)(want_w * want_h + 2 * ((want_w + 1) / 2) * ((want_h + 1) / 2));
     if (!(frame = realloc(frame, frame_len))) goto done;
@@ -656,7 +838,7 @@ int probe_main(int argc, char **argv)
     cfg.out_buffers = out_buffers;
     if (zero) say("Zero-copy: pictures held in vcdec's buffers (up to %d at a time)%s\n", hold_n,
                   read_all ? ", each read once" : "");
-    say("Output buffers: %d; pictures copied out by %s; they arrive in %s\n", out_buffers ? out_buffers : 3, way_name,
+    if (!multi_n) say("Output buffers: %d; pictures copied out by %s; they arrive in %s\n", out_buffers ? out_buffers : 3, way_name,
         memory == VCDEC_OUT_PCI ? "PCI_RAMAlloc memory" : memory & VCDEC_OUT_UNCACHED ? "a Physical Memory Pool, not cacheable" :
         memory ? "a Physical Memory Pool, cacheable" : "a cacheable Physical Memory Pool if there is one, else PCI memory");
     if (memory != VCDEC_OUT_PCI) {                          /* (the RAM disc is a PMP on RISC OS 5: its flags show the PMP bit) */
@@ -670,6 +852,18 @@ int probe_main(int argc, char **argv)
     }
     cfg.log = log_line;
     page0 = contig_read_app_page(probe_swi);
+    if (multi_n) {
+        int ok = multi_run(multi_n, &cfg, stream), moved = contig_app_page_moved(probe_swi, &page0);
+        if (page0.have_pn || page0.have_pa)
+            say("The program's page at &8000: %s\n", moved ? "MOVED - ARMEABISupport has lost this program (reboot before "
+                "the next test)" : "not moved");
+        say("\nResult: %s\n", ok && !moved ? "OK - every decoder gave every picture right" :
+                              moved ? "the program's page at &8000 moved (see above)" :
+                              "not every decoder worked (see above)");
+        if (out2) fclose(out2);
+        free(stream);
+        return ok && !moved ? 0 : 1;
+    }
     {
         uint32_t t0 = now_cs();
         if ((r = vcdec_open(&d, &cfg)) != VCDEC_OK) {

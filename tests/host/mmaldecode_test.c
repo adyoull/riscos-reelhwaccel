@@ -52,6 +52,23 @@ void probe_svc_copy_ldm(void *dst, const void *src, size_t n) { ldm_copies++; pr
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL: " __VA_ARGS__); printf("\n"); fails++; } } while (0)
 
+/* multi: the big per-decoder buffers, a set for each decoder (instance) */
+typedef struct {
+    uint32_t slowq[32][128];
+    uint8_t txq[32][65536];
+    uint8_t cur_frame[1 << 16];
+    uint8_t au_data[1 << 18];
+    uint32_t outq[64][128];
+    uint32_t deferred[8][128];
+} fake_big;
+static fake_big fake_big0, *big = &fake_big0;
+#define slowq (big->slowq)
+#define txq (big->txq)
+#define cur_frame (big->cur_frame)
+#define au_data (big->au_data)
+#define outq (big->outq)
+#define deferred (big->deferred)
+
 #define MAGIC 0x6C616D6Du
 #define W 70
 #define H 38
@@ -60,6 +77,13 @@ static _kernel_oserror err = { 1, "fake error" }, empty = { 2, "none" };
 
 /* scenario */
 static int hijacked, vc_stuck, efch_late, swap_frames, hold_inputs;
+/* multi: this decoder doesn't fit in the VideoCore's memory: as one 1080p
+   decoder with gpu_mem=64 on the Pi (MMALDecode 0.12): it keeps every
+   input buffer, and sends no format change and no picture */
+static int vc_full;
+#define MAXI 8
+static int multi, cur_inst, inst_pictures[MAXI];   /* (multi: below) */
+static uint32_t inst_first[MAXI], inst_last[MAXI];   /* (each decoder's first and last picture: the time) */
 static uint32_t held[32]; static int nheld;
 static int big_efch, corrupt_at = -1, go_quiet, error_event, long_event, awaiting_reformat;
 static int mp4_mode, pts_fifo, no_pts_back, efch_after_flush, rx_late, recreated, big_efch_at, efch_ever;
@@ -69,7 +93,7 @@ static int fail_out_disable, efch_on_flush, disable_refused, ports_on_at_destroy
 /* in_slow: a decoder slower than the host. Input buffers (with their data)
    wait, and one is taken every in_slow dequeues, so the input fills */
 static int in_slow, nslow, slow_ticks, slow_max, slow_running;
-static uint32_t slowq[32][128], slowq_len[32];
+static uint32_t slowq_len[32];
 /* counters */
 static int uses, releases, opens, closes, connects, disconnects, freed, created, destroyed, comp_enabled,
            port_on[4], shorts, bulks_tx, bulks_rx, efch_sent, disables_out, flushes, aus, au_pieces_max, idr_dropped;
@@ -78,20 +102,17 @@ static uint32_t stub, time_cs;
 /* the fake decoder's state */
 static uint8_t got_stream[1 << 20];
 static uint32_t got_len, pending_tx, pending_tx_ctx;
-static uint8_t txq[32][65536];
 static uint32_t txq_len[32];
 static int ntxq, pending_tx_now;
 static uint32_t out_w, out_h, out_size_set;
 static int out_bufs[16], nout, nout_max, frames_made, eos_in, eos_out_sent, need_rx;
 static uint32_t rx_len_expected;
-static uint8_t cur_frame[1 << 16];
 #define UNKNOWN 0x8000000000000000ull
 
 static void buffer_back(uint32_t port, uint32_t ctx, uint32_t length, uint32_t flags, uint64_t pts);
 
 /* MP4 mode: access units as they arrive, the DPB, the pictures ready */
 typedef struct { uint64_t pts; uint8_t val, idr; } pic_t;
-static uint8_t au_data[1 << 18];
 static uint32_t au_n, au_pieces;
 static uint64_t au_pts, pending_pts, au_pts_seen[64];
 static uint32_t pending_flags;
@@ -195,7 +216,7 @@ static void mp4_piece(const uint8_t *d, uint32_t n)
     au_pieces++;
     if (pending_flags & 4) { in_au = 0; decode_au(); }
 }
-static uint32_t outq[64][128], outq_len[64];
+static uint32_t outq_len[64];
 static int noutq;
 
 static void post(uint32_t type, const void *payload, uint32_t len, uint32_t status)
@@ -253,7 +274,7 @@ static void produce(void)
 {
     uint8_t vals[64];
     int n;
-    if (need_rx || go_quiet || awaiting_reformat || vc_stuck) return;
+    if (need_rx || go_quiet || awaiting_reformat || vc_stuck || vc_full) return;
     if (mp4_mode) {                          /* pictures as access units are decoded */
         if (!aus_decoded) return;
         n = frames_made + nready;
@@ -327,6 +348,10 @@ static void produce(void)
             memmove(ready, ready + 1, sizeof ready[0] * (size_t)--nready);
             if (frames_made == corrupt_at) cur_frame[5] ^= 1;
             buffer_back(2, (uint32_t)out_bufs[--nout], size, fl, pts);
+            if (multi) {
+                if (!inst_pictures[cur_inst]++) inst_first[cur_inst] = time_cs;
+                inst_last[cur_inst] = time_cs;
+            }
         } else {
             render(vals[swap_frames && frames_made == 1 ? 2 : swap_frames && frames_made == 2 ? 1 : frames_made], cur_frame);
             if (frames_made == corrupt_at) cur_frame[5] ^= 1;
@@ -346,7 +371,7 @@ static void produce(void)
    event's or a picture's) and the host hasn't queued the receive, it
    answers nothing else. Messages wait here until the receive (0.8 sent a
    port disable at such a time, waited for the reply, and never got one). */
-static uint32_t deferred[8][128], deferred_len[8];
+static uint32_t deferred_len[8];
 static int ndeferred, deferred_ever;
 
 static void take_tx(void);
@@ -372,6 +397,7 @@ static void firmware(const uint32_t *m, uint32_t len)
     switch (m[1]) {
     case 4: {
         uint32_t r[5] = { 0, 0xC0DE, 1, 1, 1 };
+        if (vc_full == 2) { r[0] = 1; reply(m, r, sizeof r); break; }   /* MMAL_ENOMEM */
         if (created) {                       /* created again: a new decoder, nothing of the old one's */
             in_au = 0; au_n = 0; ndpb = nready = 0; need_idr = 1; eos_in = eos_out_sent = 0; nfifo = 0;
             eos_then_flush = 0; efch_sent = 0; aus_decoded = 0; last_out_pts = max_ready_pts = UNKNOWN;
@@ -463,7 +489,8 @@ static void firmware(const uint32_t *m, uint32_t len)
                 memcpy(got_stream + got_len, (const uint8_t *)&p[8 + 14 + 10 + 3], pim);
                 got_len += pim;
                 shorts++;
-                buffer_back(1, d->ctx, 0, 0, UNKNOWN);
+                if (vc_full && nheld < 32) held[nheld++] = d->ctx;
+                else buffer_back(1, d->ctx, 0, 0, UNKNOWN);
             } else if (length) {
                 pending_tx = length; pending_tx_ctx = d->ctx;
                 pending_tx_now = 1;
@@ -522,7 +549,10 @@ static void take_tx(void)
     memmove(txq[0], txq[1], sizeof txq[0] * (size_t)(ntxq - 1));
     memmove(txq_len, txq_len + 1, sizeof txq_len[0] * (size_t)(ntxq - 1));
     ntxq--;
-    if (hold_inputs) {                       /* as the Pi with 1080p: input kept until there's enough */
+    if (vc_full) {                           /* (kept: given back by a flush or a disable) */
+        CHECK(nheld < 32, "the full decoder's held inputs");
+        if (nheld < 32) held[nheld++] = pending_tx_ctx;
+    } else if (hold_inputs) {                /* as the Pi with 1080p: input kept until there's enough */
         held[nheld++] = pending_tx_ctx;
         if (nheld >= hold_inputs || eos_in) { while (nheld) buffer_back(1, held[--nheld], 0, 0, UNKNOWN); }
     } else {
@@ -675,6 +705,100 @@ static void late_rx_finish(void)
     ((void (*)(uint32_t, uint32_t, uint32_t))(uintptr_t)stub)(stub + 64, 4, 0);
 }
 
+/* ---- several decoders at once (multi) ----
+   Each vcdec has its own RMA stub, VCHIQ service and component. With multi
+   set, the fake keeps a decoder's state for each (an instance, made when
+   its stub is claimed), and the SWIs naming a service handle (or a stub)
+   switch to that decoder's. The memory, the PCI blocks and the pools are
+   shared, as on the machine. multi_room decoders fit in the VideoCore;
+   the ones after don't: multi_full_way 0, as the Pi with too little
+   gpu_mem (inputs kept, nothing out: vcdec's stall); 1, the component's
+   create refused (MMAL_ENOMEM). Not measured on the Pi yet: VCDecTest's
+   Multi Obey file is for that. */
+static int multi_room = 99, multi_full_way;
+#define INST_VARS X(hijacked) X(held) X(nheld) X(hold_inputs) X(vc_full) X(awaiting_reformat) X(recreated) \
+    X(efch_ever) X(first_in_cs) X(disable_refused) X(ports_on_at_destroy) X(nslow) X(slow_ticks) X(slow_running) \
+    X(slowq_len) X(created) X(destroyed) X(comp_enabled) X(port_on) X(efch_sent) X(disables_out) X(stub) X(freed) \
+    X(pending_tx) X(pending_tx_ctx) X(txq_len) X(ntxq) X(pending_tx_now) X(out_w) X(out_h) X(out_size_set) \
+    X(out_bufs) X(nout) X(nout_max) X(frames_made) X(eos_in) X(eos_out_sent) X(need_rx) X(rx_len_expected) \
+    X(au_n) X(au_pieces) X(au_pts) X(pending_pts) X(au_pts_seen) X(pending_flags) X(in_au) X(need_idr) \
+    X(aus_decoded) X(n_au_pts) X(dpb) X(ready) X(ndpb) X(nready) X(flushed) X(last_out_pts) X(eos_with_data) \
+    X(eos_lost) X(max_ready_pts) X(disc_seen) X(comp_cycles) X(flush_while_off) X(eos_then_flush) X(fifo_pts) \
+    X(nfifo) X(outq_len) X(noutq) X(deferred_len) X(ndeferred) X(deferred_ever)
+typedef struct {
+#define X(v) __typeof__(v) v;
+    INST_VARS
+#undef X
+} fake_inst;
+static fake_inst inst_saved[MAXI], inst_fresh;
+static fake_big *inst_big[MAXI];
+static int ninst, pmp_owner[NBLOCKS];
+
+static void inst_save(fake_inst *t)
+{
+#define X(v) memcpy(&t->v, &v, sizeof v);
+    INST_VARS
+#undef X
+}
+static void inst_load(const fake_inst *t)
+{
+#define X(v) memcpy(&v, &t->v, sizeof v);
+    INST_VARS
+#undef X
+}
+static void inst_switch(int k)
+{
+    if (k == cur_inst) return;
+    inst_save(&inst_saved[cur_inst]);
+    inst_load(&inst_saved[k]);
+    big = inst_big[k];
+    cur_inst = k;
+}
+/* a stub claimed: the first decoder is the state there is; each after it a fresh one */
+static void inst_new(void)
+{
+    int k;
+    if (!ninst) { inst_save(&inst_fresh); inst_big[0] = &fake_big0; ninst = 1; cur_inst = 0; return; }
+    CHECK(ninst < MAXI, "more than %d decoders", MAXI);
+    if (ninst >= MAXI) return;
+    k = ninst++;
+    if (!inst_big[k] && !(inst_big[k] = calloc(1, sizeof *inst_big[k]))) { CHECK(0, "no memory"); return; }
+    inst_save(&inst_saved[cur_inst]);
+    inst_load(&inst_fresh);
+    big = inst_big[k];
+    cur_inst = k;
+    if (k >= multi_room) vc_full = multi_full_way ? 2 : 1;
+}
+static int inst_by_stub(uint32_t a)
+{
+    for (int k = 0; k < ninst; k++)
+        if ((k == cur_inst ? stub : inst_saved[k].stub) == a) return k;
+    return -1;
+}
+static int inst_freed(int k) { return k == cur_inst ? freed : inst_saved[k].freed; }
+static void inst_reset(void)
+{
+    if (ninst) inst_switch(0);
+    ninst = 0; cur_inst = 0; big = &fake_big0;
+    memset(inst_pictures, 0, sizeof inst_pictures);
+}
+/* multi: every decoder closed and everything freed */
+__attribute__((unused)) static void multi_cleaned(const char *what)
+{
+    CHECK(uses == releases, "%s: use/release %d/%d", what, uses, releases);
+    CHECK(opens == closes && connects == disconnects, "%s: open/close %d/%d, connect %d/%d", what, opens, closes, connects,
+          disconnects);
+    CHECK(pci_live == 0 && pmp_live == 0, "%s: %d PCI blocks, %d pools left", what, pci_live, pmp_live);
+    for (int k = 0; k < ninst; k++) {
+        inst_switch(k);
+        CHECK(freed == 1 && !comp_enabled && !port_on[1] && !port_on[2] && created == destroyed,
+              "%s: decoder %d: freed %d, left enabled (%d %d %d), created %d destroyed %d", what, k, freed, comp_enabled,
+              port_on[1], port_on[2], created, destroyed);
+    }
+    npci_blocks = 0;
+    memset(pmp_block, 0, sizeof pmp_block);
+}
+
 /* vcenc_test: its fake encoder takes the messages and bulk transfers (and
    the rest is this file's) */
 static int (*swi_hook)(int n, _kernel_swi_regs *r, _kernel_oserror **e);
@@ -683,6 +807,25 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
 {
     uint32_t *R = (uint32_t *)r->r;
     _kernel_oserror *he = NULL;
+    if (multi) {                             /* the decoder this SWI is about */
+        if (n == 0x59203 || n == 0x59204 || n == 0x59205 || n == 0x59209 || n == 0x5920D || n == 0x5920E || n == 0x5920F) {
+            int k = (int)(R[0] >> 16);
+            CHECK((R[0] & 0xFFFF) == 0x5E7 && k < ninst, "SWI &%X: handle &%X", n, R[0]);
+            if ((R[0] & 0xFFFF) == 0x5E7 && k < ninst) inst_switch(k);
+        } else if (n == 0x1E && R[0] == 7) {
+            int k = inst_by_stub(R[2]);
+            if (k >= 0) inst_switch(k);
+        } else if (n == 0x1E && R[0] == 6) {
+            inst_new();
+        } else if (n == 0x6E) {
+            int k = inst_by_stub(R[1]);
+            if (k >= 0) inst_switch(k);
+        } else if (n == 0x66 && R[0] == 0) {
+            int k = inst_by_stub(R[6] - 72);
+            if (k >= 0) inst_switch(k);
+        }
+        CHECK(!rx_late && !in_slow, "multi with rx_late or in_slow");
+    }
     if (n == 0x42 || n == 0x59204) late_rx_finish();
     if (n == 0x59204) slow_tick();
     if (swi_hook && swi_hook(n, r, &he)) return he;
@@ -719,7 +862,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
             p = mmap(NULL, R[5], pmp_privileged ? PROT_NONE : PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
             b = npci_blocks++;
             pci_lo[b] = (uint32_t)(uintptr_t)p; pci_hi[b] = pci_lo[b] + R[5];
-            pmp_block[b] = 1; pmp_area[b] = 300 + b; pmp_pages[b] = (int)R[9]; pmp_claimed[b] = pmp_mapped[b] = 0;
+            pmp_block[b] = 1; pmp_area[b] = 300 + b; pmp_owner[b] = multi ? cur_inst : 0; pmp_pages[b] = (int)R[9]; pmp_claimed[b] = pmp_mapped[b] = 0;
             pmp_cached[b] = -1; pmp_shadow[b] = malloc(R[5]); pmp_synced[b] = malloc(R[5]);
             memset(pmp_shadow[b], 0xEE, R[5]); memset(pmp_synced[b], 0xEE, R[5]);   /* (RAM as the cache) */
             pci_open(1);
@@ -759,7 +902,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         if (R[0] == 1) {
             CHECK(!pmp_mapped[b] && !pmp_claimed[b], "a pool removed with pages in it (%d mapped, %d claimed)",
                   pmp_mapped[b], pmp_claimed[b]);
-            CHECK(!freed, "a pool removed after its handler's RMA block was freed");
+            CHECK(!(multi ? inst_freed(pmp_owner[b]) : freed), "a pool removed after its handler's RMA block was freed");
             munmap((void *)(uintptr_t)pci_lo[b], pci_hi[b] - pci_lo[b]);
             free(pmp_shadow[b]);
             free(pmp_synced[b]);
@@ -798,7 +941,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
             uint32_t *e = (uint32_t *)(uintptr_t)R[1];
             for (uint32_t j = 0; j < R[2]; j++, e += 3) {
                 int b = block_of(e[1]);
-                e[2] = b >= 0 ? 0x20000000u + (uint32_t)b * 0x01000000u + (e[1] - pci_lo[b]) : 0xFFFFFFFFu;
+                e[2] = b >= 0 ? 0x20000000u + (uint32_t)b * (multi ? 0x00400000u : 0x01000000u) + (e[1] - pci_lo[b]) : 0xFFFFFFFFu;   /* (multi: closer, for more blocks below 1 GB) */
                 if (b >= 0 && pmp_block[b] && pmp_scattered && e[1] - pci_lo[b] >= 4096) e[2] += 0x100000;   /* (not contiguous) */
                 if (b >= 0 && pmp_block[b] && pmp_top) e[2] = 0x40000000u - (pci_hi[b] - pci_lo[b]) + (e[1] - pci_lo[b]);
             }
@@ -820,7 +963,7 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         opens++;
         CHECK(s[2] == 0x6D6D616Cu && s[6] == stub && s[7] == stub + 64, "open params");
         uses++;
-        R[0] = 0x5E7;
+        R[0] = 0x5E7 | (uint32_t)(multi ? cur_inst : 0) << 16;
         return NULL;
     }
     case 0x59209: closes++; return NULL;
@@ -953,6 +1096,8 @@ static void make_files(void)
 
 static void reset_fake(void)
 {
+    inst_reset();
+    multi = 0; multi_room = 99; multi_full_way = 0; vc_full = 0;
     uses = releases = opens = closes = connects = disconnects = freed = created = destroyed = comp_enabled = 0;
     memset(port_on, 0, sizeof port_on);
     shorts = bulks_tx = bulks_rx = efch_sent = disables_out = flushes = aus = au_pieces_max = idr_dropped = 0;

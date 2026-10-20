@@ -353,7 +353,8 @@ static void whole(unsigned flags, int late, int skew, int extra, const char *wha
 
 int probe_main(int argc, char **argv);        /* tools/vcdectest */
 
-static int app_move_next_run;                 /* the next VCDecTest run: every pool claim moves the page at &8000 */
+static int app_move_next_run;
+static int app_multi, app_multi_room, app_multi_way, app_corrupt = -1;   /* the next VCDecTest runs: several decoders (the fake's multi) */                 /* the next VCDecTest run: every pool claim moves the page at &8000 */
 
 /* VCDecTest on the fake's MP4, with up to three options */
 static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
@@ -398,6 +399,8 @@ static char *run_apps(int *ret, const char *opts)
     reset_fake();
     mp4_mode = 1;
     move_on_claim = app_move_next_run; app_move_next_run = 0;
+    multi = app_multi; multi_room = app_multi_room; multi_full_way = app_multi_way;
+    if (app_multi) corrupt_at = app_corrupt;
     remove("/tmp/vcdec_test.out");
     *ret = probe_main(n, argv);
     mp4_mode = 0;
@@ -512,6 +515,54 @@ static void app_tests(void)
     o = run_apps(&ret, "-c fast");
     CHECK(ret == 1 && !opens, "VCDecTest -c fast: refused (%d)", ret);
     npci_blocks = 0;
+
+    /* -M: several decoders at once (the fake: one decoder state each) */
+    for (int way = 0; way < 5; way++) {
+        static const char *const what[5] = { "-M 3", "-M 3, the third doesn't fit (it stalls)",
+                                             "-M 3, the third doesn't fit (create refused)", "-M 1",
+                                             "-M 2, each decoder's picture 4 within rounding" };
+        int nm = way == 3 ? 1 : way == 4 ? 2 : 3, overlap;
+        char opts[32];
+        snprintf(opts, sizeof opts, "-M %d", nm);
+        reset_fake();
+        mp4_mode = 1;
+        /* (run_apps resets the fake: the multi switches go in after, through app_multi) */
+        app_multi = 1; app_multi_room = way == 1 || way == 2 ? 2 : 99; app_multi_way = way == 2;
+        app_corrupt = way == 4 ? 3 : -1;
+        o = run_apps(&ret, opts);
+        printf("%s", o);
+        overlap = nm < 2 || (inst_first[1] < inst_last[0] && inst_first[0] < inst_last[1]);
+        if (way == 0)
+            CHECK(ret == 0 && strstr(o, "Multi 3: 3 of 3 decoders opened, 3 decoded every picture right") &&
+                  strstr(o, "Decoder 3: OK; 12 of 12 pictures, 0 wrong, 0 missing; 6 output buffers in pools") &&
+                  strstr(o, "Decoder 1: OK; 12 of 12 pictures, 0 wrong, 0 missing; 6 output buffers in pools (0.0 MB), 0 pictures copied") &&
+                  strstr(o, "Result: OK - every decoder") && inst_pictures[0] == 12 && inst_pictures[1] == 12 &&
+                  inst_pictures[2] == 12 && overlap,
+                  "%s (%d; fake pictures %d %d %d, overlap %d):\n%s", what[way], ret, inst_pictures[0], inst_pictures[1],
+                  inst_pictures[2], overlap, o);
+        else if (way == 1)
+            CHECK(ret == 1 && strstr(o, "Decoder 3: vcdec_receive: Nothing from the decoder in 500 cs") &&
+                  strstr(o, "Multi 3: 3 of 3 decoders opened, 2 decoded every picture right") &&
+                  strstr(o, "Decoder 1: OK; 12 of 12") && strstr(o, "Decoder 2: OK; 12 of 12") &&
+                  strstr(o, "Result: not every decoder worked") && !inst_pictures[2] && overlap,
+                  "%s (%d):\n%s", what[way], ret, o);
+        else if (way == 2)
+            CHECK(ret == 1 && strstr(o, "Decoder 3: not opened (vcdec_open: Create: ") &&
+                  strstr(o, "Multi 3: 2 of 3 decoders opened, 2 decoded every picture right") &&
+                  strstr(o, "Decoder 2: OK; 12 of 12") && overlap,
+                  "%s (%d):\n%s", what[way], ret, o);
+        else if (way == 3)
+            CHECK(ret == 0 && strstr(o, "Multi 1: 1 of 1 decoders opened, 1 decoded every picture right") &&
+                  inst_pictures[0] == 12, "%s (%d):\n%s", what[way], ret, o);
+        else
+            CHECK(ret == 0 && strstr(o, "Decoder 1: OK; 12 of 12 pictures, 0 wrong, 0 missing (some within rounding)") &&
+                  strstr(o, "Decoder 2: OK; 12 of 12 pictures, 0 wrong, 0 missing (some within rounding)") &&
+                  strstr(o, "Multi 2: 2 of 2 decoders opened, 2 decoded every picture right") && overlap,
+                  "%s (%d):\n%s", what[way], ret, o);
+        app_corrupt = -1;
+        multi_cleaned(what[way]);
+        app_multi = 0;
+    }
 }
 
 /* vcdec_copy.S on its own: each way, in USR and "SVC" mode, every
