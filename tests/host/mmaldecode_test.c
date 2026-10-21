@@ -85,6 +85,13 @@ static int vc_full;
 static int multi, cur_inst, inst_pictures[MAXI];   /* (multi: below) */
 static uint32_t inst_first[MAXI], inst_last[MAXI];   /* (each decoder's first and last picture: the time) */
 static int multi_full_way, multi_room = 99;
+/* zero copy (tools/smemprobe): the decoder writes its pictures straight into
+   memory imported through the SMEM service (as Linux's vc-sm-cma), given by
+   handle in each output buffer's data field, and says so (is_zero_copy):
+   no bulk transfer. zc_refuse: MMAL_PARAMETER_ZERO_COPY refused */
+static int zc_out, zc_refuse, bb_zc;
+static uint32_t out_data[64];              /* each output buffer's data field, by client_context */
+static void zc_write(uint32_t handle, const void *src, uint32_t n);
 static unsigned fake_gpu_mb = 76;          /* gpu_mem, as the firmware says it */
 static int inst_decoding_others(void);
 static uint32_t held[32]; static int nheld;
@@ -249,6 +256,7 @@ static void buffer_back(uint32_t port, uint32_t ctx, uint32_t length, uint32_t f
     b[8 + 5] = length;                       /* length at buffer header +20 */
     b[8 + 7] = flags;
     b[16] = (uint32_t)pts; b[17] = (uint32_t)(pts >> 32);   /* pts at buffer header +32 (byte 64) */
+    if (bb_zc) b[32] = 1;                    /* is_zero_copy (byte 128) */
     post(12, b, sizeof b, 0);
 }
 
@@ -354,7 +362,13 @@ static void produce(void)
             render(ready[0].val, cur_frame);
             memmove(ready, ready + 1, sizeof ready[0] * (size_t)--nready);
             if (frames_made == corrupt_at) cur_frame[5] ^= 1;
-            buffer_back(2, (uint32_t)out_bufs[--nout], size, fl, pts);
+            {
+                uint32_t ctx = (uint32_t)out_bufs[--nout];
+                if (zc_out) zc_write(ctx < 64 ? out_data[ctx] : 0, cur_frame, size);   /* (straight into its memory) */
+                bb_zc = zc_out;
+                buffer_back(2, ctx, size, fl, pts);
+                bb_zc = 0;
+            }
             if (multi) {
                 if (!inst_pictures[cur_inst]++) inst_first[cur_inst] = time_cs;
                 inst_last[cur_inst] = time_cs;
@@ -364,12 +378,14 @@ static void produce(void)
             if (frames_made == corrupt_at) cur_frame[5] ^= 1;
             buffer_back(2, (uint32_t)out_bufs[--nout], size, 0, UNKNOWN);
         }
-        need_rx = 1; rx_len_expected = size;
+        if (!(mp4_mode && zc_out)) { need_rx = 1; rx_len_expected = size; }
         frames_made++;
 
     } else if (eos_in && !eos_out_sent) {
+        bb_zc = zc_out;
         buffer_back(2, (uint32_t)out_bufs[--nout], 0, 1, mp4_mode ? last_out_pts : UNKNOWN);
-        need_rx = 2; rx_len_expected = 8;
+        bb_zc = 0;
+        if (!zc_out) { need_rx = 2; rx_len_expected = 8; }
         eos_out_sent = 1;
     }
 }
@@ -484,6 +500,14 @@ static void firmware(const uint32_t *m, uint32_t len)
         produce();
         break;
     }
+    case 14: {                               /* PORT_PARAMETER_SET: only zero copy, here */
+        uint32_t r = 0;
+        CHECK(p[2] == 4 && (p[1] == 1 || p[1] == 2) && p[3] == 12, "parameter &%X on port %u", p[2], p[1]);
+        if (zc_refuse) r = 4;                /* (ENOSYS) */
+        else if (p[1] == 2) zc_out = p[4] != 0;
+        reply(m, &r, 4);
+        break;
+    }
     case 11: {                               /* BUFFER_FROM_HOST */
         const drv_t *d = (const drv_t *)p;
         uint32_t length = p[8 + 5], flags = p[8 + 7], pim = p[8 + 14 + 10 + 2];
@@ -532,6 +556,7 @@ static void firmware(const uint32_t *m, uint32_t len)
             CHECK(efch_ever || (first_in_cs && time_cs - first_in_cs >= 200), "an output buffer before the format change");
             CHECK(nout < 16, "more than 16 output buffers with the decoder");
             if (nout < 16) out_bufs[nout++] = (int)d->ctx;
+            if (d->ctx < 64) out_data[d->ctx] = p[8 + 3];   /* (zero copy: the VideoCore handle) */
             if (nout > nout_max) nout_max = nout;
         }
         produce();
@@ -732,7 +757,7 @@ static void late_rx_finish(void)
     X(au_n) X(au_pieces) X(au_pts) X(pending_pts) X(au_pts_seen) X(pending_flags) X(in_au) X(need_idr) \
     X(aus_decoded) X(n_au_pts) X(dpb) X(ready) X(ndpb) X(nready) X(flushed) X(last_out_pts) X(eos_with_data) \
     X(eos_lost) X(max_ready_pts) X(disc_seen) X(comp_cycles) X(flush_while_off) X(eos_then_flush) X(fifo_pts) \
-    X(nfifo) X(outq_len) X(noutq) X(deferred_len) X(ndeferred) X(deferred_ever)
+    X(nfifo) X(outq_len) X(noutq) X(deferred_len) X(ndeferred) X(deferred_ever) X(zc_out) X(out_data)
 typedef struct {
 #define X(v) __typeof__(v) v;
     INST_VARS
@@ -824,6 +849,93 @@ __attribute__((unused)) static void multi_cleaned(const char *what)
     memset(pmp_block, 0, sizeof pmp_block);
 }
 
+/* ---- the SMEM service (Linux's vc-sm-cma): memory imported by bus
+   address (the uncached alias &C0000000 + physical), a handle back ----
+   smem_present 0: no such service; smem_refuse_import: handle 0 back */
+#define SMEM_HANDLE 0x5EDu
+static int smem_present = 1, smem_refuse_import, smem_is_open, smem_uses, smem_imports, smem_frees;
+static struct { uint32_t bus, size, h; int live; } smem_imp[32];
+static int nsmem_imp;
+static uint32_t smem_q[8][8], smem_qlen[8];
+static int nsmem_q;
+
+/* the program's memory at a bus address (as OS_Memory 0 gave it out), or 0 */
+static uint32_t bus_to_logical(uint32_t bus, uint32_t n)
+{
+    uint32_t phys = bus & 0x3FFFFFFFu, gap = multi ? 0x00200000u : 0x01000000u;
+    if ((bus >> 30) != 3) return 0;
+    for (int b = 0; b < npci_blocks; b++) {
+        uint32_t base = 0x20000000u + (uint32_t)b * gap;
+        if (pci_lo[b] && phys >= base && phys + n <= base + (pci_hi[b] - pci_lo[b])) return pci_lo[b] + (phys - base);
+    }
+    return 0;
+}
+
+static void zc_write(uint32_t handle, const void *src, uint32_t n)
+{
+    for (int i = 0; i < nsmem_imp; i++)
+        if (smem_imp[i].live && smem_imp[i].h == handle) {
+            uint32_t a = bus_to_logical(smem_imp[i].bus, n);
+            CHECK(n <= smem_imp[i].size && a, "zero copy: %u bytes into handle &%X (%u bytes)", n, handle, smem_imp[i].size);
+            if (a && n <= smem_imp[i].size) dma_write(a, src, n);
+            return;
+        }
+    CHECK(0, "zero copy into handle &%X, which isn't an imported buffer", handle);
+}
+
+static _kernel_oserror *smem_swi(int n, uint32_t *R)
+{
+    switch (n) {
+    case 0x5920D: smem_uses++; return NULL;
+    case 0x5920E: smem_uses--; return NULL;
+    case 0x59209: CHECK(smem_is_open, "SMEM closed twice"); smem_is_open = 0; return NULL;
+    case 0x59205: {
+        const uint32_t *m = (const uint32_t *)(uintptr_t)R[1];
+        CHECK(smem_uses > 0, "SMEM: a message while not in use");
+        CHECK(!(m[1] & 0x80000000u), "SMEM: transaction &%X has the VideoCore's bit", m[1]);
+        if (m[0] == 8) {                     /* IMPORT {type, addr, size, kernel_id, allocator, name[32]} */
+            uint32_t h = 0;
+            CHECK(R[2] == 8 + 20 + 32 && m[2] == 1, "SMEM import: %u bytes, type %u", R[2], m[2]);
+            CHECK(bus_to_logical(m[3], m[4]), "SMEM import of bus &%08X (%u bytes): not the program's pool", m[3], m[4]);
+            if (!smem_refuse_import && nsmem_imp < 32) {
+                h = 0x1000u + (uint32_t)nsmem_imp;
+                smem_imp[nsmem_imp].bus = m[3]; smem_imp[nsmem_imp].size = m[4]; smem_imp[nsmem_imp].h = h;
+                smem_imp[nsmem_imp++].live = 1;
+                smem_imports++;
+            }
+            CHECK(nsmem_q < 8, "SMEM reply queue");
+            smem_q[nsmem_q][0] = m[1]; smem_q[nsmem_q][1] = h; smem_qlen[nsmem_q++] = 8;
+        } else if (m[0] == 4) {              /* FREE {handle, mem}: no reply (as Linux expects) */
+            int found = 0;
+            for (int i = 0; i < nsmem_imp; i++)
+                if (smem_imp[i].live && smem_imp[i].h == m[2]) { smem_imp[i].live = 0; found = 1; smem_frees++; }
+            CHECK(found, "SMEM free of &%X: not imported", m[2]);
+        } else {
+            CHECK(0, "SMEM message type %u", m[0]);
+        }
+        return NULL;
+    }
+    case 0x59204:
+        if (!nsmem_q) return &empty;
+        memcpy((void *)(uintptr_t)R[1], smem_q[0], smem_qlen[0]);
+        R[2] = smem_qlen[0];
+        memmove(smem_q[0], smem_q[1], sizeof smem_q[0] * (size_t)(nsmem_q - 1));
+        memmove(smem_qlen, smem_qlen + 1, sizeof smem_qlen[0] * (size_t)(nsmem_q - 1));
+        nsmem_q--;
+        return NULL;
+    }
+    CHECK(0, "SWI &%X on the SMEM service", n);
+    return &err;
+}
+
+/* every import freed, the service closed */
+__attribute__((unused)) static int smem_live(void)
+{
+    int n = 0;
+    for (int i = 0; i < nsmem_imp; i++) n += smem_imp[i].live;
+    return n;
+}
+
 /* vcenc_test: its fake encoder takes the messages and bulk transfers (and
    the rest is this file's) */
 static int (*swi_hook)(int n, _kernel_swi_regs *r, _kernel_oserror **e);
@@ -832,6 +944,8 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
 {
     uint32_t *R = (uint32_t *)r->r;
     _kernel_oserror *he = NULL;
+    if ((n == 0x59204 || n == 0x59205 || n == 0x59209 || n == 0x5920D || n == 0x5920E) && R[0] == SMEM_HANDLE)
+        return smem_swi(n, R);
     if (multi) {                             /* the decoder this SWI is about */
         if (n == 0x59203 || n == 0x59204 || n == 0x59205 || n == 0x59209 || n == 0x5920D || n == 0x5920E || n == 0x5920F) {
             int k = (int)(R[0] >> 16);
@@ -985,6 +1099,14 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
     case 0x59202: disconnects++; return NULL;
     case 0x5920A: {
         uint32_t *s = (uint32_t *)(uintptr_t)R[1];
+        if (s[2] == 0x534D454Du) {           /* "SMEM" */
+            if (!smem_present) return &err;
+            CHECK(!smem_is_open && s[6] == stub && s[7] == stub + 64, "SMEM open params");
+            smem_is_open = 1;
+            smem_uses = 1;
+            R[0] = SMEM_HANDLE;
+            return NULL;
+        }
         opens++;
         CHECK(s[2] == 0x6D6D616Cu && s[6] == stub && s[7] == stub + 64, "open params");
         uses++;
@@ -1123,6 +1245,8 @@ static void reset_fake(void)
 {
     inst_reset();
     multi = 0; multi_room = 99; multi_full_way = 0; vc_full = 0; fake_gpu_mb = 76;
+    zc_out = zc_refuse = bb_zc = 0; memset(out_data, 0, sizeof out_data);
+    smem_present = 1; smem_refuse_import = smem_is_open = smem_uses = smem_imports = smem_frees = 0; nsmem_imp = nsmem_q = 0;
     uses = releases = opens = closes = connects = disconnects = freed = created = destroyed = comp_enabled = 0;
     memset(port_on, 0, sizeof port_on);
     shorts = bulks_tx = bulks_rx = efch_sent = disables_out = flushes = aus = au_pieces_max = idr_dropped = 0;

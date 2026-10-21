@@ -1,5 +1,41 @@
 # Changes
 
+## SMEMProbe 0.1: zero copy through the VideoCore's shared memory (2026-10-22)
+
+Linux keeps decoded frames out of the VCHIQ link altogether. Its
+vc-sm-cma driver gives the firmware's "SMEM" service ordinary memory by
+bus address and gets a handle back. MMAL ports set to zero copy then take
+that handle in each buffer's data field: the decoder writes into the
+memory itself, and nothing is bulk-transferred. The firmware also keeps no
+copy of the buffers in gpu_mem. RISC OS has no client for that service.
+The owner chose to try it.
+
+- **`tools/smemprobe`:**
+  1. opens "SMEM" (version 1, at least 0) on VCHIQ;
+  2. imports 64 KB of a Physical Memory Pool by its uncached bus alias
+     (&C0000000 + physical), then frees it;
+  3. decodes a 360p clip with `MMAL_PARAMETER_ZERO_COPY` on
+     ril.video_decode's output and imported pools as its buffers, every
+     picture checked against FFmpeg's (exact or within rounding), saying
+     how many came back zero copy and how many by bulk transfer (which it
+     also handles, if the firmware ignores the setting);
+  4. times a 1080p clip that way, then through vcdec.
+- **The SMEM messages** are written from vc-sm-cma's layouts (`vc_sm_defs.h`;
+  no code copied): {type, transaction} then the body. IMPORT = 8
+  {non-cached, bus address, size, id, allocator, name[32]} gives
+  {transaction, handle}. FREE = 4 {handle, 0} has no reply.
+- **The fake VideoCore** gains the SMEM service (imports by bus address,
+  mapped back to the program's pools), `PORT_PARAMETER_SET` for zero copy,
+  and zero-copy output: pictures written into the imported memory, sent
+  back with `is_zero_copy` and no bulk transfer. `zc_refuse`,
+  `smem_present` and `smem_refuse_import` give the refusals.
+- **Tests:** smemprobe_test runs all four steps, a picture within
+  rounding, zero copy refused (bulk instead, said), no SMEM service, and
+  imports refused. Each run checks everything is freed and closed.
+  6 mutants caught: the buffer's address instead of its handle, no cache
+  invalidate, the physical address without the alias, no free, bulk
+  counted as success, the fake not writing.
+
 ## Release 0.2.17 (2026-10-21)
 
 The GitHub release `v0.2.17`: devkit 0.2.17 (vcdec 0.4.4, vcenc 0.1.5,

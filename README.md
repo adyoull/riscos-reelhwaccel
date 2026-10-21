@@ -75,6 +75,10 @@ drive the hardware from RISC OS, and check it:
 - **VCDecTest** (`tools/vcdectest`): vcdec as a player drives it: every
   picture checked, seeks before and after the end of the stream, zero
   copy, memory, speed, and several decoders open at once (Multi).
+- **SMEMProbe** (`tools/smemprobe`): can the VideoCore write pictures
+  straight into RISC OS memory, as Linux's zero copy does? It opens the
+  firmware's shared-memory service, imports memory into it, decodes a clip
+  that way (every picture checked) and times it against vcdec.
 - **VCEncTest** (`tools/vcenctest`): vcenc as a program drives it: test
   pictures encoded, the stream checked and decoded again by vcdec
   (PSNR), each setting in turn, speed.

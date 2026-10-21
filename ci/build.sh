@@ -36,6 +36,6 @@ echo "== unaligned accesses"
   vcdec/vcdec.c vcdec/vcenc.c vcdec/vcmmal.c hevcdec/hevcdec.c hevcdec/hevcdec_hw.c hevcdec/hevcdec_conv.c \
   hevcdec/rpivid_h265.c tools/hevcprobe/hevcprobe.c tools/hevctest/hevctest.c \
   tools/mmaldecode/mmaldecode.c tools/mmalprobe/mmalprobe.c tools/vcdectest/vcdectest.c \
-  tools/vcenctest/vcenctest.c tools/vchiqprobe/vchiqprobe.c || rc=1
+  tools/vcenctest/vcenctest.c tools/vchiqprobe/vchiqprobe.c tools/smemprobe/smemprobe.c || rc=1
 [ $rc = 0 ] && echo "ci/build.sh: built, all checks passed" || echo "ci/build.sh: CHECKS FAILED"
 exit $rc

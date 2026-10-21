@@ -1,0 +1,36 @@
+SMEMProbe - can the VideoCore write pictures straight into our memory?
+=====================================================================
+
+Today the hardware decoder (vcdec, h264_vchiq) and encoder use MMAL's plain
+mode: every decoded 1080p picture (3 MB) is sent from the VideoCore to
+RISC OS by bulk transfer, and the VideoCore keeps its own copy of every
+buffer in its memory (gpu_mem). That copy is why a second 1080p decoder,
+or a 1080p decoder and an encoder, run out of room at gpu_mem=128.
+
+Linux avoids both: its "vc-sm-cma" driver hands the VideoCore ordinary
+memory by a handle (through the firmware's "SMEM" service), and the decoder
+writes its pictures straight into it ("zero copy"). Nothing is transferred,
+and little gpu_mem is used. RISC OS has no client for that service. This
+probe finds out, step by step, whether one works:
+
+  1. the "SMEM" service opened over VCHIQ;
+  2. 64 KB of our memory imported into it: a VideoCore handle back (then
+     freed);
+  3. the 360p clip decoded with zero copy: every picture written straight
+     into our memory, then checked against FFmpeg's;
+  4. the 1080p clip timed with zero copy, then the usual way (vcdec), to
+     compare.
+
+Running it (please restart first, then send back Result):
+  Probe    The four steps. Writes Result.
+  Verbose  The first three, every message logged. Writes ResultV. Run it
+           only if Probe stops part way (restart before it).
+
+If a step is refused, the report says so and stops there: that is an
+answer too. If the machine stops responding, switch it off and on again,
+and send whatever Result holds.
+
+Needs: RISC OS 5 on a Raspberry Pi 4 with the VCHIQ module (in the ROM) and
+gpu_mem=128 or more; RISC OS 5.23 or later (Physical Memory Pools).
+Part of riscos-reelhwaccel; GPL version 2. The clips are made from
+FFmpeg's testsrc2 pattern.

@@ -5,7 +5,7 @@
 # image, which GitHub builds in), or a GCCSDK environment (common/toolchain.sh).
 # Some test zips carry clips made here, and are skipped (and said so)
 # without what makes them:
-#   MMALDecode, VCDecTest  the host's ffmpeg with libx264 (H.264 clips)
+#   MMALDecode, VCDecTest, SMEMProbe  the host's ffmpeg with libx264 (H.264 clips)
 #   HEVCTest               FFMPEG_TARBALL (ffmpeg-5.1.10.tar.xz, for its
 #                          traces) and the host's ffmpeg with libx265
 # The versions are the current ones; set them to build others, e.g.
@@ -25,6 +25,8 @@ else
   echo "MMALDecode, VCDecTest: skipped (their clips need $FFMPEG with libx264)"
 fi
 "$HERE/tools/vcenctest/build.sh" "${VCENCTEST:-0.1.3}"
+if has_encoder libx264; then "$HERE/tools/smemprobe/build.sh" "${SMEMPROBE:-0.1}"
+else echo "SMEMProbe: skipped (its clips need $FFMPEG with libx264)"; fi
 "$HERE/tools/hevcprobe/build.sh" "${HEVCPROBE:-0.1}"
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"
 if [ -n "${FFMPEG_TARBALL:-}" ] && has_encoder libx265; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.14}"

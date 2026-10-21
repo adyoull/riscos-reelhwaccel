@@ -61,6 +61,14 @@ grep -q "vcdec_test --exit: all passed" "$O/vcdec_exit_app.out" && grep -q "^-X:
 # ... and VCDecTest's MP4 reader against real MP4s (as mmaldecode's)
 "$HERE/mp4_check.sh" "$O/vcdec_test" "$O/vcdectest" || bad=1
 
+# tools/smemprobe: the VideoCore's SMEM service and zero-copy decoding, against the same fake (with SMEM)
+arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DVCDEC_HOST -DPROBE_TEST -I$HERE/fake -I$TOP/vcdec -Wall \
+  -Wno-unused-function -no-pie -o "$O/smemprobe_test" "$HERE/smemprobe_test.c" "$TOP/vcdec/vcdec.c" "$TOP/vcdec/vcmmal.c" \
+  "$TOP/vcdec/vcdec_copy.S" "$TOP/tools/smemprobe/smemprobe.c" || bad=1
+echo "== smemprobe_test (SMEM opened, memory imported, a clip decoded zero copy and checked; refusals)"
+"$TOP/tests/qemu/aligntrap.sh" "$O/smemprobe_test" > "$O/smemprobe_test.out" || bad=1
+grep "FAIL\|smemprobe_test:" "$O/smemprobe_test.out"
+
 # vcdec/vcenc.c: the H.264 encoder, against a fake MMAL ril.video_encode on the same fake VCHIQ
 arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DVCDEC_HOST -DPROBE_TEST -I$HERE/fake -I$TOP/vcdec -Wall \
   -Wno-unused-function -no-pie -o "$O/vcenc_test" "$HERE/vcenc_test.c" "$TOP/vcdec/vcenc.c" "$TOP/vcdec/vcdec.c" "$TOP/vcdec/vcmmal.c" "$TOP/vcdec/vcdec_copy.S" \
