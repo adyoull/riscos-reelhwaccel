@@ -1,5 +1,13 @@
 # Changes
 
+## Release 0.2.17 (2026-10-21)
+
+The GitHub release `v0.2.17`: devkit 0.2.17 (vcdec 0.4.4, vcenc 0.1.5,
+hevcdec 0.1.14) and VCDecTest 0.3.4. Everything since v0.2.15 is below:
+the VideoCore's memory given back (0.2.16), the shared MMAL connection
+(0.4.4 / 0.1.5), and the Multi and Exit tests. The text is
+`release-notes/v0.2.17.md`.
+
 ## vcdec 0.4.4, vcenc 0.1.5: one MMAL connection for both (2026-10-21)
 
 Done for maintainability, at the owner's request (the hot-path review).
