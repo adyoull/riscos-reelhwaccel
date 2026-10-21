@@ -10,6 +10,20 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.5 (vcdec 0.4.5): direct output. Until now the decoder made
+each picture in its own memory (gpu_mem) and then sent it over by bulk
+transfer, 3 MB a picture at 1080p. Now vcdec shares its buffers with the
+VideoCore, as Linux does, and the decoder writes each picture straight
+into them: no transfer, and no copy of the buffers in gpu_mem. SMEMProbe
+showed this works from RISC OS. It's the default; -D turns it off (every
+picture by bulk transfer, as before). Each report now ends with a
+"Direct output" line saying how many pictures came that way.
+Direct checks the three clips with it, holds hd's pictures to the end
+and seeks after it, then times hd with it and without it, copied out
+and held (ResultD). Please restart, run Direct, then Multi, and send
+ResultD and ResultMulti: Multi shows whether a second 1080p decoder now
+fits beside the first, now that the buffers aren't in gpu_mem.
+
 New in 0.3.4 (vcdec 0.4.3): decoders give their memory back. A decoder
 holds a share of the VideoCore's memory (one 1080p decoder fills
 gpu_mem=128) until it's closed, and before, a program that stopped
@@ -69,8 +83,10 @@ The clips (in clips, the same as before):
          multiple of 32, to check the cropping)
   hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
 
-Running it (please restart first, then send back ResultX and ResultMulti):
-  Exit     New: programs that stop without closing (see above). Writes
+Running it (please restart first, then send back ResultD and ResultMulti):
+  Direct   New: direct output, checked and timed (see above). Writes
+           ResultD.
+  Exit     Programs that stop without closing (see above). Writes
            ResultX.
   Multi    Several decoders open at once (see above). Writes
            ResultMulti.

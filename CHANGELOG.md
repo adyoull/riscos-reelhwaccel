@@ -1,5 +1,70 @@
 # Changes
 
+## vcdec 0.4.5: direct output (2026-10-22)
+
+SMEMProbe 0.1 worked on a Pi 4: through the VideoCore's shared memory
+service, the decoder wrote all 30 test pictures straight into ARM memory,
+none by bulk transfer, every one within rounding of FFmpeg's. At 1080p it
+ran at 96 pictures a second against vcdec's 93 with bulk transfers, so
+decoding is the limit. What changes is that 3 MB per 1080p picture no
+longer crosses VCHIQ, and the firmware no longer keeps its own copy of
+the output buffers in gpu_mem. vcdec now works that way by default.
+
+- **vcmmal (shared by vcdec and vcenc):** the SMEM service, moved here from
+  SMEMProbe: `vcm_smem_open`, `vcm_smem_import` (any memory of ours by its
+  physical address, imported by the uncached bus alias), `vcm_smem_free`
+  (no reply waited for, as Linux), `vcm_smem_close`. Replies are matched
+  by transaction, and the VideoCore's own messages are dropped.
+  `vcm_param_set` sets a port's 32-bit parameter and says whether it was
+  refused.
+- **vcdec (rule 9):**
+  - each output buffer, pool or PCI memory, is imported when it is made,
+    and its import is freed before the memory;
+  - `MMAL_PARAMETER_ZERO_COPY` is set on the output port each time the
+    component is created (also after the end of a stream and for a seek
+    after it);
+  - each buffer goes to the decoder with its handle as the data, and a
+    picture back with `is_zero_copy` needs no receive;
+  - a picture that comes without it is received by bulk transfer, as
+    before;
+  - with no service, an import refused, or the setting refused, the
+    decoder works as before (said in the log);
+  - closing frees every import, held pictures' included, then closes the
+    service.
+- **API:** `VCDEC_NO_DIRECT` turns it off. `vcdec_stats` gains `direct_on`
+  and `direct` (pictures that came that way), so rebuild against the new
+  header.
+- **VCDecTest 0.3.5:**
+  - `-D` (no direct output);
+  - a "Direct output" line in each report, and a direct count for each
+    Multi decoder;
+  - a new Obey file, Direct, which checks the three clips, holds hd's
+    pictures to the end and seeks after it, then times hd with and
+    without direct output (ResultD).
+- **SMEMProbe 0.1.1** uses vcmmal's SMEM code instead of its own copy. It
+  gives the buffers' memory, not their handles, when zero copy is
+  refused.
+- **The fake VideoCore:**
+  - an SMEM service for each decoder;
+  - zero copy reset when a component is created again;
+  - `zc_bulk_every` (some pictures by bulk all the same);
+  - `smem_chatty` (replies to FREE, and the VideoCore's own messages,
+    before an import's reply too);
+  - a check that, without zero copy, an output buffer's data is memory;
+  - each PCI block's physical address now packed below 1 GB (before,
+    blocks after the 32nd were above it).
+- **Tests:**
+  - every whole-decode case runs twice, with direct output and with bulk
+    transfers;
+  - new cases: no service, imports refused, zero copy refused, some
+    pictures by bulk, a chatty service, zero copy refused by the decoder
+    created again for a seek after the end, and direct output through a
+    format change and a seek after the end;
+  - cleaned() checks that no service or import is left;
+  - 8 mutants caught. One survives: dropping the cache clean of a buffer
+    before its import, which the fake can't see because it models no
+    dirty lines.
+
 ## SMEMProbe 0.1: zero copy through the VideoCore's shared memory (2026-10-22)
 
 Linux keeps decoded frames out of the VCHIQ link altogether. Its

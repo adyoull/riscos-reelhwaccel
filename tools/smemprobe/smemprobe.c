@@ -20,8 +20,7 @@
  *      picture checked against FFmpeg's (block means, as VCDecTest), and
  *      say whether the pictures came back zero copy (no bulk transfer);
  *   4. with -t, the 1080p clip decoded that way, timed, then the same clip
- *      through vcdec (bulk transfers, zero copy on the ARM side) for
- *      comparison.
+ *      through vcdec with bulk transfers (VCDEC_NO_DIRECT) for comparison.
  *
  *   smemprobe [-o file] [-v] small.h264 small.crc small.sig [-t hd.h264 hd.crc]
  *      -o file   also add the report to file
@@ -30,8 +29,8 @@
  *   and no B pictures (made by build.sh); the .crc files are FFmpeg's
  *   framecrc (for the size and the picture count), the .sig its block means.
  *
- * Message layouts (no code copied): Linux's vc-sm-cma (vc_sm_defs.h,
- * GPL-2.0) for the SMEM service, and the MMAL layouts in vcmmal.h.
+ * The SMEM service's protocol is vcmmal.c's (vcm_smem_...; until 0.1.1 this
+ * had its own copy), as vcdec 0.4.5 uses it; the MMAL layouts are vcmmal.h's.
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdarg.h>
@@ -42,11 +41,7 @@
 #include "vcmmal.h"
 #include "vcdec.h"
 
-#define VERSION "0.1"
-#define SMEM_SERVICE FOURCC_BE('S', 'M', 'E', 'M')
-enum { SM_FREE = 4, SM_IMPORT = 8, SM_CLIENT_VERSION = 9 };
-#define SM_NON_CACHED 1
-#define P_ZERO_COPY 4u                     /* MMAL_PARAMETER_ZERO_COPY (common group) */
+#define VERSION "0.1.1"
 #define IN_BUFS 20
 #define IN_SIZE (64 * 1024)
 #define NOUT 4
@@ -192,98 +187,6 @@ static void grid(const uint8_t *p, int pitch, int w, int h, int n, float *out)
         }
 }
 
-/* ---- the SMEM service (vc-sm-cma's protocol) ---- */
-
-typedef struct {
-    vcm *m;
-    uint32_t handle;
-    int open;
-    uint32_t trans;
-    uint32_t msg[64];
-} smem;
-
-static int sm_send(smem *s, uint32_t type, const void *body, uint32_t len)
-{
-    uint32_t b[2 + 16];
-    _kernel_oserror *e;
-    b[0] = type;
-    b[1] = ++s->trans & 0x7FFFFFFFu;
-    memcpy(&b[2], body, len);
-    vcm_swi4(VCHIQ_ServiceUse, s->handle, 0, 0, 0, NULL, NULL);
-    e = vcm_swi4(VCHIQ_MsgQueue, s->handle, (uint32_t)(uintptr_t)b, 8 + len, 0, NULL, NULL);
-    vcm_swi4(VCHIQ_ServiceRelease, s->handle, 0, 0, 0, NULL, NULL);
-    if (e) { say("SMEM: VCHIQ_MsgQueue: %s\n", e->errmess); return -1; }
-    if (verbose) say("  SMEM tx: type %u, transaction %u, %u bytes\n", (unsigned)type, (unsigned)b[1], (unsigned)len);
-    return 0;
-}
-
-/* the reply to transaction t (its length), or -1 if none in WAIT_CS;
-   other messages (the VideoCore's own) are said and dropped */
-static int sm_reply(smem *s, uint32_t t, int wait_cs)
-{
-    uint32_t t0 = vcm_now_cs(), got;
-    while (vcm_now_cs() - t0 < (uint32_t)wait_cs) {
-        got = 0;
-        if (vcm_swi4(VCHIQ_MsgDequeue, s->handle, (uint32_t)(uintptr_t)s->msg, sizeof s->msg, 0, NULL, &got) || !got)
-            continue;
-        if (verbose) say("  SMEM rx: %u bytes, words %08X %08X %08X\n", (unsigned)got, (unsigned)s->msg[0],
-                         (unsigned)s->msg[1], (unsigned)s->msg[2]);
-        if (s->msg[0] == t) return (int)got;
-        say("SMEM: a message that isn't the reply (word 0 &%08X, %u bytes)\n", (unsigned)s->msg[0], (unsigned)got);
-    }
-    return -1;
-}
-
-static int sm_open(smem *s, vcm *m)
-{
-    uint32_t setup[11];
-    _kernel_oserror *e;
-    memset(s, 0, sizeof *s);
-    s->m = m;
-    memset(setup, 0, sizeof setup);
-    setup[0] = 1; setup[1] = 0; setup[2] = SMEM_SERVICE;   /* (vc-sm-cma's version 1, at least 0) */
-    setup[6] = m->stub; setup[7] = m->stub + 64;
-    if ((e = vcm_swi4(VCHIQ_ServiceOpen, m->instance, (uint32_t)(uintptr_t)setup, 0, 0, &s->handle, NULL)) != NULL) {
-        say("VCHIQ_ServiceOpen \"SMEM\": %s (error &%X)\n", e->errmess, (unsigned)e->errnum);
-        return -1;
-    }
-    vcm_swi4(VCHIQ_ServiceRelease, s->handle, 0, 0, 0, NULL, NULL);   /* (opening leaves it in use) */
-    s->open = 1;
-    return 0;
-}
-
-static void sm_close(smem *s)
-{
-    _kernel_oserror *e;
-    if (!s->open) return;
-    if ((e = vcm_swi4(VCHIQ_ServiceClose, s->handle, 0, 0, 0, NULL, NULL)) != NULL)
-        say("SMEM: VCHIQ_ServiceClose: %s\n", e->errmess);
-    s->open = 0;
-}
-
-/* the pages at bus address bus, size bytes, made a VideoCore handle: it, or 0 */
-static uint32_t sm_import(smem *s, uint32_t bus, uint32_t size, uint32_t id, const char *name)
-{
-    uint32_t b[5 + 8];
-    int n;
-    memset(b, 0, sizeof b);
-    b[0] = SM_NON_CACHED; b[1] = bus; b[2] = size; b[3] = id; b[4] = 0x524F4D53u;   /* (allocator: any number) */
-    snprintf((char *)&b[5], 32, "%s", name);
-    if (sm_send(s, SM_IMPORT, b, sizeof b)) return 0;
-    if ((n = sm_reply(s, s->trans & 0x7FFFFFFFu, 300)) < 0) { say("SMEM import: no reply in 3 s\n"); return 0; }
-    if (n < 8) { say("SMEM import: a %d byte reply\n", n); return 0; }
-    return s->msg[1];
-}
-
-static void sm_free(smem *s, uint32_t h)
-{
-    uint32_t b[2] = { h, 0 };
-    int n;
-    if (sm_send(s, SM_FREE, b, sizeof b)) return;
-    n = sm_reply(s, s->trans & 0x7FFFFFFFu, 50);   /* (Linux doesn't wait for one: said if it comes) */
-    if (verbose) say("  SMEM free of &%08X: %s\n", (unsigned)h, n < 0 ? "no reply (as Linux expects)" : "a reply");
-}
-
 /* ---- memory ---- */
 
 typedef struct { uint8_t *p; uint32_t area, size, phys, vch; } buf_t;
@@ -375,15 +278,6 @@ static void on_msg(void *owner, uint32_t got)
     (void)got;
 }
 
-static int param_set(vcm *m, const port_info_t *pi, uint32_t id, uint32_t v, const char *what)
-{
-    uint32_t req[5] = { m->comp, pi->port_handle, id, 12, v };
-    int n = vcm_transact(m, T_PORT_PARAMETER_SET, req, sizeof req, what);
-    if (n < 4) return -1;
-    if (vcm_reply(m)[0]) { say("%s: %s\n", what, vcm_status(vcm_reply(m)[0])); return -1; }
-    return 0;
-}
-
 static int give_outputs(dec_t *d)
 {
     for (int i = 0; i < NOUT; i++)
@@ -391,8 +285,9 @@ static int give_outputs(dec_t *d)
             int ready = 0;
             for (int j = 0; j < d->nready; j++) ready |= d->ready[j] == i;
             if (ready) continue;
-            /* zero copy: the data field is the VideoCore's handle for the buffer (as Linux) */
-            if (vcm_buffer_to_vc(d->m, &d->out, "output", i, (const void *)(uintptr_t)d->outb[i].vch,
+            /* zero copy: the data field is the VideoCore's handle for the buffer (as Linux); refused, the memory */
+            if (vcm_buffer_to_vc(d->m, &d->out, "output", i,
+                                 d->zc_param_ok ? (const void *)(uintptr_t)d->outb[i].vch : (const void *)d->outb[i].p,
                                  d->outb[i].size, 0, 0, TIME_UNKNOWN, TIME_UNKNOWN))
                 return -1;
             d->out_vc[i] = 1;
@@ -400,7 +295,7 @@ static int give_outputs(dec_t *d)
     return 0;
 }
 
-static int dec_open(dec_t *d, vcm *m, smem *s, int w, int h)
+static int dec_open(dec_t *d, vcm *m, int w, int h)
 {
     uint32_t size = ((uint32_t)w + 31) / 32 * 32 * (((uint32_t)h + 15) / 16 * 16) * 3 / 2;
     memset(d, 0, sizeof *d);
@@ -411,8 +306,8 @@ static int dec_open(dec_t *d, vcm *m, smem *s, int w, int h)
         if (!(d->inb[i] = vcm_pci_alloc(m, IN_SIZE))) { say("No PCI memory\n"); return -1; }
     for (int i = 0; i < NOUT; i++) {
         if (pool(m, &d->outb[i], size)) return -1;
-        if (!(d->outb[i].vch = sm_import(s, d->outb[i].phys | 0xC0000000u, d->outb[i].size, (uint32_t)i + 1, "smemprobe"))) {
-            say("SMEM import of output buffer %d refused\n", i);
+        if (!(d->outb[i].vch = vcm_smem_import(m, d->outb[i].p, d->outb[i].size, "smemprobe"))) {
+            say("SMEM import of output buffer %d: %s\n", i, m->why);
             return -1;
         }
     }
@@ -428,7 +323,12 @@ static int dec_open(dec_t *d, vcm *m, smem *s, int w, int h)
     d->out.video.crop[0] = d->out.video.crop[1] = 0; d->out.video.crop[2] = w; d->out.video.crop[3] = h;
     d->out.port.buffer_num = NOUT; d->out.port.buffer_size = d->outb[0].size;
     if (vcm_port_set(m, PORT_OUTPUT, &d->out, "Output format")) return -1;
-    d->zc_param_ok = !param_set(m, &d->out, P_ZERO_COPY, 1, "Zero copy on the output");
+    {
+        int r = vcm_param_set(m, &d->out, P_ZERO_COPY, 1, "Zero copy on the output");
+        if (r < 0) return -1;
+        if (r) say("%s\n", m->why);
+        d->zc_param_ok = !r;
+    }
     say("  MMAL_PARAMETER_ZERO_COPY on the output port: %s\n", d->zc_param_ok ? "accepted" : "refused");
     if (vcm_simple(m, T_COMPONENT_ENABLE, "Enable")) return -1;
     m->enabled = 1;
@@ -439,13 +339,13 @@ static int dec_open(dec_t *d, vcm *m, smem *s, int w, int h)
     return 0;
 }
 
-static void dec_close(dec_t *d, smem *s)
+static void dec_close(dec_t *d)
 {
     vcm *m = d->m;
     vcm_destroy(m, &d->in, &d->in_on, &d->out, &d->out_on, 1);
     m->failed = 0;
     for (int i = 0; i < NOUT; i++) {
-        if (d->outb[i].vch) sm_free(s, d->outb[i].vch);
+        vcm_smem_free(m, d->outb[i].vch);
         pool_free(m, &d->outb[i]);
     }
     for (int i = 0; i < IN_BUFS; i++) vcm_pci_free(m, d->inb[i]);
@@ -507,7 +407,7 @@ static int send_eos(dec_t *d)
 
 /* the whole clip through the zero-copy decoder: pictures taken; checked
    against crc/sig if given (wrong and close counted) */
-static int decode_zc(vcm *m, smem *s, const au_t *aus, int n, int w, int h, const uint32_t *crc, int ncrc,
+static int decode_zc(vcm *m, const au_t *aus, int n, int w, int h, const uint32_t *crc, int ncrc,
                      int *wrong, int *close_n, uint32_t *cs, int *zc, int *bulk)
 {
     dec_t d;
@@ -517,7 +417,7 @@ static int decode_zc(vcm *m, smem *s, const au_t *aus, int n, int w, int h, cons
     uint8_t *frame = malloc((size_t)(w * h + 2 * cw * ch));
     *wrong = *close_n = 0;
     if (!frame) return -1;
-    if (dec_open(&d, m, s, w, h)) { say("  The decoder: %s\n", m->err[0] ? m->err : "(see above)"); dec_close(&d, s); free(frame); return -1; }
+    if (dec_open(&d, m, w, h)) { say("  The decoder: %s\n", m->err[0] ? m->err : "(see above)"); dec_close(&d); free(frame); return -1; }
     t0 = last = vcm_now_cs();
     while (!d.eos_back || d.nready) {
         if (poll_dec(&d)) break;
@@ -569,12 +469,12 @@ static int decode_zc(vcm *m, smem *s, const au_t *aus, int n, int w, int h, cons
     if (m->failed) say("  The decoder: %s\n", m->err);
     *zc = d.zc_back;
     *bulk = d.bulk_back;
-    dec_close(&d, s);
+    dec_close(&d);
     free(frame);
     return pics;
 }
 
-/* the same clip through vcdec (bulk transfers): pictures, time */
+/* the same clip through vcdec with bulk transfers: pictures, time */
 static int decode_vcdec(const au_t *aus, int n, int w, int h, uint32_t *cs)
 {
     vcdec_config c;
@@ -582,7 +482,7 @@ static int decode_vcdec(const au_t *aus, int n, int w, int h, uint32_t *cs)
     int cur = 0, pics = 0, r;
     uint32_t t0, last;
     vcdec_config_init(&c);
-    c.width = w; c.height = h; c.out_buffers = 6;
+    c.width = w; c.height = h; c.out_buffers = 6; c.flags = VCDEC_NO_DIRECT;
     if (vcdec_open(&d, &c) != VCDEC_OK) { say("  vcdec_open: %s\n", vcdec_open_error()); return -1; }
     t0 = last = vcm_now_cs();
     for (;;) {
@@ -618,9 +518,7 @@ int probe_main(int argc, char **argv)
     int nn = 0, ok_open = 0, ok_import = 0, ok_zc = 0, ok_speed = -1;
     uint32_t len;
     vcm m;
-    smem s;
     memset(&m, 0, sizeof m);
-    memset(&s, 0, sizeof s);
     out2 = NULL; verbose = 0; nsig = 0; free(sig); sig = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) out2 = fopen(argv[++i], "a");
@@ -646,19 +544,20 @@ int probe_main(int argc, char **argv)
 
     /* 1 */
     say("1. The \"SMEM\" service\n");
-    if (sm_open(&s, &m)) goto done;
+    if (vcm_smem_open(&m)) { say("%s\n", m.why); goto done; }
     ok_open = 1;
-    say("  Opened (handle &%X)\n\n", (unsigned)s.handle);
+    say("  Opened (handle &%X)\n\n", (unsigned)m.smem_handle);
 
     /* 2 */
     say("2. A pool's pages imported\n");
     {
         buf_t b;
         if (pool(&m, &b, 65536) == 0) {
-            uint32_t h = sm_import(&s, b.phys | 0xC0000000u, b.size, 99, "smemprobe test");
-            say("  64 KB at physical &%08X (bus &%08X): %s", (unsigned)b.phys, (unsigned)(b.phys | 0xC0000000u),
-                h ? "a VideoCore handle, " : "refused\n");
-            if (h) { say("&%08X\n", (unsigned)h); ok_import = 1; sm_free(&s, h); say("  Freed\n"); }
+            uint32_t h = vcm_smem_import(&m, b.p, b.size, "smemprobe test");
+            say("  64 KB at physical &%08X (bus &%08X): ", (unsigned)b.phys, (unsigned)(b.phys | 0xC0000000u));
+            if (h) say("a VideoCore handle, &%08X\n", (unsigned)h);
+            else say("refused (%s)\n", m.why);
+            if (h) { ok_import = 1; vcm_smem_free(&m, h); say("  Freed\n"); }
             pool_free(&m, &b);
         }
         say("\n");
@@ -674,7 +573,7 @@ int probe_main(int argc, char **argv)
             (ncrc = read_crc(names[1], &w, &h, &crc)) < 0 || read_sig(names[2]))
             goto done;
         say("  %d access units, %dx%d; %d of FFmpeg's pictures\n", small_n, w, h, ncrc);
-        pics = decode_zc(&m, &s, small_aus, small_n, w, h, crc, ncrc, &wrong, &close_n, &cs, &zc, &bulk);
+        pics = decode_zc(&m, small_aus, small_n, w, h, crc, ncrc, &wrong, &close_n, &cs, &zc, &bulk);
         if (pics >= 0) {
             say("  %d pictures: %d came back zero copy, %d by bulk transfer; %d exact, %d within rounding, %d wrong\n",
                 pics, zc, bulk, pics - wrong - close_n, close_n, wrong);
@@ -692,7 +591,7 @@ int probe_main(int argc, char **argv)
         if (!(hd_data = read_file(hd_name, &len)) || (hd_n = split(hd_data, len, &hd_aus)) <= 0 ||
             read_crc(hd_crc, &w, &h, &crc) < 0)
             goto done;
-        n1 = decode_zc(&m, &s, hd_aus, hd_n, w, h, NULL, 0, &wrong, &close_n, &cs1, &zc, &bulk);
+        n1 = decode_zc(&m, hd_aus, hd_n, w, h, NULL, 0, &wrong, &close_n, &cs1, &zc, &bulk);
         if (n1 >= 0) rate("  Zero copy", n1, cs1);
         n2 = decode_vcdec(hd_aus, hd_n, w, h, &cs2);
         if (n2 >= 0) rate("  vcdec", n2, cs2);
@@ -702,7 +601,7 @@ int probe_main(int argc, char **argv)
     }
 
 done:
-    sm_close(&s);
+    vcm_smem_close(&m);
     vcm_service_close(&m, "the callback is left in the RMA");
     vcm_disconnect(&m);
     vcm_free_stub(&m);

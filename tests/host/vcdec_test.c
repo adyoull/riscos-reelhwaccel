@@ -333,11 +333,82 @@ static void hold_tests(void)
     close70(d, "hold release");
 }
 
-static void whole(unsigned flags, int late, int skew, int extra, const char *what)
+/* (0.4.5) direct output given up, and pictures that come by bulk all the same */
+static void direct_case(const char *what, int *knob, int value, int want_direct, const char *want_log)
+{
+    vcdec *d;
+    vcdec_stats s;
+    int r;
+    reset_fake();                            /* (as open70, with the knob set before the open) */
+    mp4_mode = 1;
+    if (knob) *knob = value;
+    {
+        vcdec_config c;
+        vcdec_config_init(&c);
+        c.width = W; c.height = H; c.log = cap_log;
+        logbuf[0] = 0;
+        r = vcdec_open(&d, &c);
+        CHECK(r == VCDEC_OK, "%s: open %d %s", what, r, vcdec_open_error());
+    }
+    setup_planes(0, 0);
+    ngot = wrong_pics = 0;
+    r = feed(d, 0, 12, 1);
+    vcdec_get_stats(d, &s);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.pictures == 12, "%s: %d, %d pictures (%d wrong)", what, r, ngot,
+          wrong_pics);
+    CHECK(want_direct || !smem_live(), "%s: %d imports kept without direct output", what, smem_live());
+    CHECK((int)s.direct == want_direct && (s.direct_on != 0) == (want_direct > 0) && bulks_rx == (want_direct ? 12 - want_direct : 13) &&
+          (!want_log || strstr(logbuf, want_log)),
+          "%s: %u direct (on %u), %d receives; log:\n%s", what, s.direct, s.direct_on, bulks_rx, logbuf);
+    close70(d, what);
+    if (knob) *knob = 0;
+}
+
+static void direct_tests(void)
+{
+    direct_case("direct output", NULL, 0, 12, "Direct output: the decoder writes its pictures straight into vcdec's buffers");
+    direct_case("no SMEM service", &smem_present, 0, 0, "No direct output (VCHIQ_ServiceOpen \"SMEM\": fake error)");
+    smem_present = 1;
+    direct_case("imports refused", &smem_refuse_import, 1, 0, "No direct output (SMEM: the import of 6912 bytes at &");
+    direct_case("zero copy refused", &zc_refuse, 1, 0, "No direct output (Zero copy on the output: ");
+    /* every 3rd picture comes by bulk (and the EOS, empty, direct): received as before */
+    direct_case("some by bulk", &zc_bulk_every, 3, 8, NULL);
+    /* the service answers each FREE, and sends a message of its own: dropped */
+    big_efch_at = 3;                         /* (bigger buffers part way: three freed, three imported) */
+    direct_case("SMEM chatty", &smem_chatty, 1, 12, NULL);
+    CHECK(smem_imports > 3 && smem_frees == smem_imports, "SMEM chatty: %d imports, %d frees", smem_imports, smem_frees);
+    big_efch_at = 0;
+
+    /* the decoder created again (a seek after the end) refuses zero copy: bulk from then on */
+    {
+        vcdec *d = open70(0);
+        int r;
+        vcdec_stats s;
+        setup_planes(0, 0);
+        ngot = wrong_pics = 0;
+        r = feed(d, 0, 12, 1);
+        zc_refuse = 1;
+        CHECK(r == VCDEC_EOF && vcdec_flush(d) == VCDEC_OK && recreated == 1, "refused when created again: first pass %d", r);
+        ngot = wrong_pics = 0;
+        r = feed(d, 6, 12, 1);
+        vcdec_get_stats(d, &s);
+        CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics && s.direct == 12 && !s.direct_on && bulks_rx == 7 &&
+              strstr(logbuf, "No direct output (Zero copy on the output: "),
+              "refused when created again: %d, %d pictures (%d wrong), %u direct (on %u), %d receives; log:\n%s", r, ngot,
+              wrong_pics, s.direct, s.direct_on, bulks_rx, logbuf);
+        close70(d, "refused when created again");
+        zc_refuse = 0;
+    }
+}
+
+/* a whole decode with these flags: direct output (0.4.5, the default:
+   no bulk receives, the decoder writes into our memory), then the same
+   with VCDEC_NO_DIRECT (every picture by bulk transfer, as before) */
+static void whole1(unsigned flags, int late, int skew, int extra, const char *what)
 {
     vcdec *d = open70(flags);
     vcdec_stats s;
-    int r;
+    int r, direct = !(flags & VCDEC_NO_DIRECT);
     rx_late = late;
     setup_planes(skew, extra);
     ngot = wrong_pics = 0;
@@ -345,11 +416,21 @@ static void whole(unsigned flags, int late, int skew, int extra, const char *wha
     vcdec_get_stats(d, &s);
     CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.pictures == 12 && s.sent == 12,
           "%s: %d, %d pictures (%d wrong), stats %u/%u", what, r, ngot, wrong_pics, s.pictures, s.sent);
-    CHECK(aus == 12 && au_pieces_max == 2 && bulks_rx == 13, "%s: %d access units, %d pieces, %d receives", what, aus,
-          au_pieces_max, bulks_rx);
+    CHECK(aus == 12 && au_pieces_max == 2 && bulks_rx == (direct ? 0 : 13), "%s: %d access units, %d pieces, %d receives",
+          what, aus, au_pieces_max, bulks_rx);
+    CHECK(s.direct == (direct ? 12u : 0u) && smem_imports == (direct ? s.pool_buffers + s.pci_buffers : 0u),
+          "%s: %u pictures direct, %d imports", what, s.direct, smem_imports);
     CHECK(vcdec_receive(d, NULL, planes, strides) == VCDEC_EOF, "%s: EOF again", what);
     close70(d, what);
     rx_late = 0;
+}
+
+static void whole(unsigned flags, int late, int skew, int extra, const char *what)
+{
+    char w2[100];
+    whole1(flags, late, skew, extra, what);
+    snprintf(w2, sizeof w2, "%s, bulk transfers", what);
+    whole1(flags | VCDEC_NO_DIRECT, late, skew, extra, w2);
 }
 
 int probe_main(int argc, char **argv);        /* tools/vcdectest */
@@ -663,6 +744,7 @@ int main(int argc, char **argv)
 
     /* ---- a whole decode ---- */
     whole(0, 0, 0, 0, "whole");
+    direct_tests();
     whole(0, 1, 0, 0, "whole, receives late");
     whole(VCDEC_SYNC_RECEIVE, 1, 0, 0, "whole, receives waited for");
     whole(0, 1, 1, 3, "whole, unaligned planes");
@@ -811,6 +893,10 @@ int main(int argc, char **argv)
         ngot = wrong_pics = 0;
         r = feed(d, 6, 12, 1);
         CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics, "seek after the end (pool %d): %d, %d", pool, r, ngot);
+        vcdec_get_stats(d, &s);              /* (0.4.5: direct output through the bigger buffers and the new decoder) */
+        CHECK(s.direct == 18 && s.direct_on && smem_imports == 6 && smem_frees == 3 && !bulks_rx,
+              "direct output after a format change and a seek after the end (pool %d): %u, %d imports, %d frees, %d receives",
+              pool, s.direct, smem_imports, smem_frees, bulks_rx);
         close70(d, "pool format change");
         big_efch_at = 0;
     }
@@ -1069,8 +1155,8 @@ int main(int argc, char **argv)
     close70(d, "error event");
     error_event = 0;
 
-    d = open70(0);
-    rx_abort = 3;                             /* a receive aborted: an error, not a picture */
+    d = open70(VCDEC_NO_DIRECT);
+    rx_abort = 3;                             /* a receive aborted: an error, not a picture (bulk transfers) */
     setup_planes(0, 0);
     ngot = wrong_pics = 0;
     r = feed(d, 0, 12, 1);
@@ -1154,12 +1240,12 @@ int main(int argc, char **argv)
     close70(d, "late EFCH");
     efch_late = 0;
 
-    long_event = 1;                           /* an event's data by bulk */
+    long_event = 1;                           /* an event's data by bulk (the only receive: direct output) */
     d = open70(0);
     setup_planes(0, 0);
     ngot = 0;
     r = feed(d, 0, 12, 1);
-    CHECK(r == VCDEC_EOF && got_is(0, 12) && long_event == 2 && bulks_rx == 14, "long event: %d, %d, %d receives", r, ngot, bulks_rx);
+    CHECK(r == VCDEC_EOF && got_is(0, 12) && long_event == 2 && bulks_rx == 1, "long event: %d, %d, %d receives", r, ngot, bulks_rx);
     close70(d, "long event");
     long_event = 0;
 

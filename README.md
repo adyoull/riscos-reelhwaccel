@@ -78,7 +78,10 @@ drive the hardware from RISC OS, and check it:
 - **SMEMProbe** (`tools/smemprobe`): can the VideoCore write pictures
   straight into RISC OS memory, as Linux's zero copy does? It opens the
   firmware's shared-memory service, imports memory into it, decodes a clip
-  that way (every picture checked) and times it against vcdec.
+  that way (every picture checked) and times it against vcdec. It can
+  (Pi 4, 2026-10-22), and vcdec 0.4.5 decodes that way by default
+  ("direct output": no bulk transfers, no copy of the buffers in gpu_mem;
+  `VCDEC_NO_DIRECT` turns it off).
 - **VCEncTest** (`tools/vcenctest`): vcenc as a program drives it: test
   pictures encoded, the stream checked and decoded again by vcdec
   (PSNR), each setting in turn, speed.
@@ -98,6 +101,8 @@ it took:
   buffers only after the decoder's format change, every receive queued
   as its message arrives, and `gpu_mem=128` for 1080p. Pictures arrive
   in a cacheable Physical Memory Pool and are handed out without a copy.
+  Since vcdec 0.4.5 the decoder writes them there itself, through the
+  firmware's shared-memory service (SMEM) and MMAL's zero copy.
 - **HEVC:** the block's scaling-factor RAM persists and is used even
   when the stream has no scaling lists, so the factors are always
   loaded. The block's two phases overlap, decoding while the program

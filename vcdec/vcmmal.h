@@ -151,6 +151,10 @@ typedef struct vcm {
     int pmp_svc;                           /* a pool not readable in USR mode (OS_Memory 24) */
     int pool_stuck;                        /* a pool couldn't be removed: the RMA block (its handler) is kept */
     unsigned app_page_moves;               /* claims that moved the program's page at &8000 (contig.h) */
+    /* (0.4.5) the VideoCore's shared memory service (vcm_smem_...) */
+    uint32_t smem_handle, smem_trans, smem_ids;
+    int smem_open;
+    uint32_t smem_msg[16];
 } vcm;
 
 /* SWIs (the host tests' fake under VCDEC_HOST) */
@@ -209,5 +213,21 @@ int vcm_port_set(vcm *m, uint32_t type, port_info_t *pi, const char *what);
 int vcm_port_action(vcm *m, const port_info_t *pi, uint32_t action, const char *what);
 int vcm_simple(vcm *m, uint32_t type, const char *what);
 void vcm_destroy(vcm *m, const port_info_t *in, int *in_on, const port_info_t *out, int *out_on, int closing);
+#define P_ZERO_COPY 4u                     /* MMAL_PARAMETER_ZERO_COPY (the common group) */
+/* a port's 32-bit parameter set: 0; the VideoCore's MMAL status if it
+   refused (said in m->why; not a failure); -1 failed */
+int vcm_param_set(vcm *m, const port_info_t *pi, uint32_t id, uint32_t value, const char *what);
+
+/* (0.4.5) The VideoCore's shared memory service ("SMEM", as Linux's
+   vc-sm-cma): memory of ours (physically contiguous, below 1 GB: a pool or
+   PCI memory) imported, a VideoCore handle back. An MMAL port with
+   P_ZERO_COPY set takes that handle in a buffer's data field, and the
+   VideoCore reads or writes the memory itself: no bulk transfer.
+   Pi-checked by SMEMProbe 0.1. Open after vcm_connect; none of these
+   fail the connection (m->why says why). */
+int vcm_smem_open(vcm *m);                 /* 0, or -1 */
+uint32_t vcm_smem_import(vcm *m, const void *p, uint32_t size, const char *name);   /* the handle, or 0 */
+void vcm_smem_free(vcm *m, uint32_t handle);   /* (no reply waited for, as Linux) */
+void vcm_smem_close(vcm *m);
 
 #endif

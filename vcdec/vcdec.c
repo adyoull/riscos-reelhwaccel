@@ -24,7 +24,15 @@
  *      isn't enough (the next EOS loses the reorder-delay pictures), so the
  *      component is destroyed and created again;
  *   7. gpu_mem must be 128 or more for 1080p;
- *   8. pictures are copied out of PCI memory by LDM/STM (vcdec_copy.S).
+ *   8. pictures are copied out of PCI memory by LDM/STM (vcdec_copy.S);
+ *   9. (0.4.5) direct output: the output buffers imported through the
+ *      VideoCore's shared memory service and MMAL_PARAMETER_ZERO_COPY set
+ *      on the output port, the decoder writes each picture straight into
+ *      ours (each buffer's data field is its VideoCore handle) and says so
+ *      (is_zero_copy): no bulk transfer, and no copy of it in gpu_mem
+ *      (SMEMProbe 0.1). A picture that comes without it is received as
+ *      before; without the service, an import or the parameter, the
+ *      pictures come by bulk transfer as before.
  *
  * The MMAL connection itself (messages, bulk transfers, the component and
  * its ports, memory the VideoCore reaches) is vcmmal.c's, shared with
@@ -101,6 +109,10 @@ struct vcdec {
     int nuser;                             /* buffers the caller holds */
     int closing;                           /* vcdec_close done but for the buffers still held */
     int parked;                            /* (0.4.3) at the end: the decoder destroyed, its memory given back */
+    /* (0.4.5) direct output (rule 9) */
+    uint32_t out_vch[MAX_OUT];             /* each buffer's VideoCore handle (imported), or 0 */
+    int direct;                            /* wanted, and nothing has refused it yet */
+    int direct_port;                       /* MMAL_PARAMETER_ZERO_COPY set on this component's output */
 };
 
 static char open_err[200];
@@ -128,10 +140,21 @@ static int einval(vcdec *d, const char *what)
 
 unsigned vcdec_gpu_mem(void) { return vcm_gpu_mem(); }
 
+/* (0.4.5) direct output given up: every buffer's import freed, pictures by
+   bulk transfer from here on (only before the output port has it set) */
+static void direct_off(vcdec *d, const char *why)
+{
+    vcm_logf(&d->m, "No direct output (%s): the pictures come by bulk transfer", why);
+    for (int i = 0; i < d->nout; i++) { vcm_smem_free(&d->m, d->out_vch[i]); d->out_vch[i] = 0; }
+    d->direct = 0;
+}
+
 /* output buffer i made `size` bytes (any old one freed): 0, or -1 failed */
 static void out_free(vcdec *d, int i)
 {
     if (!d->out_buf[i]) return;
+    vcm_smem_free(&d->m, d->out_vch[i]);   /* (the VideoCore's handle before the memory) */
+    d->out_vch[i] = 0;
     if (d->out_pool[i]) vcm_pmp_free(&d->m, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
     else vcm_pci_free(&d->m, d->out_buf[i]);
     d->out_buf[i] = NULL;
@@ -160,6 +183,14 @@ static int out_alloc(vcdec *d, int i, uint32_t size)
         return -1;
     }
     d->out_cap[i] = size;
+    if (d->direct) {                       /* (0.4.5) imported, for the decoder to write into */
+        if (d->out_pool[i]) vcm_cache_cci(&d->m, d->out_buf[i], size);   /* (no dirty lines to land on its pictures) */
+        if (!(d->out_vch[i] = vcm_smem_import(&d->m, d->out_buf[i], size, d->m.pool_name))) {
+            if (d->direct_port)            /* (the port expects handles now) */
+                return vcm_fail(&d->m, VCDEC_ERROR, "No direct output for a new buffer (%s)", d->m.why);
+            direct_off(d, d->m.why);
+        }
+    }
     return 0;
 }
 
@@ -226,10 +257,11 @@ static void handle_msg(vcdec *d, uint32_t got)
                 vcm_fail(&d->m, VCDEC_ERROR, "A %u byte picture for a %u byte buffer", (unsigned)b->length, (unsigned)d->out_cap[k]);
                 return;
             }
-            /* the picture's bytes, or an empty EOS's 8 (as Linux's driver, to keep order) */
-            {
+            if (b->is_zero_copy) {         /* (0.4.5) written straight into ours: nothing to receive */
+                if (b->length) d->stats.direct++;
+            } else {                       /* the picture's bytes, or an empty EOS's 8 (as Linux's */
                 uint32_t t0 = vcm_now_cs();
-                int bad = vcm_queue_receive(&d->m, d->out_buf[k], b->length ? b->length : 8, &p->seq);
+                int bad = vcm_queue_receive(&d->m, d->out_buf[k], b->length ? b->length : 8, &p->seq);   /* driver) */
                 d->stats.cs_queue += vcm_now_cs() - t0;
                 if (bad) return;
             }
@@ -289,7 +321,9 @@ static int give_outputs(vcdec *d)
             if (d->out_cap[i] < d->out_need && out_alloc(d, i, d->out_need))   /* (a picture was in it */
                 return d->m.failed;                                              /* when the size grew) */
             uint32_t t0 = vcm_now_cs();
-            if (buffer_to_vc(d, &d->out_info, i, d->out_buf[i], d->out_cap[i], 0, 0, TIME_UNKNOWN, TIME_UNKNOWN))
+            /* (direct output: the buffer's VideoCore handle, as Linux's driver) */
+            if (buffer_to_vc(d, &d->out_info, i, d->direct_port ? (uint8_t *)(uintptr_t)d->out_vch[i] : d->out_buf[i],
+                             d->out_cap[i], 0, 0, TIME_UNKNOWN, TIME_UNKNOWN))
                 return -1;
             d->stats.cs_give += vcm_now_cs() - t0;
             d->out_state[i] = OB_VC;
@@ -374,7 +408,14 @@ static int create_component(vcdec *d)
     d->out_info.video.crop[3] = d->cfg.height;
     d->out_info.port.buffer_num = d->nout;
     d->out_info.port.buffer_size = d->out_info.video.width * d->out_info.video.height * 3 / 2;
+    d->direct_port = 0;
     if (configure_output(d)) return -1;
+    if (d->direct) {                       /* (0.4.5) rule 9 */
+        int r = vcm_param_set(&d->m, &d->out_info, P_ZERO_COPY, 1, "Zero copy on the output");
+        if (r < 0) return -1;
+        if (r) direct_off(d, d->m.why);
+        else d->direct_port = 1;
+    }
     if (vcm_simple(&d->m, T_COMPONENT_ENABLE, "Enable")) return -1;
     d->m.enabled = 1;
     if (vcm_port_action(&d->m, &d->in_info, ACTION_ENABLE, "Input enable")) return -1;
@@ -411,6 +452,7 @@ void vcdec_get_stats(const vcdec *d, vcdec_stats *s)
     s->app_page_moves = d->m.app_page_moves;
     s->held_now = (unsigned)d->nuser;
     s->pool_buffers = s->pci_buffers = 0;
+    s->direct_on = d->direct_port;
     for (int i = 0; i < d->nout; i++)
         if (d->out_buf[i]) {
             if (d->out_pool[i]) s->pool_buffers++;
@@ -476,7 +518,12 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
         if (pool_fallback(d)) goto bad;
     }
     if (vcm_connect(&d->m)) goto bad;
+    if (!(c->flags & VCDEC_NO_DIRECT)) {   /* (0.4.5) rule 9 */
+        d->direct = 1;
+        if (vcm_smem_open(&d->m)) direct_off(d, d->m.why);
+    }
     if (create_component(d)) goto bad;
+    if (d->direct_port) vcm_logf(&d->m, "Direct output: the decoder writes its pictures straight into vcdec's buffers");
     *out = d;
     return VCDEC_OK;
 bad:
@@ -490,6 +537,8 @@ void vcdec_close(vcdec *d)
 {
     if (!d) return;
     destroy_component(d, 1);
+    for (int i = 0; i < d->nout; i++) { vcm_smem_free(&d->m, d->out_vch[i]); d->out_vch[i] = 0; }   /* (held ones too: */
+    vcm_smem_close(&d->m);                 /* the decoder is gone) */
     vcm_service_close(&d->m, "the callback is left in the RMA");
     vcm_disconnect(&d->m);
     for (int i = 0; i < IN_BUFS; i++) vcm_pci_free(&d->m, d->in_buf[i]);
