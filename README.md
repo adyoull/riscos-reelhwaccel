@@ -117,7 +117,7 @@ it took:
 
     ./build.sh                 # every Pi test zip and the devkit, into dist/
     ci/build.sh                # ./build.sh, then riscos-crossdev's checks (as GitHub runs it)
-    vcdec/build.sh OUTDIR      # libvcdec.a (vcdec and vcenc), vcdec.h and vcenc.h, for RISC OS
+    vcdec/build.sh OUTDIR      # libvcdec.a (vcdec, vcenc and the MMAL connection they share), vcdec.h and vcenc.h
     hevcdec/build.sh OUTDIR    # libhevcdec.a and hwhevcdec.h, for RISC OS
     tools/hevctrace/build.sh .../ffmpeg-5.1.10.tar.xz   # the host ffmpeg that writes traces (HEVC_TRACE=file)
     devkit/build.sh            # dist/riscos-reelhwaccel-devkit-V.tgz (V=0.2.15)

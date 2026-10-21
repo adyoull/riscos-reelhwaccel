@@ -26,9 +26,9 @@
  *   7. gpu_mem must be 128 or more for 1080p;
  *   8. pictures are copied out of PCI memory by LDM/STM (vcdec_copy.S).
  *
- * Message layouts (no code copied): Raspberry Pi userland's MMAL client,
- * interface/mmal/vc/mmal_vc_msgs.h and mmal_buffer.h (Broadcom,
- * BSD-3-Clause), and Linux's vchiq-mmal, mmal-msg*.h (GPL-2.0).
+ * The MMAL connection itself (messages, bulk transfers, the component and
+ * its ports, memory the VideoCore reaches) is vcmmal.c's, shared with
+ * vcenc (0.4.4; until then each had a copy).
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdarg.h>
@@ -37,138 +37,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "kernel.h"
 #include "vcdec.h"
-#include "../common/contig.h"
-
-#define OS_Module                 0x1E
-#define OS_SWINumberFromString    0x39
-#define OS_ReadMonotonicTime      0x42
-#define OS_DynamicArea            0x66
-#define OS_Memory                 0x68
-#define OS_MMUControl             0x6B
-#define DA_NOT_DRAGGABLE          (1u << 7)
-#define DA_SPECIFIC_PAGES         (1u << 8)
-#define DA_PMP                    (1u << 20)   /* (RISC OS 5: a Physical Memory Pool) */
-#define PAGE_NOT_BUFFERABLE       (1u << 4)
-#define PAGE_NOT_CACHEABLE        (1u << 5)
-#define PAGE_LOCK                 (1u << 15)
-#define VC_RAM_TOP                0x40000000u  /* the VideoCore reaches the first 1 GB */
-#define ARMOP_CACHE_CLEAN_INVALIDATE_RANGE 21
-#define OS_SynchroniseCodeAreas   0x6E
-#define BCMSupport_SendTempPropertyBuffer 0x591C5
-#define TAG_GET_VC_MEMORY         0x00010006
-#define VCHIQ_Initialise          0x59200
-#define VCHIQ_Connect             0x59201
-#define VCHIQ_Disconnect          0x59202
-#define VCHIQ_BulkQueueTransmit   0x59203
-#define VCHIQ_MsgDequeue          0x59204
-#define VCHIQ_MsgQueue            0x59205
-#define VCHIQ_ServiceClose        0x59209
-#define VCHIQ_ServiceOpen         0x5920A
-#define VCHIQ_ServiceUse          0x5920D
-#define VCHIQ_ServiceRelease      0x5920E
-#define VCHIQ_BulkQueueReceive    0x5920F
-#define VCHI_FLAGS_CALLBACK_WHEN_DONE 6
-#define VCHI_FLAGS_BLOCK_UNTIL_QUEUED 4
-
-#define FOURCC_BE(a, b, c, d) ((uint32_t)(a) << 24 | (uint32_t)(b) << 16 | (uint32_t)(c) << 8 | (uint32_t)(d))
-#define FOURCC_LE(a, b, c, d) ((uint32_t)(a) | (uint32_t)(b) << 8 | (uint32_t)(c) << 16 | (uint32_t)(d) << 24)
-#define MMAL_SERVICE   FOURCC_BE('m', 'm', 'a', 'l')
-#define MMAL_MAGIC     FOURCC_LE('m', 'm', 'a', 'l')
-#define ENC_H264       FOURCC_LE('H', '2', '6', '4')
-#define ENC_I420       FOURCC_LE('I', '4', '2', '0')
-#define EV_FORMAT_CHANGED FOURCC_LE('E', 'F', 'C', 'H')
-#define EV_ERROR       FOURCC_LE('E', 'R', 'R', 'O')
-
-enum { T_COMPONENT_CREATE = 4, T_COMPONENT_DESTROY, T_COMPONENT_ENABLE, T_COMPONENT_DISABLE, T_PORT_INFO_GET,
-       T_PORT_INFO_SET, T_PORT_ACTION, T_BUFFER_FROM_HOST, T_BUFFER_TO_HOST, T_EVENT_TO_HOST = 16 };
-enum { PORT_INPUT = 2, PORT_OUTPUT = 3 };
-enum { ACTION_ENABLE = 1, ACTION_DISABLE = 2, ACTION_FLUSH = 3 };
-enum { ES_VIDEO = 3 };
-#define FLAG_EOS           1u
-#define FLAG_FRAME_START   2u
-#define FLAG_FRAME_END     4u
-#define FLAG_KEYFRAME      8u
-#define FLAG_DISCONTINUITY 0x10u
-#define TIME_UNKNOWN   0x8000000000000000ull
-#define SHORT_DATA     128
+#include "vcmmal.h"
 
 #define IN_BUFS        20
 #define IN_SIZE        (64 * 1024)
 #define OUT_BUFS_DEFAULT 3                 /* (MMALDecode's; the decoder asks for 1) */
 #define MAX_OUT        16
 #define HOLD_SPARE     2                   /* buffers vcdec_receive_hold leaves to the decoder */
-#define CTX_BASE       1
-#define REPLY_CS       300
 #define EFCH_WAIT_CS   200
-#define STALL_CS       500
 #define MAX_W          1920
 #define MAX_H          1088
-
-typedef struct { uint32_t magic, type, control_service, context, status, padding; } hdr_t;
-typedef struct {
-    uint32_t priv, name, type;
-    uint16_t index, index_all;
-    uint32_t is_enabled, format, buffer_num_min, buffer_size_min, buffer_alignment_min,
-             buffer_num_recommended, buffer_size_recommended, buffer_num, buffer_size,
-             component, userdata, capabilities;
-} port_t;
-typedef struct { uint32_t type, encoding, encoding_variant, es, bitrate, flags, extradata_size, extradata; } fmt_t;
-typedef struct { uint32_t width, height; int32_t crop[4], frame_rate[2], par[2]; uint32_t color_space; } video_t;
-typedef struct {
-    uint32_t status, component_handle, port_type, port_index;
-    int32_t found;
-    uint32_t port_handle;
-    port_t port;
-    fmt_t format;
-    video_t video;
-    uint8_t extradata[128];
-} port_info_t;
-typedef struct {
-    uint32_t component_handle, port_type, port_index;
-    port_t port;
-    fmt_t format;
-    video_t video;
-    uint8_t extradata[128];
-} port_set_t;
-typedef struct { uint32_t magic, component_handle, port_handle, client_context; } drvbuf_t;
-typedef struct {
-    drvbuf_t drvbuf, drvbuf_ref;
-    uint32_t next, priv, cmd, data, alloc_size, length, offset, flags;
-    uint64_t pts, dts;
-    uint32_t type, user_data;
-    uint32_t planes, offsets[4], pitch[4], vflags;
-    int32_t is_zero_copy, has_reference;
-    uint32_t payload_in_message;
-    uint8_t short_data[SHORT_DATA];
-} buffer_msg_t;
-typedef struct {
-    uint32_t client_component, port_type, port_num, cmd, length;
-    uint8_t data[256];
-    uint32_t delayed_buffer;
-} event_msg_t;
-typedef struct {
-    uint32_t buffer_size_min, buffer_num_min, buffer_size_recommended, buffer_num_recommended, es_ptr;
-    fmt_t format;
-    video_t video;
-} format_changed_t;
-
-typedef char chk_hdr[sizeof(hdr_t) == 24 ? 1 : -1];
-typedef char chk_port[sizeof(port_t) == 64 ? 1 : -1];
-typedef char chk_video[sizeof(video_t) == 44 ? 1 : -1];
-typedef char chk_buf[offsetof(buffer_msg_t, pts) == 64 && sizeof(buffer_msg_t) == 272 ? 1 : -1];
-typedef char chk_set[sizeof(port_set_t) == 280 ? 1 : -1];
-
-#ifdef VCDEC_HOST
-_kernel_oserror *probe_swi(int n, _kernel_swi_regs *r);   /* the host tests' fake RISC OS */
-#define vc_swi probe_swi
-#else
-static _kernel_oserror *vc_swi(int n, _kernel_swi_regs *r) { return _kernel_swi(n, r, r); }
-#endif
-void vcdec_svc_copy(void *dst, const void *src, size_t n);                       /* vcdec_copy.S */
-void vcdec_copy_rows(uint8_t *dst, int dst_stride, const uint8_t *src, int src_stride, int width, int rows, int mode);
-void vcdec_svc_call(uint32_t fn, uint32_t r0, uint32_t r1);
 #define COPY_SVC 4                         /* (vcdec_copy_rows's mode: in SVC mode) */
 
 /* the output buffers: with us and empty, with the decoder, holding a
@@ -191,15 +70,10 @@ typedef struct {                           /* a picture (or the EOS) that has co
 } held_t;
 
 struct vcdec {
+    vcm m;                                 /* the MMAL connection (vcmmal.h): err, failed, comp, ... */
     vcdec_config cfg;
-    char err[200];
-    int failed;                            /* VCDEC_ERROR or VCDEC_UNSUPPORTED from now on (0: none) */
-    uint32_t instance, handle, stub, comp, context;
-    int connected, opened, created, enabled, in_on, out_on;
+    int in_on, out_on;
     port_info_t in_info, out_info;
-    uint32_t msg[128];
-    const char *waiting;                   /* (for the log) */
-    uint32_t pci_alloc_swi, pci_free_swi;
     uint8_t *in_buf[IN_BUFS];
     int in_busy[IN_BUFS];
     int nout;                              /* output buffers (cfg.out_buffers, or 3) */
@@ -211,22 +85,15 @@ struct vcdec {
     int use_pool;                          /* new buffers in pools (cleared on falling back to PCI memory) */
     int pool_only;                         /* VCDEC_OUT_PMP: no falling back */
     int pool_uncached;                     /* VCDEC_OUT_UNCACHED */
-    char why[160];                         /* why a pool couldn't be had */
-    uint32_t armop_cci;                    /* cached pools: the kernel's Cache_CleanInvalidateRange */
     int copy_way;                          /* vcdec_copy_rows's way: 0 LDM 4, 1 LDM 8, 2 NEON */
-    int pmp_svc;                           /* a pool not readable in USR mode (OS_Memory 24): copied in SVC */
-    int pool_stuck;                        /* a pool couldn't be removed: the RMA block (its handler) is kept */
     held_t held[MAX_OUT + 1];
     held_t last_ok;                        /* the last picture copied out (its buffer, layout) */
     int nheld;
-    uint32_t rx_queued;                    /* receives queued (the callback counts them done) */
-    uint8_t *evbuf;
-    uint32_t evsize;
     int outputs_given, sent_any, eos_sent, eos_back;
     int eos_seen;                          /* the EOS buffer has come back (not yet taken) */
     int eos_vc;                            /* an EOS has reached the decoder (a flush must create it again) */
     int heard_output;                      /* a format change or a picture since the first input */
-    uint32_t t_first_send, last_heard;
+    uint32_t t_first_send;
     int reformat;                          /* an EFCH to another format, to act on at the top */
     format_changed_t fc;
     vcdec_stats stats;
@@ -252,233 +119,21 @@ static void live_remove(vcdec *d)
 
 /* ---- small things ---- */
 
-static void logf_(vcdec *d, const char *fmt, ...)
-{
-    char b[256];
-    va_list ap;
-    if (!d->cfg.log) return;
-    va_start(ap, fmt);
-    vsnprintf(b, sizeof b, fmt, ap);
-    va_end(ap);
-    d->cfg.log(d->cfg.log_handle, b);
-}
-
-/* the decoder has failed: every call says so from now on */
-static int fail(vcdec *d, int code, const char *fmt, ...)
-{
-    va_list ap;
-    if (d->failed) return d->failed;
-    va_start(ap, fmt);
-    vsnprintf(d->err, sizeof d->err, fmt, ap);
-    va_end(ap);
-    d->failed = code;
-    logf_(d, "%s", d->err);
-    return code;
-}
-
 /* a bad call: said, but nothing broken */
 static int einval(vcdec *d, const char *what)
 {
-    snprintf(d->err, sizeof d->err, "%s", what);
+    snprintf(d->m.err, sizeof d->m.err, "%s", what);
     return VCDEC_EINVAL;
 }
 
-static _kernel_oserror *swi5(int n, uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3, uint32_t r4,
-                             uint32_t *o0, uint32_t *o2)
-{
-    _kernel_swi_regs r;
-    _kernel_oserror *e;
-    memset(&r, 0, sizeof r);
-    r.r[0] = (int)r0; r.r[1] = (int)r1; r.r[2] = (int)r2; r.r[3] = (int)r3; r.r[4] = (int)r4;
-    e = vc_swi(n, &r);
-    if (!e) {
-        if (o0) *o0 = (uint32_t)r.r[0];
-        if (o2) *o2 = (uint32_t)r.r[2];
-    }
-    return e;
-}
-#define swi(n, a, b, c, d, o0, o2) swi5(n, a, b, c, d, 0, o0, o2)
-
-static uint32_t now_cs(void)
-{
-    uint32_t t = 0;
-    swi(OS_ReadMonotonicTime, 0, 0, 0, 0, &t, NULL);
-    return t;
-}
-
-static const char *const status_names[] = {
-    "SUCCESS", "ENOMEM", "ENOSPC", "EINVAL", "ENOSYS", "ENOENT", "ENXIO", "EIO", "ESPIPE",
-    "ECORRUPT", "ENOTREADY", "ECONFIG", "EISCONN", "ENOTCONN", "EAGAIN", "EFAULT" };
-static const char *st(uint32_t s) { return s < 16 ? status_names[s] : "?"; }
-
-unsigned vcdec_gpu_mem(void)
-{
-    uint32_t buf[8];
-    _kernel_swi_regs r;
-    buf[0] = sizeof buf; buf[1] = 0;
-    buf[2] = TAG_GET_VC_MEMORY; buf[3] = 8; buf[4] = 0; buf[5] = buf[6] = 0; buf[7] = 0;
-    memset(&r, 0, sizeof r);
-    r.r[0] = r.r[1] = (int)(uintptr_t)buf;
-    if (vc_swi(BCMSupport_SendTempPropertyBuffer, &r) || buf[1] != 0x80000000u) return 0;
-    return (unsigned)(buf[6] >> 20);
-}
-
-/* the callback's counters, in the RMA after its code: receives done, aborted */
-static void bulk_counts(vcdec *d, uint32_t v[2])
-{
-    vcdec_svc_copy(v, (const void *)(uintptr_t)(d->stub + 64), 8);
-}
-
-/* ---- PCI memory ---- */
-
-static void *pci_alloc(vcdec *d, size_t n)
-{
-    uint32_t log = 0;
-    _kernel_swi_regs r;
-    if (!d->pci_alloc_swi) {
-        memset(&r, 0, sizeof r);
-        r.r[1] = (int)(uintptr_t)"PCI_RAMAlloc";
-        if (vc_swi(OS_SWINumberFromString, &r)) return NULL;
-        d->pci_alloc_swi = (uint32_t)r.r[0];
-        r.r[1] = (int)(uintptr_t)"PCI_RAMFree";
-        if (vc_swi(OS_SWINumberFromString, &r)) return NULL;
-        d->pci_free_swi = (uint32_t)r.r[0];
-    }
-    if (swi((int)d->pci_alloc_swi, (uint32_t)n, 4096, 0, 0, &log, NULL) || !log) return NULL;
-    return (void *)(uintptr_t)log;
-}
-
-static void pci_free(vcdec *d, void *p)
-{
-    if (p) swi((int)d->pci_free_swi, (uint32_t)(uintptr_t)p, 0, 0, 0, NULL, NULL);
-}
-
-/* ---- a Physical Memory Pool (VCDEC_OUT_PMP) ----
-   One dynamic area per picture buffer: pages that OS_Memory 12 recommends
-   (physically contiguous, below 1 GB, as VCHIQ's bulk transfers need),
-   claimed (OS_DynamicArea 21, locked) and mapped in (22) user readable,
-   cacheable or not. PRM: OS_DynamicArea 0/21/22, OS_Memory 12. */
-
-static _kernel_oserror *pmp_op(vcdec *d, uint32_t reason, uint32_t area, uint32_t *list, uint32_t n)
-{
-    (void)d;
-    return swi(OS_DynamicArea, reason, area, (uint32_t)(uintptr_t)list, n, NULL, NULL);
-}
-
-static int pmp_free(vcdec *d, uint32_t area, uint32_t pages)
-{
-    _kernel_oserror *e;
-    uint32_t *l = malloc(pages * 12);
-    if (l) {
-        for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = 0xFFFFFFFFu; l[3 * j + 2] = 0; }
-        pmp_op(d, 22, area, l, pages);     /* unmapped, */
-        pmp_op(d, 21, area, l, pages);     /* released, */
-        free(l);
-    }
-    if ((e = swi(OS_DynamicArea, 1, area, 0, 0, NULL, NULL)) != NULL) {   /* removed */
-        logf_(d, "A picture pool (area %u) can't be removed: %s", (unsigned)area, e->errmess);
-        d->pool_stuck = 1;                 /* (its handler, in the RMA block, must stay) */
-        return -1;
-    }
-    return 0;
-}
-
-/* (pmp_alloc's reason for giving up: the caller falls back, or fails) */
-static void why(vcdec *d, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(d->why, sizeof d->why, fmt, ap);
-    va_end(ap);
-}
-
-static void *pmp_alloc(vcdec *d, uint32_t size, uint32_t *area_out)
-{
-    uint32_t pages = (size + 4095) >> 12, first, *l, phys[2];
-    int uncached = d->pool_uncached;
-    _kernel_swi_regs r;
-    _kernel_oserror *e;
-    char name[32];
-    void *base;
-    const char *no;
-    contig_app_page app = contig_read_app_page(vc_swi);   /* (never claim the program's page at &8000: contig.h) */
-    /* the pool and the page list first: OS_Memory 12's pages are only sure
-       to be free if claiming them is the next thing that takes pages */
-    if (!(l = malloc(pages * 12))) { why(d, "Out of memory"); return NULL; }
-    snprintf(name, sizeof name, "vcdec picture");
-    memset(&r, 0, sizeof r);
-    r.r[0] = 0; r.r[1] = -1; r.r[2] = 0; r.r[3] = -1;
-    r.r[4] = (int)(DA_SPECIFIC_PAGES | DA_PMP | DA_NOT_DRAGGABLE);   /* (access 0: user read/write) */
-    r.r[5] = (int)(pages << 12); r.r[6] = (int)(d->stub + 72); r.r[7] = 0;
-    r.r[8] = (int)(uintptr_t)name; r.r[9] = (int)pages;
-    if ((e = vc_swi(OS_DynamicArea, &r)) != NULL) { free(l); why(d, "A Physical Memory Pool: %s", e->errmess); return NULL; }
-    *area_out = (uint32_t)r.r[1];
-    base = (void *)(uintptr_t)(uint32_t)r.r[3];
-    /* contiguous pages for DMA below 1 GB (R4-R7: RISC OS 5.29+), not the program's page at &8000 */
-    if ((no = contig_recommend(vc_swi, pages, VC_RAM_TOP - 1, &app, &first)) != NULL) {
-        free(l); pmp_free(d, *area_out, 0);
-        why(d, "%s", no);
-        return NULL;
-    }
-    for (uint32_t j = 0; j < pages; j++) { l[3 * j] = j; l[3 * j + 1] = first + j; l[3 * j + 2] = PAGE_LOCK; }
-    if ((e = pmp_op(d, 21, *area_out, l, pages)) != NULL) {
-        free(l); pmp_free(d, *area_out, pages);
-        why(d, "Claiming %u pages from %u: %s", (unsigned)pages, (unsigned)first, e->errmess);
-        return NULL;
-    }
-    for (uint32_t j = 0; j < pages; j++) {
-        l[3 * j] = j; l[3 * j + 1] = j;
-        l[3 * j + 2] = PAGE_LOCK | (uncached ? PAGE_NOT_CACHEABLE : 0);   /* (access 0; uncached: still bufferable, */
-                                                                           /* as PCI_RAMAlloc memory) */
-    }
-    if ((e = pmp_op(d, 22, *area_out, l, pages)) != NULL) {
-        free(l); pmp_free(d, *area_out, pages);
-        why(d, "Mapping %u pages: %s", (unsigned)pages, e->errmess);
-        return NULL;
-    }
-    free(l);
-    if (contig_app_page_moved(vc_swi, &app)) {
-        d->stats.app_page_moves++;
-        logf_(d, "Claiming a pool's pages moved the program's page at &8000 (ARMEABISupport will lose the program)");
-    }
-    /* (checked: the first and last pages' physical addresses, as VCHIQ will see them) */
-    for (int k = 0; k < 2; k++) {
-        uint32_t blk[3] = { 0, (uint32_t)(uintptr_t)base + (k ? (pages - 1) << 12 : 0), 0 };
-        if ((e = swi(OS_Memory, 0x2200, (uint32_t)(uintptr_t)blk, 1, 0, NULL, NULL)) != NULL) {
-            pmp_free(d, *area_out, pages);
-            why(d, "OS_Memory 0: %s", e->errmess);
-            return NULL;
-        }
-        phys[k] = blk[2];
-    }
-    if (phys[1] != phys[0] + ((pages - 1) << 12) || phys[1] > VC_RAM_TOP - 4096) {
-        pmp_free(d, *area_out, pages);
-        why(d, "The pool's pages aren't contiguous below 1 GB (&%08X..&%08X)", (unsigned)phys[0],
-             (unsigned)phys[1]);
-        return NULL;
-    }
-    {   /* readable in USR mode? (if not, it's copied in SVC mode: no abort part way) */
-        uint32_t acc = 0;
-        memset(&r, 0, sizeof r);
-        r.r[0] = 24; r.r[1] = (int)(uintptr_t)base; r.r[2] = (int)((uintptr_t)base + (pages << 12));
-        if (!vc_swi(OS_Memory, &r)) acc = (uint32_t)r.r[1];   /* (the flags come back in R1) */
-        if (!(acc & 1)) {
-            if (!d->pmp_svc) logf_(d, "The pool isn't readable in USR mode (OS_Memory 24: &%X): copied in SVC mode", (unsigned)acc);
-            d->pmp_svc = 1;
-        }
-    }
-    logf_(d, "A picture buffer in a Physical Memory Pool: area %u, %u pages at &%08X, physical &%08X, %s",
-          (unsigned)*area_out, (unsigned)pages, (unsigned)(uintptr_t)base, (unsigned)phys[0],
-          uncached ? "not cacheable" : "cacheable");
-    return base;
-}
+unsigned vcdec_gpu_mem(void) { return vcm_gpu_mem(); }
 
 /* output buffer i made `size` bytes (any old one freed): 0, or -1 failed */
 static void out_free(vcdec *d, int i)
 {
     if (!d->out_buf[i]) return;
-    if (d->out_pool[i]) pmp_free(d, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
-    else pci_free(d, d->out_buf[i]);
+    if (d->out_pool[i]) vcm_pmp_free(&d->m, d->out_area[i], (d->out_cap[i] + 4095) >> 12);
+    else vcm_pci_free(&d->m, d->out_buf[i]);
     d->out_buf[i] = NULL;
     d->out_cap[i] = 0;
     d->out_pool[i] = 0;
@@ -487,8 +142,8 @@ static void out_free(vcdec *d, int i)
 /* no pool to be had: PCI memory from now on (unless VCDEC_OUT_PMP) */
 static int pool_fallback(vcdec *d)
 {
-    if (d->pool_only) return fail(d, VCDEC_ERROR, "%s", d->why);
-    logf_(d, "No picture pool (%s): PCI memory instead", d->why);
+    if (d->pool_only) return vcm_fail(&d->m, VCDEC_ERROR, "%s", d->m.why);
+    vcm_logf(&d->m, "No picture pool (%s): PCI memory instead", d->m.why);
     d->use_pool = 0;
     return 0;
 }
@@ -497,11 +152,11 @@ static int out_alloc(vcdec *d, int i, uint32_t size)
 {
     out_free(d, i);
     if (d->use_pool) {
-        if ((d->out_buf[i] = pmp_alloc(d, size, &d->out_area[i])) != NULL) d->out_pool[i] = 1;
+        if ((d->out_buf[i] = vcm_pmp_alloc(&d->m, size, &d->out_area[i], VCM_POOL_LOG | (d->pool_uncached ? VCM_POOL_UNCACHED : 0))) != NULL) d->out_pool[i] = 1;
         else if (pool_fallback(d)) return -1;
     }
-    if (!d->out_buf[i] && !(d->out_buf[i] = pci_alloc(d, size))) {
-        fail(d, VCDEC_ERROR, "No PCI memory (PCI_RAMAlloc) for %u byte pictures", (unsigned)size);
+    if (!d->out_buf[i] && !(d->out_buf[i] = vcm_pci_alloc(&d->m, size))) {
+        vcm_fail(&d->m, VCDEC_ERROR, "No PCI memory (PCI_RAMAlloc) for %u byte pictures", (unsigned)size);
         return -1;
     }
     d->out_cap[i] = size;
@@ -510,88 +165,13 @@ static int out_alloc(vcdec *d, int i, uint32_t size)
 
 /* ---- messages ---- */
 
-static int send_msg(vcdec *d, uint32_t type, const void *payload, uint32_t len)
-{
-    uint32_t m[128];
-    hdr_t *h = (hdr_t *)m;
-    _kernel_oserror *e;
-    memset(m, 0, sizeof(hdr_t));
-    h->magic = MMAL_MAGIC;
-    h->type = type;
-    h->context = ++d->context;
-    memcpy(h + 1, payload, len);
-    swi(VCHIQ_ServiceUse, d->handle, 0, 0, 0, NULL, NULL);
-    e = swi(VCHIQ_MsgQueue, d->handle, (uint32_t)(uintptr_t)m, (uint32_t)sizeof *h + len, 0, NULL, NULL);
-    swi(VCHIQ_ServiceRelease, d->handle, 0, 0, 0, NULL, NULL);
-    if (e) return fail(d, VCDEC_ERROR, "VCHIQ_MsgQueue: %s", e->errmess);
-    return 0;
-}
-
-/* a bulk receive of n bytes into dst, queued now; its number (the
-   callback's count when it's done) */
-static int queue_receive(vcdec *d, uint8_t *dst, uint32_t n, uint32_t *seq)
-{
-    _kernel_oserror *e;
-    swi(VCHIQ_ServiceUse, d->handle, 0, 0, 0, NULL, NULL);
-    e = swi5(VCHIQ_BulkQueueReceive, d->handle, (uint32_t)(uintptr_t)dst, (n + 3) & ~3u,
-             VCHI_FLAGS_CALLBACK_WHEN_DONE, 0, NULL, NULL);
-    swi(VCHIQ_ServiceRelease, d->handle, 0, 0, 0, NULL, NULL);
-    if (e) return fail(d, VCDEC_ERROR, "VCHIQ_BulkQueueReceive: %s", e->errmess);
-    *seq = ++d->rx_queued;
-    return 0;
-}
-
-/* receive seq done? (-1: one was aborted) */
-static int received(vcdec *d, uint32_t seq)
-{
-    uint32_t v[2];
-    bulk_counts(d, v);                     /* (both in one copy: one SVC entry) */
-    if (v[1]) return -1;
-    return (int32_t)(v[0] - seq) >= 0;
-}
-
-/* waits for receive seq (and so every one before it) */
-static int wait_received(vcdec *d, uint32_t seq)
-{
-    uint32_t t0 = now_cs();
-    int r;
-    while (!(r = received(d, seq)))
-        if (now_cs() - t0 > REPLY_CS) return fail(d, VCDEC_ERROR, "A bulk receive didn't finish in %d cs", REPLY_CS);
-    if (r < 0) return fail(d, VCDEC_ERROR, "A bulk receive was aborted");
-    return 0;
-}
-
 static int give_outputs(vcdec *d);
 static void free_all(vcdec *d);
 
 static int buffer_to_vc(vcdec *d, port_info_t *pi, int idx, uint8_t *data, uint32_t alloc, uint32_t len,
                         uint32_t flags, uint64_t pts, uint64_t dts)
 {
-    buffer_msg_t b;
-    memset(&b, 0, sizeof b);
-    b.drvbuf.magic = MMAL_MAGIC;
-    b.drvbuf.component_handle = d->comp;
-    b.drvbuf.port_handle = pi->port_handle;
-    b.drvbuf.client_context = (uint32_t)idx + CTX_BASE;
-    b.data = (uint32_t)(uintptr_t)data;
-    b.alloc_size = alloc;
-    b.length = len;
-    b.flags = flags;
-    b.pts = pts;
-    b.dts = dts;
-    if (send_msg(d, T_BUFFER_FROM_HOST, &b, sizeof b)) return -1;
-    if (d->cfg.flags & VCDEC_LOG_MESSAGES)
-        logf_(d, "tx: %s buffer %d, %u bytes, flags &%X, pts %lld", pi == &d->in_info ? "input" : "output", idx,
-              (unsigned)len, (unsigned)flags, (long long)pts);
-    if (len) {
-        _kernel_oserror *e;
-        swi(VCHIQ_ServiceUse, d->handle, 0, 0, 0, NULL, NULL);
-        e = swi5(VCHIQ_BulkQueueTransmit, d->handle, (uint32_t)(uintptr_t)data, (len + 3) & ~3u,
-                 VCHI_FLAGS_BLOCK_UNTIL_QUEUED, 0, NULL, NULL);
-        swi(VCHIQ_ServiceRelease, d->handle, 0, 0, 0, NULL, NULL);
-        if (e) return fail(d, VCDEC_ERROR, "VCHIQ_BulkQueueTransmit: %s", e->errmess);
-    }
-    return 0;
+    return vcm_buffer_to_vc(&d->m, pi, pi == &d->in_info ? "input" : "output", idx, data, alloc, len, flags, pts, dts);
 }
 
 /* One message that isn't the reply being waited for: buffers back, pictures
@@ -599,16 +179,16 @@ static int buffer_to_vc(vcdec *d, port_info_t *pi, int idx, uint8_t *data, uint3
    decoder (a format change to another size is left for top_level). */
 static void handle_msg(vcdec *d, uint32_t got)
 {
-    hdr_t *h = (hdr_t *)d->msg;
+    hdr_t *h = (hdr_t *)d->m.msg;
     if (h->type == T_BUFFER_TO_HOST) {
         buffer_msg_t *b = (buffer_msg_t *)(h + 1);
         uint32_t k = b->drvbuf.client_context - CTX_BASE;
         if (b->drvbuf.magic != MMAL_MAGIC || b->drvbuf.client_context < CTX_BASE) {
-            logf_(d, "A returned buffer we don't know");
+            vcm_logf(&d->m, "A returned buffer we don't know");
             return;
         }
         if (d->cfg.flags & VCDEC_LOG_MESSAGES)
-            logf_(d, "rx%s: buffer back, status %u, port %u, buffer %u, length %u, flags &%X, pts %lld", d->waiting,
+            vcm_logf(&d->m, "rx%s: buffer back, status %u, port %u, buffer %u, length %u, flags &%X, pts %lld", d->m.waiting,
                   (unsigned)h->status, (unsigned)b->drvbuf.port_handle, (unsigned)k, (unsigned)b->length,
                   (unsigned)b->flags, (long long)b->pts);
         if (b->drvbuf.port_handle == d->in_info.port_handle && k < IN_BUFS) {
@@ -616,18 +196,18 @@ static void handle_msg(vcdec *d, uint32_t got)
             return;
         }
         if (b->drvbuf.port_handle != d->out_info.port_handle || k >= (uint32_t)d->nout) {
-            logf_(d, "A buffer back from port %u", (unsigned)b->drvbuf.port_handle);
+            vcm_logf(&d->m, "A buffer back from port %u", (unsigned)b->drvbuf.port_handle);
             return;
         }
         if (h->status || (!b->length && !(b->flags & FLAG_EOS))) {   /* empty: back with us */
-            if (h->status) logf_(d, "Output buffer back with status %s", st(h->status));
+            if (h->status) vcm_logf(&d->m, "Output buffer back with status %s", vcm_status(h->status));
             d->out_state[k] = OB_FREE;     /* (handed over again by vcdec_poll, unless it's stopping) */
             return;
         }
         {
             held_t *p = &d->held[d->nheld];
             uint32_t w = d->out_info.video.width, rows = d->out_info.video.height;
-            if (d->nheld >= d->nout + 1) { fail(d, VCDEC_ERROR, "More pictures back than buffers"); return; }
+            if (d->nheld >= d->nout + 1) { vcm_fail(&d->m, VCDEC_ERROR, "More pictures back than buffers"); return; }
             memset(p, 0, sizeof *p);
             p->buf = (int)k;
             p->length = b->length;
@@ -643,48 +223,37 @@ static void handle_msg(vcdec *d, uint32_t got)
             p->width = d->out_info.video.crop[2] ? d->out_info.video.crop[2] : (int)w;
             p->height = d->out_info.video.crop[3] ? d->out_info.video.crop[3] : (int)rows;
             if (b->length > d->out_cap[k] || (b->length && b->payload_in_message)) {
-                fail(d, VCDEC_ERROR, "A %u byte picture for a %u byte buffer", (unsigned)b->length, (unsigned)d->out_cap[k]);
+                vcm_fail(&d->m, VCDEC_ERROR, "A %u byte picture for a %u byte buffer", (unsigned)b->length, (unsigned)d->out_cap[k]);
                 return;
             }
             /* the picture's bytes, or an empty EOS's 8 (as Linux's driver, to keep order) */
             {
-                uint32_t t0 = now_cs();
-                int bad = queue_receive(d, d->out_buf[k], b->length ? b->length : 8, &p->seq);
-                d->stats.cs_queue += now_cs() - t0;
+                uint32_t t0 = vcm_now_cs();
+                int bad = vcm_queue_receive(&d->m, d->out_buf[k], b->length ? b->length : 8, &p->seq);
+                d->stats.cs_queue += vcm_now_cs() - t0;
                 if (bad) return;
             }
             d->out_state[k] = OB_HELD;
             d->nheld++;
             d->heard_output = 1;
             if (b->flags & FLAG_EOS) d->eos_seen = 1;
-            if (d->cfg.flags & VCDEC_SYNC_RECEIVE) wait_received(d, p->seq);
+            if (d->cfg.flags & VCDEC_SYNC_RECEIVE) vcm_wait_received(&d->m, p->seq);
         }
         return;
     }
     if (h->type == T_EVENT_TO_HOST) {
         event_msg_t *ev = (event_msg_t *)(h + 1);
         if (d->cfg.flags & VCDEC_LOG_MESSAGES)
-            logf_(d, "rx%s: event &%08X, %u bytes, port type %u", d->waiting, (unsigned)ev->cmd, (unsigned)ev->length,
+            vcm_logf(&d->m, "rx%s: event &%08X, %u bytes, port type %u", d->m.waiting, (unsigned)ev->cmd, (unsigned)ev->length,
                   (unsigned)ev->port_type);
         if (!ev->cmd) return;              /* not an event: no data follows (rule 2) */
-        if (ev->length > sizeof ev->data) {
-            /* its data follows by bulk transfer: received now, and waited for (rare) */
-            uint32_t seq;
-            if (ev->length > d->evsize) {
-                pci_free(d, d->evbuf);
-                d->evbuf = pci_alloc(d, ev->length + 4);
-                d->evsize = d->evbuf ? ev->length : 0;
-                if (!d->evbuf) { fail(d, VCDEC_ERROR, "No PCI memory for a %u byte event", (unsigned)ev->length); return; }
-            }
-            if (queue_receive(d, d->evbuf, ev->length, &seq) || wait_received(d, seq)) return;
-            vcdec_svc_copy(ev->data, d->evbuf, sizeof ev->data);
-        }
+        if (vcm_event_data(&d->m, ev)) return;   /* (data that follows by bulk transfer) */
         if (ev->cmd == EV_FORMAT_CHANGED && ev->port_type == PORT_OUTPUT) {
             format_changed_t fc;
             memcpy(&fc, ev->data, sizeof fc);
             d->stats.format_changes++;
             d->heard_output = 1;
-            logf_(d, "Format changed: %ux%u (crop %dx%d), buffers %u x %u bytes", (unsigned)fc.video.width,
+            vcm_logf(&d->m, "Format changed: %ux%u (crop %dx%d), buffers %u x %u bytes", (unsigned)fc.video.width,
                   (unsigned)fc.video.height, (int)fc.video.crop[2], (int)fc.video.crop[3],
                   (unsigned)fc.buffer_num_recommended, (unsigned)fc.buffer_size_recommended);
             if (fc.format.encoding == d->out_info.format.encoding && fc.video.width == d->out_info.video.width &&
@@ -698,101 +267,18 @@ static void handle_msg(vcdec *d, uint32_t got)
                 d->reformat = 1;
             }
         } else if (ev->cmd == EV_ERROR) {
-            fail(d, VCDEC_ERROR, "The decoder reports an error (port type %u)", (unsigned)ev->port_type);
+            vcm_fail(&d->m, VCDEC_ERROR, "The decoder reports an error (port type %u)", (unsigned)ev->port_type);
         } else {
-            logf_(d, "Event &%08X (%u bytes) on port type %u", (unsigned)ev->cmd, (unsigned)ev->length,
+            vcm_logf(&d->m, "Event &%08X (%u bytes) on port type %u", (unsigned)ev->cmd, (unsigned)ev->length,
                   (unsigned)ev->port_type);
         }
         return;
     }
-    logf_(d, "(a type %u message, %u bytes)", (unsigned)h->type, (unsigned)got);
+    vcm_logf(&d->m, "(a type %u message, %u bytes)", (unsigned)h->type, (unsigned)got);
 }
 
-/* one message into d->msg: its length, or 0 if none */
-static uint32_t dequeue(vcdec *d)
-{
-    uint32_t got = 0;
-    if (swi(VCHIQ_MsgDequeue, d->handle, (uint32_t)(uintptr_t)d->msg, sizeof d->msg, 0, NULL, &got)) return 0;
-    if (got < sizeof(hdr_t) || ((hdr_t *)d->msg)->magic != MMAL_MAGIC) {
-        logf_(d, "(a %u byte message that isn't MMAL's)", (unsigned)got);
-        return 0;
-    }
-    d->last_heard = now_cs();
-    return got;
-}
-
-/* sends and waits for the reply of the same type, handling what else comes */
-static int transact(vcdec *d, uint32_t type, const void *payload, uint32_t len, const char *what)
-{
-    uint32_t t0, got;
-    if (d->failed || send_msg(d, type, payload, len)) return -1;
-    t0 = now_cs();
-    d->waiting = " (waiting)";
-    while (now_cs() - t0 < REPLY_CS) {
-        if (!(got = dequeue(d))) continue;
-        if (((hdr_t *)d->msg)->type == type) { d->waiting = ""; return (int)(got - sizeof(hdr_t)); }
-        handle_msg(d, got);
-        if (d->failed) { d->waiting = ""; return -1; }
-    }
-    d->waiting = "";
-    fail(d, VCDEC_ERROR, "%s: no reply from the decoder in %d cs", what, REPLY_CS);
-    return -1;
-}
-
-static uint32_t *reply(vcdec *d) { return (uint32_t *)((hdr_t *)d->msg + 1); }
-
-static int status_ok(vcdec *d, int n, const char *what)
-{
-    if (n < 4) return n < 0 ? -1 : fail(d, VCDEC_ERROR, "%s: a short reply", what);
-    if (reply(d)[0]) return fail(d, VCDEC_ERROR, "%s: %s", what, st(reply(d)[0]));
-    return 0;
-}
-
-static int port_get(vcdec *d, uint32_t type, port_info_t *pi, const char *what)
-{
-    uint32_t req[3] = { d->comp, type, 0 };
-    int n = transact(d, T_PORT_INFO_GET, req, sizeof req, what);
-    if (status_ok(d, n, what)) return -1;
-    if (n < (int)offsetof(port_info_t, extradata)) return fail(d, VCDEC_ERROR, "%s: a short reply", what);
-    memcpy(pi, reply(d), sizeof *pi);
-    return 0;
-}
-
-static int port_set(vcdec *d, uint32_t type, port_info_t *pi, const char *what)
-{
-    port_set_t s;
-    int n;
-    memset(&s, 0, sizeof s);
-    s.component_handle = d->comp;
-    s.port_type = type;
-    s.port = pi->port;
-    s.format = pi->format;
-    s.format.extradata_size = 0;
-    s.video = pi->video;
-    n = transact(d, T_PORT_INFO_SET, &s, sizeof s, what);
-    if (status_ok(d, n, what)) return -1;
-    if (n >= (int)offsetof(port_info_t, extradata)) {
-        port_info_t *r = (port_info_t *)reply(d);
-        pi->port = r->port;                /* the firmware's view (sizes may grow) */
-        pi->format = r->format;
-        pi->video = r->video;
-    }
-    return 0;
-}
-
-static int port_action(vcdec *d, port_info_t *pi, uint32_t action, const char *what)
-{
-    uint32_t req[3 + 16];
-    memset(req, 0, sizeof req);
-    req[0] = d->comp; req[1] = pi->port_handle; req[2] = action;
-    memcpy(&req[3], &pi->port, sizeof pi->port);
-    return status_ok(d, transact(d, T_PORT_ACTION, req, sizeof req, what), what);
-}
-
-static int simple(vcdec *d, uint32_t type, const char *what)
-{
-    return status_ok(d, transact(d, type, &d->comp, 4, what), what);
-}
+/* (for vcm_transact: what comes while a reply is waited for) */
+static void on_msg(void *owner, uint32_t got) { handle_msg(owner, got); }
 
 /* ---- the output ---- */
 
@@ -801,11 +287,11 @@ static int give_outputs(vcdec *d)
     for (int i = 0; i < d->nout; i++)
         if (d->out_state[i] == OB_FREE) {
             if (d->out_cap[i] < d->out_need && out_alloc(d, i, d->out_need))   /* (a picture was in it */
-                return d->failed;                                              /* when the size grew) */
-            uint32_t t0 = now_cs();
+                return d->m.failed;                                              /* when the size grew) */
+            uint32_t t0 = vcm_now_cs();
             if (buffer_to_vc(d, &d->out_info, i, d->out_buf[i], d->out_cap[i], 0, 0, TIME_UNKNOWN, TIME_UNKNOWN))
                 return -1;
-            d->stats.cs_give += now_cs() - t0;
+            d->stats.cs_give += vcm_now_cs() - t0;
             d->out_state[i] = OB_VC;
         }
     return 0;
@@ -816,18 +302,18 @@ static int give_outputs(vcdec *d)
 static int configure_output(vcdec *d)
 {
     uint32_t need;
-    if (port_set(d, PORT_OUTPUT, &d->out_info, "Output format")) return -1;
+    if (vcm_port_set(&d->m, PORT_OUTPUT, &d->out_info, "Output format")) return -1;
     need = d->out_info.port.buffer_size;
     if (d->out_info.port.buffer_size_recommended > need) need = d->out_info.port.buffer_size_recommended;
     if (d->out_info.port.buffer_size_min > need) need = d->out_info.port.buffer_size_min;
     d->out_need = need;
     for (int i = 0; i < d->nout; i++)
         if (d->out_state[i] == OB_FREE && d->out_cap[i] < need && out_alloc(d, i, need))
-            return d->failed;
+            return d->m.failed;
     if (d->out_info.port.buffer_size != need) {
         d->out_info.port.buffer_size = need;
         d->out_info.port.buffer_num = d->nout;
-        if (port_set(d, PORT_OUTPUT, &d->out_info, "Output buffers")) return -1;
+        if (vcm_port_set(&d->m, PORT_OUTPUT, &d->out_info, "Output buffers")) return -1;
     }
     return 0;
 }
@@ -838,7 +324,7 @@ static int do_reformat(vcdec *d)
 {
     format_changed_t *fc = &d->fc;
     d->reformat = 0;
-    if (port_action(d, &d->out_info, ACTION_DISABLE, "Output disable")) return -1;
+    if (vcm_port_action(&d->m, &d->out_info, ACTION_DISABLE, "Output disable")) return -1;
     d->out_on = 0;
     for (int i = 0; i < d->nout; i++) if (d->out_state[i] == OB_VC) d->out_state[i] = OB_FREE;
     d->out_info.format = fc->format;
@@ -846,7 +332,7 @@ static int do_reformat(vcdec *d)
     d->out_info.port.buffer_num = d->nout;
     d->out_info.port.buffer_size = fc->buffer_size_recommended > fc->buffer_size_min ?
                                    fc->buffer_size_recommended : fc->buffer_size_min;
-    if (configure_output(d) || port_action(d, &d->out_info, ACTION_ENABLE, "Output enable")) return -1;
+    if (configure_output(d) || vcm_port_action(&d->m, &d->out_info, ACTION_ENABLE, "Output enable")) return -1;
     d->out_on = 1;
     d->outputs_given = 1;
     return give_outputs(d);
@@ -869,22 +355,8 @@ static void release_head(vcdec *d)
 
 static int create_component(vcdec *d)
 {
-    uint32_t req[1 + 32 + 1];
-    int n;
-    memset(req, 0, sizeof req);
-    req[0] = 1;
-    strcpy((char *)&req[1], "ril.video_decode");
-    n = transact(d, T_COMPONENT_CREATE, req, sizeof req, "Create");
-    if (n < 0) {
-        if (strstr(d->err, "no reply"))
-            snprintf(d->err, sizeof d->err, "The VideoCore's MMAL service isn't answering (if something stopped "
-                     "part way, it can stay stuck until the machine is restarted)");
-        return -1;
-    }
-    if (n < 8 || reply(d)[0]) return fail(d, VCDEC_ERROR, "Create: %s", n >= 4 ? st(reply(d)[0]) : "a short reply");
-    d->comp = reply(d)[1];
-    d->created = 1;
-    if (port_get(d, PORT_INPUT, &d->in_info, "Input port") || port_get(d, PORT_OUTPUT, &d->out_info, "Output port"))
+    if (vcm_create(&d->m, "ril.video_decode")) return -1;
+    if (vcm_port_get(&d->m, PORT_INPUT, &d->in_info, "Input port") || vcm_port_get(&d->m, PORT_OUTPUT, &d->out_info, "Output port"))
         return -1;
     d->in_info.format.type = ES_VIDEO;
     d->in_info.format.encoding = ENC_H264;
@@ -892,7 +364,7 @@ static int create_component(vcdec *d)
     d->in_info.video.height = (uint32_t)d->cfg.height;
     d->in_info.port.buffer_num = IN_BUFS;
     d->in_info.port.buffer_size = IN_SIZE;
-    if (port_set(d, PORT_INPUT, &d->in_info, "Input format")) return -1;
+    if (vcm_port_set(&d->m, PORT_INPUT, &d->in_info, "Input format")) return -1;
     d->out_info.format.type = ES_VIDEO;
     d->out_info.format.encoding = ENC_I420;
     d->out_info.video.width = ((uint32_t)d->cfg.width + 31) & ~31u;
@@ -903,11 +375,11 @@ static int create_component(vcdec *d)
     d->out_info.port.buffer_num = d->nout;
     d->out_info.port.buffer_size = d->out_info.video.width * d->out_info.video.height * 3 / 2;
     if (configure_output(d)) return -1;
-    if (simple(d, T_COMPONENT_ENABLE, "Enable")) return -1;
-    d->enabled = 1;
-    if (port_action(d, &d->in_info, ACTION_ENABLE, "Input enable")) return -1;
+    if (vcm_simple(&d->m, T_COMPONENT_ENABLE, "Enable")) return -1;
+    d->m.enabled = 1;
+    if (vcm_port_action(&d->m, &d->in_info, ACTION_ENABLE, "Input enable")) return -1;
     d->in_on = 1;
-    if (port_action(d, &d->out_info, ACTION_ENABLE, "Output enable")) return -1;
+    if (vcm_port_action(&d->m, &d->out_info, ACTION_ENABLE, "Output enable")) return -1;
     d->out_on = 1;
     /* (the output's buffers: after the decoder's first format change) */
     d->outputs_given = d->sent_any = d->eos_sent = d->eos_back = d->eos_seen = d->heard_output = d->reformat = 0;
@@ -920,14 +392,7 @@ static int create_component(vcdec *d)
    left on the VideoCore keeps its memory) */
 static void destroy_component(vcdec *d, int closing)
 {
-    if (closing) d->failed = 0;
-    if (d->out_on && !port_action(d, &d->out_info, ACTION_DISABLE, "Output disable")) d->out_on = 0;
-    if (closing) d->failed = 0;
-    if (d->in_on && !port_action(d, &d->in_info, ACTION_DISABLE, "Input disable")) d->in_on = 0;
-    if (closing) d->failed = 0;
-    if (d->enabled && !simple(d, T_COMPONENT_DISABLE, "Disable")) d->enabled = 0;
-    if (closing) d->failed = 0;
-    if (d->created && !simple(d, T_COMPONENT_DESTROY, "Destroy")) d->created = 0;
+    vcm_destroy(&d->m, &d->in_info, &d->in_on, &d->out_info, &d->out_on, closing);
 }
 
 /* ---- the API ---- */
@@ -938,11 +403,12 @@ void vcdec_config_init(vcdec_config *c)
 }
 
 const char *vcdec_open_error(void) { return open_err; }
-const char *vcdec_error(const vcdec *d) { return d ? d->err : open_err; }
+const char *vcdec_error(const vcdec *d) { return d ? d->m.err : open_err; }
 
 void vcdec_get_stats(const vcdec *d, vcdec_stats *s)
 {
     *s = d->stats;
+    s->app_page_moves = d->m.app_page_moves;
     s->held_now = (unsigned)d->nuser;
     s->pool_buffers = s->pci_buffers = 0;
     for (int i = 0; i < d->nout; i++)
@@ -954,13 +420,8 @@ void vcdec_get_stats(const vcdec *d, vcdec_stats *s)
 
 int vcdec_open(vcdec **out, const vcdec_config *c)
 {
-    static const uint32_t code[9] = { 0xe3510004u, 0x05903000u, 0x02833001u, 0x05803000u, 0xe3510012u,
-                                      0x05903004u, 0x02833001u, 0x05803004u, 0xe1a0f00eu };
-    /* (the callback: R1 = 4, a receive done: [R0] += 1; R1 = 18, aborted:
-       [R0 + 4] += 1; R0 is its param, the two words after the code) */
     vcdec *d;
     unsigned mb;
-    uint32_t setup[11];
     _kernel_oserror *e;
     int r = VCDEC_ERROR;
     *out = NULL;
@@ -987,80 +448,57 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
     }
     live_add(d);
     d->cfg = *c;
+    d->m.name = "decoder";
+    d->m.pool_name = "vcdec picture";
+    d->m.log = c->log;
+    d->m.log_handle = c->log_handle;
+    d->m.log_messages = (c->flags & VCDEC_LOG_MESSAGES) != 0;
+    d->m.on_msg = on_msg;
+    d->m.owner = d;
+    d->m.waiting = "";
     d->nout = c->out_buffers > 0 ? (c->out_buffers < MAX_OUT ? c->out_buffers : MAX_OUT) : OUT_BUFS_DEFAULT;
     d->copy_way = c->flags & VCDEC_COPY_NEON ? 2 : c->flags & VCDEC_COPY_LDM8 ? 1 : c->flags & VCDEC_COPY_LDM4 ? 0 : 1;
     d->use_pool = !(c->flags & VCDEC_OUT_PCI);
     d->pool_only = d->use_pool && (c->flags & VCDEC_OUT_PMP);
     d->pool_uncached = (c->flags & VCDEC_OUT_UNCACHED) != 0;
     if (d->copy_way == 2 && !d->use_pool)
-        logf_(d, "NEON is only used in USR mode: pictures from PCI memory are copied by LDM 8 instead");
-    d->waiting = "";
-    logf_(d, "vcdec %s: %dx%d; the VideoCore has %u MB (gpu_mem); pictures copied out by %s", VCDEC_VERSION, c->width,
+        vcm_logf(&d->m, "NEON is only used in USR mode: pictures from PCI memory are copied by LDM 8 instead");
+    vcm_logf(&d->m, "vcdec %s: %dx%d; the VideoCore has %u MB (gpu_mem); pictures copied out by %s", VCDEC_VERSION, c->width,
           c->height, mb, d->copy_way == 2 ? "NEON" : d->copy_way ? "LDM 8" : "LDM 4");
     for (int i = 0; i < IN_BUFS; i++)
-        if (!(d->in_buf[i] = pci_alloc(d, IN_SIZE))) {
-            fail(d, VCDEC_ERROR, "No physically contiguous memory (PCI_RAMAlloc; is the PCI module loaded?)");
+        if (!(d->in_buf[i] = vcm_pci_alloc(&d->m, IN_SIZE))) {
+            vcm_fail(&d->m, VCDEC_ERROR, "No physically contiguous memory (PCI_RAMAlloc; is the PCI module loaded?)");
             goto bad;
         }
-    if ((e = swi(OS_Module, 6, 0, 0, 80, NULL, &d->stub)) != NULL) { fail(d, VCDEC_ERROR, "No RMA: %s", e->errmess); goto bad; }
-    {
-        uint32_t img[20];
-        _kernel_swi_regs rr;
-        memset(img, 0, sizeof img);
-        memcpy(img, code, sizeof code);
-        img[18] = 0xe1a0f00eu;             /* +72: the pools' dynamic area handler: MOV PC, R14 */
-        vcdec_svc_copy((void *)(uintptr_t)d->stub, img, sizeof img);
-        memset(&rr, 0, sizeof rr);
-        rr.r[0] = 1; rr.r[1] = (int)d->stub; rr.r[2] = (int)(d->stub + 76);
-        vc_swi(OS_SynchroniseCodeAreas, &rr);
-    }
-    if (d->use_pool && !d->pool_uncached &&
-        (e = swi(OS_MMUControl, 2 | ARMOP_CACHE_CLEAN_INVALIDATE_RANGE << 8, 0, 0, 0, &d->armop_cci, NULL)) != NULL) {
-        d->armop_cci = 0;
-        why(d, "OS_MMUControl 2 (Cache_CleanInvalidateRange; RISC OS 5.23 or later): %s", e->errmess);
+    if (vcm_claim_stub(&d->m)) goto bad;
+    if (d->use_pool && !d->pool_uncached && (e = vcm_find_cci(&d->m)) != NULL) {
+        vcm_why(&d->m, "OS_MMUControl 2 (Cache_CleanInvalidateRange; RISC OS 5.23 or later): %s", e->errmess);
         if (pool_fallback(d)) goto bad;
     }
-    if ((e = swi(VCHIQ_Initialise, 0, 0, 0, 0, &d->instance, NULL)) != NULL) { fail(d, VCDEC_ERROR, "VCHIQ_Initialise: %s", e->errmess); goto bad; }
-    if ((e = swi(VCHIQ_Connect, 0, 0, d->instance, 0, NULL, NULL)) != NULL) { fail(d, VCDEC_ERROR, "VCHIQ_Connect: %s", e->errmess); goto bad; }
-    d->connected = 1;
-    memset(setup, 0, sizeof setup);
-    setup[0] = 15; setup[1] = 10; setup[2] = MMAL_SERVICE;
-    setup[6] = d->stub; setup[7] = d->stub + 64;
-    if ((e = swi(VCHIQ_ServiceOpen, d->instance, (uint32_t)(uintptr_t)setup, 0, 0, &d->handle, NULL)) != NULL) {
-        fail(d, VCDEC_ERROR, "VCHIQ_ServiceOpen \"mmal\": %s", e->errmess);
-        goto bad;
-    }
-    d->opened = 1;
-    swi(VCHIQ_ServiceRelease, d->handle, 0, 0, 0, NULL, NULL);   /* (opening leaves it in use) */
+    if (vcm_connect(&d->m)) goto bad;
     if (create_component(d)) goto bad;
     *out = d;
     return VCDEC_OK;
 bad:
-    r = d->failed ? d->failed : VCDEC_ERROR;
-    snprintf(open_err, sizeof open_err, "%s", d->err);
+    r = d->m.failed ? d->m.failed : VCDEC_ERROR;
+    snprintf(open_err, sizeof open_err, "%s", d->m.err);
     vcdec_close(d);
     return r;
 }
 
 void vcdec_close(vcdec *d)
 {
-    _kernel_oserror *e;
     if (!d) return;
     destroy_component(d, 1);
-    if (d->opened && (e = swi(VCHIQ_ServiceClose, d->handle, 0, 0, 0, NULL, NULL)) != NULL) {
-        logf_(d, "VCHIQ_ServiceClose: %s (the callback is left in the RMA)", e->errmess);
-        d->stub = 0;                       /* (it may still be called) */
-    }
-    if (d->connected) swi(VCHIQ_Disconnect, d->instance, 0, 0, 0, NULL, NULL);
-    for (int i = 0; i < IN_BUFS; i++) pci_free(d, d->in_buf[i]);
+    vcm_service_close(&d->m, "the callback is left in the RMA");
+    vcm_disconnect(&d->m);
+    for (int i = 0; i < IN_BUFS; i++) vcm_pci_free(&d->m, d->in_buf[i]);
     for (int i = 0; i < d->nout; i++)      /* (the pools before the RMA block: it holds their handler) */
         if (d->out_state[i] != OB_USER) out_free(d, i);
-    pci_free(d, d->evbuf);
-    d->evbuf = NULL;
     if (d->nuser) {                        /* pictures still held: the rest at the last vcdec_release */
-        logf_(d, "Closed with %d pictures still held: their buffers go when they're released", d->nuser);
+        vcm_logf(&d->m, "Closed with %d pictures still held: their buffers go when they're released", d->nuser);
         d->closing = 1;
-        d->cfg.log = NULL;                 /* (its handle may be gone by then: an FFmpeg context) */
+        d->m.log = NULL;                 /* (its handle may be gone by then: an FFmpeg context) */
         return;
     }
     free_all(d);
@@ -1070,7 +508,7 @@ void vcdec_close(vcdec *d)
    they've gone) and the structure */
 static void free_all(vcdec *d)
 {
-    if (d->stub && !d->pool_stuck) swi(OS_Module, 7, 0, d->stub, 0, NULL, NULL);
+    vcm_free_stub(&d->m);
     live_remove(d);
     free(d);
 }
@@ -1083,7 +521,7 @@ void vcdec_close_all(void)
 {
     while (nlive) {
         vcdec *d = live[nlive - 1];
-        d->cfg.log = NULL;                 /* (its handle may be gone) */
+        d->m.log = NULL;                 /* (its handle may be gone) */
         if (!d->closing) vcdec_close(d);
         if (nlive && live[nlive - 1] == d) {   /* (closed, but with pictures held) */
             for (int i = 0; i < d->nout; i++) out_free(d, i);
@@ -1099,23 +537,23 @@ void vcdec_close_all(void)
 int vcdec_poll(vcdec *d)
 {
     uint32_t got, now;
-    if (d->failed) return d->failed;
+    if (d->m.failed) return d->m.failed;
     for (;;) {
         /* (a format change can also have come while waiting for a reply) */
-        if (d->reformat && do_reformat(d)) return d->failed ? d->failed : VCDEC_ERROR;
-        if (!(got = dequeue(d))) break;
-        now = now_cs();
+        if (d->reformat && do_reformat(d)) return d->m.failed ? d->m.failed : VCDEC_ERROR;
+        if (!(got = vcm_dequeue(&d->m))) break;
+        now = vcm_now_cs();
         handle_msg(d, got);
-        d->stats.cs_messages += now_cs() - now;
-        if (d->failed) return d->failed;
+        d->stats.cs_messages += vcm_now_cs() - now;
+        if (d->m.failed) return d->m.failed;
     }
-    now = now_cs();
+    now = vcm_now_cs();
     if (d->sent_any && !d->outputs_given && now - d->t_first_send > EFCH_WAIT_CS) {
-        logf_(d, "No format change from the decoder in %d cs: the output buffers handed over anyway", EFCH_WAIT_CS);
+        vcm_logf(&d->m, "No format change from the decoder in %d cs: the output buffers handed over anyway", EFCH_WAIT_CS);
         d->outputs_given = 1;
     }
     /* empty buffers (back unused, or after a format change) to the decoder */
-    if (d->outputs_given && d->out_on && !d->eos_seen && give_outputs(d)) return d->failed;
+    if (d->outputs_given && d->out_on && !d->eos_seen && give_outputs(d)) return d->m.failed;
     /* A decoder that has stopped: nothing at all since the first input (as
        at gpu_mem=64 with 1080p), or nothing after the EOS with a buffer to
        fill. (Not part way: a decoder can keep input while it waits for
@@ -1123,16 +561,16 @@ int vcdec_poll(vcdec *d)
     if (d->sent_any && !d->heard_output && now - d->t_first_send > STALL_CS) {
         unsigned mb = vcdec_gpu_mem();
         if (mb && mb < 128)
-            return fail(d, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has %u MB: 1080p needs "
+            return vcm_fail(&d->m, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has %u MB: 1080p needs "
                         "gpu_mem=128)", STALL_CS, mb);
         /* (0.4.3) one 1080p decoder fills gpu_mem=128: another open one waits for its memory */
-        return fail(d, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has no memory left for it: "
+        return vcm_fail(&d->m, VCDEC_ERROR, "Nothing from the decoder in %d cs (the VideoCore has no memory left for it: "
                     "another decoder open, or one left by a program that stopped without closing)", STALL_CS);
     }
-    if (d->eos_vc && !d->eos_seen && now - d->last_heard > STALL_CS) {
+    if (d->eos_vc && !d->eos_seen && now - d->m.last_heard > STALL_CS) {
         int outs = 0;
         for (int i = 0; i < d->nout; i++) outs += d->out_state[i] == OB_VC;
-        if (outs) return fail(d, VCDEC_ERROR, "Nothing from the decoder for %d cs after the EOS", STALL_CS);
+        if (outs) return vcm_fail(&d->m, VCDEC_ERROR, "Nothing from the decoder for %d cs after the EOS", STALL_CS);
     }
     return VCDEC_OK;
 }
@@ -1158,18 +596,18 @@ int vcdec_send(vcdec *d, const void *data, size_t len, int64_t pts, int64_t dts,
     const uint8_t *src = data;
     uint32_t padded, pieces, n, off = 0;
     int r, free_n = 0;
-    if (d->failed) return d->failed;
+    if (d->m.failed) return d->m.failed;
     if (!len) return einval(d, "An empty access unit");
     if (d->eos_sent) return einval(d, "Sent after the EOS (flush first)");
     padded = ((uint32_t)len + 3) & ~3u;
     pieces = (padded + IN_SIZE - 1) / IN_SIZE;
     if (len > (size_t)IN_BUFS * IN_SIZE) return einval(d, "An access unit larger than the decoder's input");
     if (vcdec_check_stream(data, len) == VCDEC_UNSUPPORTED)
-        return fail(d, VCDEC_UNSUPPORTED, "The stream's profile isn't one the VideoCore decodes (Baseline, Main, High)");
+        return vcm_fail(&d->m, VCDEC_UNSUPPORTED, "The stream's profile isn't one the VideoCore decodes (Baseline, Main, High)");
     if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
     for (int i = 0; i < IN_BUFS; i++) free_n += !d->in_busy[i];
     if ((uint32_t)free_n < pieces) return VCDEC_AGAIN;
-    if (!d->sent_any) { d->sent_any = 1; d->t_first_send = now_cs(); }
+    if (!d->sent_any) { d->sent_any = 1; d->t_first_send = vcm_now_cs(); }
     for (int i = 0; i < IN_BUFS && off < padded; i++) {
         uint32_t fl = 0;
         uint64_t p = TIME_UNKNOWN, q = TIME_UNKNOWN;
@@ -1188,9 +626,9 @@ int vcdec_send(vcdec *d, const void *data, size_t len, int64_t pts, int64_t dts,
             q = (uint64_t)dts;
         }
         if (off + n == padded) fl |= FLAG_FRAME_END;
-        if (buffer_to_vc(d, &d->in_info, i, d->in_buf[i], IN_SIZE, n, fl, p, q)) return d->failed;
+        if (buffer_to_vc(d, &d->in_info, i, d->in_buf[i], IN_SIZE, n, fl, p, q)) return d->m.failed;
         d->in_busy[i] = 1;
-        d->last_heard = now_cs();          /* (the decoder has work: the stall clock starts) */
+        d->m.last_heard = vcm_now_cs();          /* (the decoder has work: the stall clock starts) */
         off += n;
     }
     d->stats.sent++;
@@ -1200,7 +638,7 @@ int vcdec_send(vcdec *d, const void *data, size_t len, int64_t pts, int64_t dts,
 int vcdec_send_eos(vcdec *d)
 {
     int r;
-    if (d->failed) return d->failed;
+    if (d->m.failed) return d->m.failed;
     if (d->eos_sent) return VCDEC_OK;
     if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
     if (!d->sent_any) {                    /* nothing sent: the end at once, the decoder not told */
@@ -1209,12 +647,12 @@ int vcdec_send_eos(vcdec *d)
     }
     for (int i = 0; i < IN_BUFS; i++)
         if (!d->in_busy[i]) {
-            if (!d->sent_any) { d->sent_any = 1; d->t_first_send = now_cs(); }
+            if (!d->sent_any) { d->sent_any = 1; d->t_first_send = vcm_now_cs(); }
             if (buffer_to_vc(d, &d->in_info, i, d->in_buf[i], IN_SIZE, 0, FLAG_EOS, TIME_UNKNOWN, TIME_UNKNOWN))
-                return d->failed;
+                return d->m.failed;
             d->in_busy[i] = 1;
             d->eos_sent = d->eos_vc = 1;
-            d->last_heard = now_cs();
+            d->m.last_heard = vcm_now_cs();
             return VCDEC_OK;
         }
     return VCDEC_AGAIN;
@@ -1227,12 +665,12 @@ int vcdec_send_eos(vcdec *d)
 static int park(vcdec *d)
 {
     destroy_component(d, 0);
-    if (d->failed) return d->failed;
+    if (d->m.failed) return d->m.failed;
     for (int i = 0; i < IN_BUFS; i++) d->in_busy[i] = 0;
     for (int i = 0; i < d->nout; i++) if (d->out_state[i] != OB_USER) d->out_state[i] = OB_FREE;
     d->parked = 1;
     d->stats.freed_at_end++;
-    logf_(d, "At the end: the decoder destroyed, its VideoCore memory given back (a flush creates it again)");
+    vcm_logf(&d->m, "At the end: the decoder destroyed, its VideoCore memory given back (a flush creates it again)");
     return 0;
 }
 
@@ -1242,13 +680,13 @@ static int head_ready(vcdec *d)
 {
     int r;
     for (;;) {
-        if (d->failed) return d->failed;
+        if (d->m.failed) return d->m.failed;
         if (!d->nheld) {
             if (!d->eos_back) return 0;
-            if (d->created && d->eos_vc && park(d)) return d->failed;   /* (an EOS alone: nothing taken yet) */
+            if (d->m.created && d->eos_vc && park(d)) return d->m.failed;   /* (an EOS alone: nothing taken yet) */
             return VCDEC_EOF;
         }
-        if ((r = received(d, d->held[0].seq)) < 0) return fail(d, VCDEC_ERROR, "A bulk receive was aborted");
+        if ((r = vcm_received(&d->m, d->held[0].seq)) < 0) return vcm_fail(&d->m, VCDEC_ERROR, "A bulk receive was aborted");
         if (!r) return 0;
         if (!(d->held[0].flags & FLAG_EOS) || d->held[0].length) return 1;
         release_head(d);                   /* an empty EOS: the end */
@@ -1280,10 +718,9 @@ int vcdec_peek(vcdec *d, vcdec_picture *pic)
 static void picture_cache(vcdec *d, const held_t *p)
 {
     const uint8_t *b = d->out_buf[p->buf];
-    uint32_t t0 = now_cs();
-    if (d->out_pool[p->buf] && d->armop_cci)
-        vcdec_svc_call(d->armop_cci, (uint32_t)(uintptr_t)b, ((uint32_t)(uintptr_t)b + p->length + 63) & ~63u);
-    d->stats.cs_cache += now_cs() - t0;
+    uint32_t t0 = vcm_now_cs();
+    if (d->out_pool[p->buf]) vcm_cache_cci(&d->m, b, p->length);
+    d->stats.cs_cache += vcm_now_cs() - t0;
 }
 
 static void copy_picture(vcdec *d, const held_t *p, uint8_t *const planes[3], const int strides[3], int way)
@@ -1291,17 +728,17 @@ static void copy_picture(vcdec *d, const held_t *p, uint8_t *const planes[3], co
     const uint8_t *b = d->out_buf[p->buf];
     int cw = (p->width + 1) / 2, ch = (p->height + 1) / 2;
     int pool = d->out_pool[p->buf];
-    int svc = !pool || d->pmp_svc;
+    int svc = !pool || d->m.pmp_svc;
     uint32_t t1;
     /* (NEON only in USR mode: in SVC mode an IRQ could leave the VFP context
        lazily switched off, and a trap there isn't VFPSupport's to mend) */
     int mode = (svc && way == 2 ? 1 : way) | (svc ? COPY_SVC : 0);
     picture_cache(d, p);
-    t1 = now_cs();
+    t1 = vcm_now_cs();
     vcdec_copy_rows(planes[0], strides[0], b + p->offsets[0], (int)p->pitch[0], p->width, p->height, mode);
     vcdec_copy_rows(planes[1], strides[1], b + p->offsets[1], (int)p->pitch[1], cw, ch, mode);
     vcdec_copy_rows(planes[2], strides[2], b + p->offsets[2], (int)p->pitch[2], cw, ch, mode);
-    d->stats.cs_copy += now_cs() - t1;
+    d->stats.cs_copy += vcm_now_cs() - t1;
 }
 
 int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes[3], const int strides[3],
@@ -1309,10 +746,10 @@ int vcdec_copy_benchmark(vcdec *d, unsigned way, int reps, uint8_t *const planes
 {
     uint32_t t0;
     if (!d->last_ok.length || !d->out_buf[d->last_ok.buf]) return einval(d, "No picture received yet to time");
-    t0 = now_cs();
+    t0 = vcm_now_cs();
     for (int i = 0; i < reps; i++)
         copy_picture(d, &d->last_ok, planes, strides, way & VCDEC_COPY_NEON ? 2 : way & VCDEC_COPY_LDM4 ? 0 : 1);
-    *cs = now_cs() - t0;
+    *cs = vcm_now_cs() - t0;
     return VCDEC_OK;
 }
 
@@ -1335,11 +772,11 @@ int vcdec_receive_hold(vcdec *d, vcdec_picture *pic, uint8_t *planes[3], int str
     if ((r = head_ready(d)) != 1) return r ? r : VCDEC_AGAIN;
     p = &d->held[0];
     k = p->buf;
-    if (!d->out_pool[k] || d->pmp_svc || d->nuser >= d->nout - HOLD_SPARE)
+    if (!d->out_pool[k] || d->m.pmp_svc || d->nuser >= d->nout - HOLD_SPARE)
         return VCDEC_UNSUPPORTED;          /* (left at the head, for vcdec_receive) */
     if (layout_bad(p)) {
         release_head(d);
-        return fail(d, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
+        return vcm_fail(&d->m, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
     }
     picture_cache(d, p);
     if (pic) fill_info(p, pic);
@@ -1387,7 +824,7 @@ int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const 
     if (planes) {
         if (layout_bad(p)) {
             release_head(d);
-            return fail(d, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
+            return vcm_fail(&d->m, VCDEC_ERROR, "A %u byte picture too small for %dx%d", (unsigned)p->length, p->width, p->height);
         }
         copy_picture(d, p, planes, strides, d->copy_way);
         d->last_ok = *p;                   /* (for vcdec_copy_benchmark) */
@@ -1409,8 +846,8 @@ int vcdec_flush(vcdec *d)
         d->nheld = 0;
         d->eos_back = d->eos_seen = 0;
         d->stats.recreated++;
-        logf_(d, "Flush after the end: the decoder created again");
-        if (create_component(d)) return d->failed;
+        vcm_logf(&d->m, "Flush after the end: the decoder created again");
+        if (create_component(d)) return d->m.failed;
         return VCDEC_OK;
     }
     if (d->eos_sent && !d->eos_vc) {       /* an EOS with nothing before it: nothing to undo */
@@ -1421,16 +858,16 @@ int vcdec_flush(vcdec *d)
         /* after an EOS a flush leaves the decoder losing its last pictures
            at the next EOS (0.14-0.17 on the Pi): a new one instead */
         destroy_component(d, 0);
-        if (d->failed) return d->failed;
+        if (d->m.failed) return d->m.failed;
         for (int i = 0; i < IN_BUFS; i++) d->in_busy[i] = 0;
     } else {
         /* the pictures already decoded come back during these (rule 6) */
-        if (port_action(d, &d->in_info, ACTION_FLUSH, "Input flush") ||
-            port_action(d, &d->out_info, ACTION_FLUSH, "Output flush"))
-            return d->failed;
+        if (vcm_port_action(&d->m, &d->in_info, ACTION_FLUSH, "Input flush") ||
+            vcm_port_action(&d->m, &d->out_info, ACTION_FLUSH, "Output flush"))
+            return d->m.failed;
     }
     /* every picture held dropped, once its receive is done */
-    if (d->nheld && wait_received(d, d->held[d->nheld - 1].seq)) return d->failed;
+    if (d->nheld && vcm_wait_received(&d->m, d->held[d->nheld - 1].seq)) return d->m.failed;
     d->stats.discarded += (unsigned)d->nheld;
     d->nheld = 0;
     for (int i = 0; i < d->nout; i++)     /* (the flush or the disables sent back the decoder's) */
@@ -1438,8 +875,8 @@ int vcdec_flush(vcdec *d)
     d->eos_back = d->eos_seen = 0;
     if (d->eos_sent) {
         d->stats.recreated++;
-        logf_(d, "Flush after the EOS: the decoder created again");
-        if (create_component(d)) return d->failed;
+        vcm_logf(&d->m, "Flush after the EOS: the decoder created again");
+        if (create_component(d)) return d->m.failed;
         return VCDEC_OK;
     }
     /* (vcdec_poll acts on a format change that came during the flush) */

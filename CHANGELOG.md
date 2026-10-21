@@ -1,5 +1,35 @@
 # Changes
 
+## vcdec 0.4.4, vcenc 0.1.5: one MMAL connection for both (2026-10-21)
+
+Done for maintainability, at the owner's request (the hot-path review).
+Nothing they do changes.
+
+- **What moved:** vcenc began as a copy of vcdec's VCHIQ/MMAL code, and
+  the two files shared 517 identical lines. Every fix had to be made
+  twice: the exit clean-up was the latest, and copies had begun to drift
+  (vcenc's `pmp_free` handled an empty pool, vcdec's didn't). That code
+  is now `vcdec/vcmmal.c` and `vcmmal.h`, used by both:
+  - the SWIs and the time;
+  - the log and failing;
+  - PCI memory and Physical Memory Pools;
+  - the RMA callback, connecting and closing;
+  - messages, replies and bulk transfers, events with long data;
+  - the component and its ports.
+- **What stayed:** each file keeps what is its own (vcdec: the pictures,
+  zero copy, flushes, the end of the stream; vcenc: the encoder's settings,
+  pictures in, packets out), and holds a `vcm` for its connection.
+  The public API (`vcdec.h`, `vcenc.h`) is unchanged. vcdec.c went from
+  1447 to 884 lines and vcenc.c from 1238 to 722; vcmmal.c is 552.
+- **What differed** is now a parameter: the component's name in
+  messages, the pools' name, whether a pool must be user-writable (vcenc)
+  or may be read in SVC mode (vcdec), whether pools are logged, and
+  whether they're cacheable.
+- **Checked:** vcdec_test's and vcenc_test's whole outputs (every log
+  line, through the fake VideoCore) are identical before and after, and
+  every host test passes. `libvcdec.a` now holds vcmmal.o too; the build
+  scripts, the devkit's check and the host tests' builds include it.
+
 ## devkit 0.2.16, vcdec 0.4.3, vcenc 0.1.4, hevcdec 0.1.14, VCDecTest 0.3.4: VideoCore memory given back (2026-10-20)
 
 VCDecTest 0.3.3's Multi on a Pi 4 (gpu_mem=128): a decoder takes its share

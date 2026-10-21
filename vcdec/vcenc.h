@@ -34,7 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCENC_VERSION "0.1.4"
+#define VCENC_VERSION "0.1.5"
 
 /* results (as vcdec's) */
 #define VCENC_OK           0

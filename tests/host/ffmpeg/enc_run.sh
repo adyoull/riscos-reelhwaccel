@@ -25,6 +25,7 @@ bad=0
 # the host libvcdec: vcdec, vcenc, the copy routines and the fake encoder, all in one
 CC="arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DVCDEC_HOST -I$TOP/tests/host/fake -I$TOP/vcdec -Wall -Wno-unused-function"
 $CC -c "$TOP/vcdec/vcdec.c" -o "$O/lib/vcdec.o" && $CC -c "$TOP/vcdec/vcenc.c" -o "$O/lib/vcenc.o" &&
+  $CC -c "$TOP/vcdec/vcmmal.c" -o "$O/lib/vcmmal.o" &&
   $CC -c "$TOP/vcdec/vcdec_copy.S" -o "$O/lib/vcdec_copy.o" &&
   $CC -c "$TOP/tests/host/fake_vcenc_lib.c" -o "$O/lib/fake_vcenc_lib.o" || exit 1
 rm -f "$O/lib/libvcdec.a"

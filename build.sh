@@ -29,4 +29,4 @@ fi
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"
 if [ -n "${FFMPEG_TARBALL:-}" ] && has_encoder libx265; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.14}"
 else echo "HEVCTest: skipped (its traces need FFMPEG_TARBALL and $FFMPEG with libx265)"; fi
-"$HERE/devkit/build.sh" "${DEVKIT:-0.2.16}"
+"$HERE/devkit/build.sh" "${DEVKIT:-0.2.17}"

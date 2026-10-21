@@ -7,7 +7,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
 . "$TOP/common/toolchain.sh"
-V=${1:-0.2.16}
+V=${1:-0.2.17}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V
 mkdir -p "$D/include" "$D/lib" "$D/ffmpeg"
@@ -21,8 +21,8 @@ cp "$TMP/hbuild/libhevcdec.a" "$D/lib/"
 cp "$TOP/hevcdec/hwhevcdec.h" "$TOP/hevcdec/hevc_ctrls.h" "$D/include/"
 cp "$HERE/README.md" "$TOP/COPYING" "$D/"
 # the packaged library must link on its own: both objects in it, a program built with GCCSDK
-[ "$(${CROSS}ar t "$D/lib/libvcdec.a" | tr '\n' ' ')" = "vcdec.o vcenc.o vcdec_copy.o " ] ||
-  { echo "devkit: libvcdec.a doesn't hold vcdec.o, vcenc.o and vcdec_copy.o"; exit 1; }
+[ "$(${CROSS}ar t "$D/lib/libvcdec.a" | tr '\n' ' ')" = "vcdec.o vcenc.o vcmmal.o vcdec_copy.o " ] ||
+  { echo "devkit: libvcdec.a doesn't hold vcdec.o, vcenc.o, vcmmal.o and vcdec_copy.o"; exit 1; }
 printf '#include "vcdec.h"\n#include "vcenc.h"\nint main(void)\n{\n    vcdec *d;\n    vcdec_config c;\n    vcenc *e;\n    vcenc_config ec;\n    vcdec_config_init(&c);\n    vcenc_config_init(&ec);\n    return vcdec_open(&d, &c) == VCDEC_OK && vcdec_gpu_mem() > 0 && vcenc_open(&e, &ec) == VCENC_OK;\n}\n' > "$TMP/t.c"
 ${CROSS}gcc -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -I"$D/include" "$TMP/t.c" -L"$D/lib" -lvcdec -o "$TMP/t" ||
   { echo "devkit: a program doesn't link with the packaged libvcdec.a"; exit 1; }

@@ -23,7 +23,8 @@ mkdir -p "$O/lib"
 bad=0
 # the host libvcdec: vcdec, its copy routines and the fake, all in one
 CC="arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -DVCDEC_HOST -I$TOP/tests/host/fake -I$TOP/vcdec -Wall -Wno-unused-function"
-$CC -c "$TOP/vcdec/vcdec.c" -o "$O/lib/vcdec.o" && $CC -c "$TOP/vcdec/vcdec_copy.S" -o "$O/lib/vcdec_copy.o" &&
+$CC -c "$TOP/vcdec/vcdec.c" -o "$O/lib/vcdec.o" && $CC -c "$TOP/vcdec/vcmmal.c" -o "$O/lib/vcmmal.o" &&
+  $CC -c "$TOP/vcdec/vcdec_copy.S" -o "$O/lib/vcdec_copy.o" &&
   $CC -c "$TOP/tests/host/fake_vc.c" -o "$O/lib/fake_vc.o" || exit 1
 rm -f "$O/lib/libvcdec.a"
 arm-linux-gnueabihf-ar rcs "$O/lib/libvcdec.a" "$O/lib/"*.o
