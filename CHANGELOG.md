@@ -1,5 +1,43 @@
 # Changes
 
+## vcdec 0.4.8, VCDecTest 0.3.8: the 2 s start, measured (2026-10-22)
+
+Reel Edit waits about 2 s for the first picture each time it starts a
+clip on the VideoCore. Their handoffs are ReelEdit/handoffs 2026-10-20,
+10-21 and 10-22. vcdec logs "No format change from the decoder in 200
+cs" each time. It does that because of rule 2: the output buffers go to
+the decoder only after its first format change, or after 200 cs.
+
+That rule came from MMALDecode 0.5–0.9, which lost the first picture when
+buffers were given early. 0.10's notes found the real cause was buffer 0
+(client_context 0 means "no buffer" to the firmware), fixed by numbering
+from 1 (rule 1). So the rule may not be needed. The fake's `efch_late`
+models a decoder that sends its format change only once it has buffers,
+which reproduces Reel Edit's wait.
+
+- **vcdec:**
+  - **`VCDEC_OUT_EARLY` (a trial):** the output buffers go to the
+    decoder as soon as it's created, and again after each re-create;
+  - **new `vcdec_stats` fields:** `efch_cs` and `efch_aus` (when the
+    first format change came, and how many access units were sent by
+    then), `first_cs` (the first picture), and `efch_waits` (how often
+    the 200 cs wait ran out);
+  - **the log:** says when the format change came. The 200 cs line now
+    says how many access units were sent.
+- **The fake:** `early_out_ok` lets output buffers come before the format
+  change. Without it the fake holds to rule 2.
+- **VCDecTest 0.3.8:**
+  - `-G` (`VCDEC_OUT_EARLY`);
+  - "Start:" lines in every report and for each Multi decoder;
+  - a new clip, flat: 1920x1080, one colour, no B frames, as Reel Edit's
+    clips;
+  - a new Obey file, Start (ResultS): each clip with the wait, then with
+    `-G`, then hd `-G -E` and `-G -M 2`, every picture checked.
+- **Tests:**
+  - the start with the wait and with `-G`, also with bulk transfers;
+  - VCDecTest's runs, including `-G -M 2`;
+  - 3 mutants caught.
+
 ## Release 0.2.18 (2026-10-22)
 
 The GitHub release `v0.2.18`: devkit 0.2.18 (vcdec 0.4.7, vcenc 0.1.5,

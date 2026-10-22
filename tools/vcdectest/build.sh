@@ -1,8 +1,9 @@
 #!/bin/bash
 # tools/vcdectest/build.sh [VERSION] - builds VCDecTest-VERSION.zip in dist/:
-# vcdectest for RISC OS (linked with libvcdec), three H.264 MP4 test clips
+# vcdectest for RISC OS (linked with libvcdec), four H.264 MP4 test clips
 # made here with the host's ffmpeg and x264 (the same as MMALDecode's:
-# 640x360 Main with B frames, 426x240 Baseline, 1920x1080 High) with
+# 640x360 Main with B frames, 426x240 Baseline, 1920x1080 High; and flat, one
+# colour, 1920x1080 High without B frames, as Reel Edit's clips) with
 # FFmpeg's own per-picture checksums (-f framecrc) and block-mean
 # signatures, the Obey files and the ReadMe.
 set -e
@@ -25,7 +26,10 @@ $FFMPEG -v error -y -f lavfi -i testsrc2=size=426x240:rate=25 -frames:v 30 -c:v 
   -pix_fmt yuv420p "$C/odd.mp4"
 $FFMPEG -v error -y -f lavfi -i testsrc2=size=1920x1080:rate=30 -frames:v 150 -c:v libx264 -profile:v high \
   -level 4.1 -crf 26 -bf 3 -g 50 -pix_fmt yuv420p "$C/hd.mp4"
-for c in small odd hd; do      # (clips/NAME/...: no dots in RISC OS names)
+# flat: (0.3.8) one colour, as Reel Edit's test clips (made by h264_encvchiq): tiny access units, no B frames
+$FFMPEG -v error -y -f lavfi -i color=c=red:size=1920x1080:rate=25 -frames:v 100 -c:v libx264 -profile:v high \
+  -bf 0 -g 50 -pix_fmt yuv420p "$C/flat.mp4"
+for c in small odd hd flat; do      # (clips/NAME/...: no dots in RISC OS names)
   mkdir "$C/$c"
   mv "$C/$c.mp4" "$C/$c/mp4"
   $FFMPEG -v error -y -i "$C/$c/mp4" -f framecrc -pix_fmt yuv420p "$C/$c/crc"

@@ -10,13 +10,15 @@
  * by pts. The VideoCore's chroma can be 1 lower than FFmpeg's here and
  * there: block means within 1 count as "close" (with the .sig file).
  *
- *   vcdectest [-o file] [-v] [-n] [-S] [-D] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
+ *   vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
  *             stream.mp4 expected.crc [expected.sig]
  *      -o file   also add the report to file
  *      -v        every MMAL message, and what vcdec does
  *      -n        don't stop at the first wrong picture
  *      -S        wait for each picture's bulk transfer as it arrives (as
  *                MMALDecode did), not later
+ *      -G        (0.3.8) the output buffers to the decoder at once
+ *                (VCDEC_OUT_EARLY), not after its first format change
  *      -D        (0.3.5) no direct output (VCDEC_NO_DIRECT): every picture by
  *                bulk transfer, as before vcdec 0.4.5
  *      -g        open even if gpu_mem looks too small
@@ -725,6 +727,9 @@ static int multi_run(int n, const vcdec_config *cfg0, const uint8_t *stream)
             say("%s of 0..%d\n", missing > shown ? " ..." : "", nwant - 1);
         }
         if (q->st.after_eos) say("  Decoder %d: %u pictures came after the EOS (taken before it)\n", k + 1, q->st.after_eos);
+        if (q->opened)
+            say("  Decoder %d: first picture %d cs after its first access unit; format change %d cs (%u sent)%s\n", k + 1,
+                q->st.first_cs, q->st.efch_cs, q->st.efch_aus, q->st.efch_waits ? "; the 200 cs wait ran out" : "");
     }
     if (t_end > t0)
         say("Together: %d pictures in %u.%02u s, %u a second (%u for each of the %d open)\n", total,
@@ -745,7 +750,7 @@ int probe_main(int argc, char **argv)
     const char *stream_name = NULL, *crc_name = NULL, *sig_name = NULL, *x_out = NULL;
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
-    int verbose = 0, sync = 0, no_direct = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
+    int verbose = 0, sync = 0, no_direct = 0, early_out = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
     int multi_n = 0, exit_after = 0, out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
     vcdec_hold *holds[16];
     uint32_t read_sum = 0;
@@ -770,6 +775,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-v")) verbose = 1;
         else if (!strcmp(argv[i], "-S")) sync = 1;
         else if (!strcmp(argv[i], "-D")) no_direct = 1;
+        else if (!strcmp(argv[i], "-G")) early_out = 1;
         else if (!strcmp(argv[i], "-g")) gpu_any = 1;
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-E")) seek_end = 1;
@@ -802,7 +808,7 @@ int probe_main(int argc, char **argv)
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16 ||
         multi_n < 0 || multi_n > 8) {
-        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-D] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
+        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
                "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] [-M n] [-X n] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
@@ -847,7 +853,7 @@ int probe_main(int argc, char **argv)
     cfg.width = (int)mp4_w;
     cfg.height = (int)mp4_h;
     cfg.flags = (sync ? VCDEC_SYNC_RECEIVE : 0) | (gpu_any ? VCDEC_NO_GPU_MEM_CHECK : 0) | (verbose ? VCDEC_LOG_MESSAGES : 0) |
-                (no_direct ? VCDEC_NO_DIRECT : 0) | way | memory;
+                (no_direct ? VCDEC_NO_DIRECT : 0) | (early_out ? VCDEC_OUT_EARLY : 0) | way | memory;
     cfg.out_buffers = out_buffers;
     if (zero) say("Zero-copy: pictures held in vcdec's buffers (up to %d at a time)%s\n", hold_n,
                   read_all ? ", each read once" : "");
@@ -1035,6 +1041,14 @@ int probe_main(int argc, char **argv)
             stats.cs_copy, (unsigned)send_cs);
     }
     say("Output buffers at the end: %u in pools, %u in PCI memory\n", stats.pool_buffers, stats.pci_buffers);
+    say("Start: the first picture %d cs after the first access unit%s%s\n", stats.first_cs,
+        early_out ? " (the output buffers given at once, -G)" : "",
+        stats.efch_waits ? ", once the 200 cs wait for a format change ran out" : "");
+    if (stats.efch_cs >= 0)
+        say("Start: the format change %d cs after the first access unit (%u access units sent by then)\n", stats.efch_cs,
+            stats.efch_aus);
+    else
+        say("Start: no format change from the decoder\n");
     if (no_direct) say("Direct output: off (-D): every picture by bulk transfer\n");
     else if (!stats.direct_on && !stats.direct) say("Direct output: not set up (the log says why): pictures by bulk transfer\n");
     else say("Direct output: %u of the decoder's pictures written straight into vcdec's buffers (no bulk transfer)%s\n",

@@ -10,6 +10,19 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.8 (vcdec 0.4.8): Start. Reel Edit waits about 2 s for the
+first picture at every clip it starts. vcdec gives the decoder its
+output buffers only after the decoder says the picture size (a "format
+change"), or after 200 cs, and with Reel Edit's clips that message
+doesn't come by itself. That rule came from MMALDecode's first tests,
+whose lost first picture turned out later to be something else. Start
+times the first picture of each clip with vcdec's way, then with the
+buffers given at once (-G), every picture checked. Each report now has
+"Start:" lines. There's a new clip, flat (one colour, tiny pictures, as
+Reel Edit's). Please restart, run Start and send ResultS. If a -G run
+stops with "no reply", restart before anything else: that's an answer
+too.
+
 New in 0.3.7 (vcdec 0.4.7): 0.3.6's Multi showed three 1080p decoders
 working at once (60 pictures a second together), and every decoder
 getting direct output. But with 3 and 4 small decoders, one ended a
@@ -102,8 +115,12 @@ The clips (in clips, the same as before):
   odd    426x240, 30 pictures, H.264 Baseline (a width that isn't a
          multiple of 32, to check the cropping)
   hd     1920x1080, 150 pictures, H.264 High, level 4.1, B frames
+  flat   1920x1080, 100 pictures of one colour, H.264 High, no B
+         frames (0.3.8)
 
-Running it (please restart first, then send back ResultD and ResultMulti):
+Running it (please restart first, then send back ResultS):
+  Start    New: how long the first picture takes (see above). Writes
+           ResultS.
   Direct   New: direct output, checked and timed (see above). Writes
            ResultD.
   Exit     Programs that stop without closing (see above). Writes

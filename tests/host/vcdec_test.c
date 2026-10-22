@@ -373,6 +373,34 @@ static void direct_tests(void)
     direct_case("zero copy refused", &zc_refuse, 1, 0, "No direct output (Zero copy on the output: ");
     /* every 3rd picture comes by bulk (and the EOS, empty, direct): received as before */
     direct_case("some by bulk", &zc_bulk_every, 3, 8, NULL);
+    /* (0.4.8) the start: a decoder that sends its format change only once it has output buffers
+       (as Reel Edit's clips seem to on the Pi: the 2 s wait at each start) */
+    {
+        static const struct { unsigned flags; int late; const char *what; } k[4] = {
+            { 0, 1, "start, format change after buffers: the 200 cs wait" },
+            { VCDEC_OUT_EARLY, 1, "start, format change after buffers, buffers at once" },
+            { VCDEC_OUT_EARLY, 0, "start, buffers at once" },
+            { VCDEC_OUT_EARLY | VCDEC_NO_DIRECT, 1, "start, buffers at once, bulk transfers" } };
+        for (int i = 0; i < 4; i++) {
+            vcdec *d = open70(k[i].flags);
+            vcdec_stats s;
+            int r;
+            early_out_ok = (k[i].flags & VCDEC_OUT_EARLY) != 0;
+            efch_late = k[i].late;
+            setup_planes(0, 0);
+            ngot = wrong_pics = 0;
+            r = feed(d, 0, 12, 1);
+            vcdec_get_stats(d, &s);
+            CHECK(r == VCDEC_EOF && got_is(0, 12) && !wrong_pics && s.first_cs >= 0 && s.efch_cs >= 0 &&
+                  (k[i].flags & VCDEC_OUT_EARLY ? !s.efch_waits && s.first_cs < 100 :
+                   s.efch_waits == 1 && s.first_cs >= 200 && strstr(logbuf, "(12 access units sent)")) &&
+                  strstr(logbuf, "The format change came "),
+                  "%s: %d, %d pictures (%d wrong), first picture %d cs, format change %d cs (%u sent), %u waits; log:\n%s",
+                  k[i].what, r, ngot, wrong_pics, s.first_cs, s.efch_cs, s.efch_aus, s.efch_waits, logbuf);
+            close70(d, k[i].what);
+            early_out_ok = efch_late = 0;
+        }
+    }
     /* (0.4.7) the empty EOS comes back before the last picture (as a Pi 4 seemed to with 3 and 4
        decoders at once, VCDecTest 0.3.6): the picture waited for, and taken before the end */
     direct_case("EOS before the last picture", &zc_eos_early, 1, 12, "A picture after the EOS");
@@ -442,6 +470,7 @@ static int app_move_next_run;
 static int app_multi, app_multi_room, app_multi_way, app_corrupt = -1, app_gpu_mb;   /* the next VCDecTest runs: several decoders (the fake's multi) */                 /* the next VCDecTest run: every pool claim moves the page at &8000 */
 
 /* VCDecTest on the fake's MP4, with up to three options */
+static int app_early_ok, app_efch_late;      /* (0.4.8) the next VCDecTest runs: the fake's early_out_ok, efch_late */
 static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
 {
     static char buf[16384];
@@ -457,6 +486,7 @@ static char *run_app(int *ret, const char *o1, const char *o2, const char *o3)
     argv[n] = NULL;
     reset_fake();
     mp4_mode = 1;
+    early_out_ok = app_early_ok; efch_late = app_efch_late;
     move_on_claim = app_move_next_run; app_move_next_run = 0;
     remove("/tmp/vcdec_test.out");
     *ret = probe_main(n, argv);
@@ -483,6 +513,7 @@ static char *run_apps(int *ret, const char *opts)
     argv[n] = NULL;
     reset_fake();
     mp4_mode = 1;
+    early_out_ok = app_early_ok; efch_late = app_efch_late;
     move_on_claim = app_move_next_run; app_move_next_run = 0;
     multi = app_multi; multi_room = app_multi_room; multi_full_way = app_multi_way;
     if (app_multi) corrupt_at = app_corrupt;
@@ -531,6 +562,23 @@ static void app_tests(void)
           strstr(o, "all of them") && strstr(o, "Result: OK"), "VCDecTest -E (%d, %d recreated):\n%s", ret, recreated, o);
     cleaned("app -E");
     rx_late = 0;
+    /* (0.3.8) the start: vcdec's 200 cs wait, then the buffers at once (-G) */
+    app_efch_late = 1;
+    o = run_app(&ret, NULL, NULL, NULL);
+    CHECK(ret == 0 && strstr(o, ", once the 200 cs wait for a format change ran out") &&
+          strstr(o, "Start: the format change ") && strstr(o, "Result: OK"), "VCDecTest, the start's wait (%d):\n%s", ret, o);
+    cleaned("VCDecTest start wait");
+    app_early_ok = 1;
+    o = run_app(&ret, "-G", NULL, NULL);
+    CHECK(ret == 0 && strstr(o, "(the output buffers given at once, -G)") && !strstr(o, "wait for a format change ran out") &&
+          strstr(o, "Result: OK"), "VCDecTest -G (%d):\n%s", ret, o);
+    cleaned("VCDecTest -G");
+    app_multi = 1; app_multi_room = 99; app_multi_way = 0;
+    o = run_apps(&ret, "-G -M 2");
+    CHECK(ret == 0 && strstr(o, "Decoder 2: first picture ") && strstr(o, "Result: OK"), "VCDecTest -G -M 2 (%d):\n%s", ret, o);
+    multi_cleaned("VCDecTest -G -M 2");
+    app_multi = 0;
+    app_early_ok = app_efch_late = 0;
     corrupt_at = 3;
     o = run_app(&ret, "-t", NULL, NULL);
     CHECK(ret == 0 && strstr(o, "OK - timed") && strstr(o, "Copying the pictures out"), "VCDecTest -t (%d):\n%s", ret, o);

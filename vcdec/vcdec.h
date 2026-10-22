@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCDEC_VERSION "0.4.7"
+#define VCDEC_VERSION "0.4.8"
 
 /* results */
 #define VCDEC_OK           0
@@ -63,6 +63,8 @@
 #define VCDEC_OUT_UNCACHED    64u   /* the pool not cacheable (bufferable) */
 #define VCDEC_OUT_PCI        128u   /* PCI_RAMAlloc memory (uncachable, privileged: copied in
                                        SVC mode), the default before 0.4 */
+#define VCDEC_OUT_EARLY     1024u   /* (0.4.8, a trial) the output buffers to the decoder at once,
+                                       not after its first format change (or 200 cs) */
 #define VCDEC_NO_DIRECT      512u   /* (0.4.5) no direct output: every picture by bulk transfer,
                                        as before 0.4.5 */
 
@@ -118,6 +120,11 @@ typedef struct {
     unsigned direct_on, direct;
     /* (0.4.7) pictures that came after the (empty) EOS buffer, taken before it */
     unsigned after_eos;
+    /* (0.4.8) the start, in cs from the first access unit sent (-1: not
+       yet): the first format change (and access units sent by then), the
+       first picture; times the 200 cs wait ran out with no format change */
+    int efch_cs, first_cs;
+    unsigned efch_aus, efch_waits;
 } vcdec_stats;
 
 void vcdec_config_init(vcdec_config *c);

@@ -20,7 +20,7 @@ has_encoder() { "$FFMPEG" -hide_banner -encoders 2>/dev/null | grep -q " $1 "; }
 "$HERE/tools/mmalprobe/build.sh" "${MMALPROBE:-0.1}"
 if has_encoder libx264; then
   "$HERE/tools/mmaldecode/build.sh" "${MMALDECODE:-0.17}"
-  "$HERE/tools/vcdectest/build.sh" "${VCDECTEST:-0.3.7}"
+  "$HERE/tools/vcdectest/build.sh" "${VCDECTEST:-0.3.8}"
 else
   echo "MMALDecode, VCDecTest: skipped (their clips need $FFMPEG with libx264)"
 fi

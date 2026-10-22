@@ -77,6 +77,10 @@ static _kernel_oserror err = { 1, "fake error" }, empty = { 2, "none" };
 
 /* scenario */
 static int hijacked, vc_stuck, efch_late, swap_frames, hold_inputs;
+/* (vcdec 0.4.8) early_out_ok: output buffers before the first format change
+   accepted (MMALDecode's lost picture was buffer 0, not that: to be
+   confirmed on the Pi); without it the fake holds to rule 2 */
+static int early_out_ok;
 /* multi: this decoder doesn't fit in the VideoCore's memory: as one 1080p
    decoder with gpu_mem=64 on the Pi (MMALDecode 0.12): it keeps every
    input buffer, and sends no format change and no picture */
@@ -569,7 +573,8 @@ static void firmware(const uint32_t *m, uint32_t len)
             CHECK(d->port == 2 && port_on[2], "output buffer for port %u (on %d)", d->port, port_on[2]);
             CHECK(p[8 + 4] >= out_size_set, "output alloc_size %u < %u", p[8 + 4], out_size_set);
             /* rule 2: only after the decoder's format change (or 200 cs) */
-            CHECK(efch_ever || (first_in_cs && time_cs - first_in_cs >= 200), "an output buffer before the format change");
+            CHECK(early_out_ok || efch_ever || (first_in_cs && time_cs - first_in_cs >= 200),
+                  "an output buffer before the format change");
             CHECK(nout < 16, "more than 16 output buffers with the decoder");
             if (nout < 16) out_bufs[nout++] = (int)d->ctx;
             if (d->ctx < 64) out_data[d->ctx] = p[8 + 3];   /* (zero copy: the VideoCore handle) */
@@ -1342,6 +1347,7 @@ static void reset_fake(void)
     noutq = 0; ndeferred = deferred_ever = 0; ntxq = pending_tx_now = 0;
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
+    early_out_ok = 0;
     recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
     pmp_invalidates = 0; nout_max = 0; rx_abort = 0; pmp_privileged = 0; recommended = 0; pmp_top = 0; no_armop = 0; pmp_made = 0;
     app_pn = 0x100; app_moves = 0; old_os_12 = 0; rec_calls = 0; move_on_claim = 0;

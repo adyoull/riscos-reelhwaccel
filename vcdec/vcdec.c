@@ -33,6 +33,10 @@
  *      (SMEMProbe 0.1). A picture that comes without it is received as
  *      before; without the service, an import or the parameter, the
  *      pictures come by bulk transfer as before;
+ *  (0.4.8) Rule 2's wait came from MMALDecode 0.5-0.9, whose lost first
+ *      picture was later found to be buffer 0 (rule 1), not buffers given
+ *      early. VCDEC_OUT_EARLY gives them at once, to find out on the Pi
+ *      whether the wait can go (Reel Edit's 2 s at every clip start).
  *  10. (0.4.7) with direct output the empty EOS buffer can come back
  *      before the last picture (VCDecTest 0.3.6's Multi on a Pi 4: 3 and 4
  *      decoders at once, one picture short at the end): a picture after
@@ -279,6 +283,8 @@ static void handle_msg(vcdec *d, uint32_t got)
             d->nheld++;
             d->heard_output = 1;
             if (b->length) d->seg_back++;
+            if (b->length && d->stats.first_cs < 0 && d->sent_any)
+                d->stats.first_cs = (int)(vcm_now_cs() - d->t_first_send);
             if (d->eos_seen && b->length) {    /* (rule 10) after the empty EOS: before it */
                 int j = 0;
                 while (j < d->nheld - 1 && !((d->held[j].flags & FLAG_EOS) && !d->held[j].length)) j++;
@@ -307,6 +313,12 @@ static void handle_msg(vcdec *d, uint32_t got)
             memcpy(&fc, ev->data, sizeof fc);
             d->stats.format_changes++;
             d->heard_output = 1;
+            if (d->stats.efch_cs < 0 && d->sent_any) {   /* (0.4.8) how long the first took */
+                d->stats.efch_cs = (int)(vcm_now_cs() - d->t_first_send);
+                d->stats.efch_aus = d->seg_sent;
+                vcm_logf(&d->m, "The format change came %d cs after the first access unit (%u sent)%s", d->stats.efch_cs,
+                         d->seg_sent, d->outputs_given ? ", the output buffers already handed over" : "");
+            }
             vcm_logf(&d->m, "Format changed: %ux%u (crop %dx%d), buffers %u x %u bytes", (unsigned)fc.video.width,
                   (unsigned)fc.video.height, (int)fc.video.crop[2], (int)fc.video.crop[3],
                   (unsigned)fc.buffer_num_recommended, (unsigned)fc.buffer_size_recommended);
@@ -448,6 +460,7 @@ static int create_component(vcdec *d)
     d->outputs_given = d->sent_any = d->eos_sent = d->eos_back = d->eos_seen = d->heard_output = d->reformat = 0;
     d->seg_sent = d->seg_back = 0;
     d->eos_vc = 0;
+    if (d->cfg.flags & VCDEC_OUT_EARLY) d->outputs_given = 1;   /* (0.4.8: at once, not after the format change) */
     return 0;
 }
 
@@ -513,6 +526,7 @@ int vcdec_open(vcdec **out, const vcdec_config *c)
     }
     live_add(d);
     d->cfg = *c;
+    d->stats.efch_cs = d->stats.first_cs = -1;
     d->m.name = "decoder";
     d->m.pool_name = "vcdec picture";
     d->m.log = c->log;
@@ -621,7 +635,9 @@ int vcdec_poll(vcdec *d)
     }
     now = vcm_now_cs();
     if (d->sent_any && !d->outputs_given && now - d->t_first_send > EFCH_WAIT_CS) {
-        vcm_logf(&d->m, "No format change from the decoder in %d cs: the output buffers handed over anyway", EFCH_WAIT_CS);
+        vcm_logf(&d->m, "No format change from the decoder in %d cs (%u access units sent): the output buffers handed over "
+                 "anyway", EFCH_WAIT_CS, d->seg_sent);
+        d->stats.efch_waits++;
         d->outputs_given = 1;
     }
     /* empty buffers (back unused, or after a format change) to the decoder */
