@@ -156,6 +156,7 @@ typedef struct vcm {
        one service for the whole program), whose handle is smem_handle */
     int smem_open;
     uint32_t smem_handle;
+    int no_reply;                          /* (0.4.10) a reply never came: the component has stopped answering */
 } vcm;
 
 /* SWIs (the host tests' fake under VCDEC_HOST) */

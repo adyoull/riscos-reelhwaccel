@@ -373,6 +373,7 @@ int vcm_transact(vcm *m, uint32_t type, const void *payload, uint32_t len, const
         if (m->failed) { m->waiting = ""; return -1; }
     }
     m->waiting = "";
+    m->no_reply = 1;
     vcm_fail(m, VCM_ERROR, "%s: no reply from the %s in %d cs", what, m->name, REPLY_CS);
     return -1;
 }
@@ -471,6 +472,7 @@ int vcm_event_data(vcm *m, event_msg_t *ev)
 
 int vcm_create(vcm *m, const char *component)
 {
+    m->no_reply = 0;
     uint32_t req[1 + 32 + 1];
     int n;
     memset(req, 0, sizeof req);
@@ -538,17 +540,27 @@ int vcm_simple(vcm *m, uint32_t type, const char *what)
 
 /* ports off, the component off and gone (each step only if it was done).
    closing: every step is tried even if one before it failed (a component
-   left on the VideoCore keeps its memory) */
+   left on the VideoCore keeps its memory), unless the component has
+   stopped answering: (0.4.10) then the rest would only wait 300 cs each
+   (Reel Edit's close, devkit 0.2.18: three steps, 9 s) */
 void vcm_destroy(vcm *m, const port_info_t *in, int *in_on, const port_info_t *out, int *out_on, int closing)
 {
     if (closing) m->failed = 0;
     if (*out_on && !vcm_port_action(m, out, ACTION_DISABLE, "Output disable")) *out_on = 0;
+    if (closing && m->no_reply) goto stuck;
     if (closing) m->failed = 0;
     if (*in_on && !vcm_port_action(m, in, ACTION_DISABLE, "Input disable")) *in_on = 0;
+    if (closing && m->no_reply) goto stuck;
     if (closing) m->failed = 0;
     if (m->enabled && !vcm_simple(m, T_COMPONENT_DISABLE, "Disable")) m->enabled = 0;
+    if (closing && m->no_reply) goto stuck;
     if (closing) m->failed = 0;
     if (m->created && !vcm_simple(m, T_COMPONENT_DESTROY, "Destroy")) m->created = 0;
+    if (!(closing && m->no_reply)) return;
+stuck:
+    m->failed = 0;
+    vcm_logf(m, "The %s stopped answering: the rest of its close not tried (its VideoCore memory may stay taken until "
+             "a restart)", m->name);
 }
 
 int vcm_param_set(vcm *m, const port_info_t *pi, uint32_t id, uint32_t value, const char *what)

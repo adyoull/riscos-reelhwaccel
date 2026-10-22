@@ -583,6 +583,20 @@ static void app_tests(void)
           "VCDecTest, the start (%d):\n%s", ret, o);
     cleaned("VCDecTest start");
     app_efch_late = 0;
+    /* (0.3.9) -L: Reel Edit's backwards play, runs flushed after the EOS, the close timed */
+    o = run_app(&ret, "-L", "12", NULL);
+    CHECK(ret == 0 && strstr(o, "Run 12: from sample ") && strstr(o, "Result: OK - every run gave its pictures") &&
+          recreated >= 11, "VCDecTest -L 12 (%d, %d recreated):\n%s", ret, recreated, o);
+    cleaned("VCDecTest -L");
+    o = run_app(&ret, "-W", "-L", "3");
+    CHECK(ret == 0 && strstr(o, "Run 3: ") && strstr(o, "Result: OK"), "VCDecTest -W -L 3 (%d):\n%s", ret, o);
+    cleaned("VCDecTest -W -L");
+    go_quiet_at_close = 2;                    /* the second decoder stops answering (VCDecTest says so, and closes) */
+    o = run_app(&ret, "-L", "2", NULL);
+    CHECK(ret == 1 && strstr(o, "no reply from the decoder") && strstr(o, "vcdec_close: ") &&
+          strstr(o, "the rest of its close not tried") && !strstr(o, "Destroy: no reply") && !strstr(o, "- Disable: no reply") &&
+          strstr(o, "Result: not every run worked"), "VCDecTest -L, a decoder that stops answering (%d):\n%s", ret, o);
+    go_quiet_at_close = 0;
     corrupt_at = 3;
     o = run_app(&ret, "-t", NULL, NULL);
     CHECK(ret == 0 && strstr(o, "OK - timed") && strstr(o, "Copying the pictures out"), "VCDecTest -t (%d):\n%s", ret, o);

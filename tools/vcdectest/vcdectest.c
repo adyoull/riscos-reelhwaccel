@@ -10,7 +10,7 @@
  * by pts. The VideoCore's chroma can be 1 lower than FFmpeg's here and
  * there: block means within 1 count as "close" (with the .sig file).
  *
- *   vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-W] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
+ *   vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-W] [-L n] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
  *             stream.mp4 expected.crc [expected.sig]
  *      -o file   also add the report to file
  *      -v        every MMAL message, and what vcdec does
@@ -19,6 +19,9 @@
  *                MMALDecode did), not later
  *      -G        (0.3.8) the output buffers to the decoder at once
  *                (VCDEC_OUT_EARLY: vcdec's default since 0.4.9)
+ *      -L n      (0.3.10) as Reel Edit plays backwards: n runs, each from a
+ *                keyframe to the end with the EOS sent, 20 pictures taken,
+ *                then a flush (the decoder created again); the close timed
  *      -W        (0.3.9) the old start (VCDEC_OUT_AFTER_EFCH): the output
  *                buffers only after the decoder's first format change
  *      -D        (0.3.5) no direct output (VCDEC_NO_DIRECT): every picture by
@@ -747,12 +750,81 @@ static int multi_run(int n, const vcdec_config *cfg0, const uint8_t *stream)
 
 /* ---- main ---- */
 
+/* (0.3.10) -L n: as Reel Edit plays backwards. n runs, each from a keyframe
+   (the last first, then each before it, round again): vcdec_flush, the
+   samples from the keyframe to the end and the EOS sent, `take` pictures
+   taken, then the next run's flush before the rest (the decoder created
+   again after the EOS each time). Then the close, timed. 0 if every run
+   gave its pictures and the close was quick. */
+static int reverse_runs(vcdec *d, int n, int take, const uint8_t *f, uint8_t *const planes[3], const int strides[3])
+{
+    int keys[512], nkeys = 0, bad = 0;
+    uint32_t worst_flush = 0, worst_first = 0;
+    for (int i = 0; i < nsamples && nkeys < 512; i++) if (samples[i].key) keys[nkeys++] = i;
+    if (!nkeys) { say("-L: no keyframes\n"); bad = 1; goto closing; }
+    say("-L %d: runs from a keyframe to the end of the clip, the EOS sent, %d pictures taken (half the run, if that's "
+        "fewer), then a flush\n", n, take);
+    for (int run = 0; run < n && !bad; run++) {
+        int k = keys[nkeys - 1 - run % nkeys], cur = k, ready = 0, eos = 0, got = 0, eof = 0;
+        int want = take < (nsamples - k) / 2 ? take : (nsamples - k) / 2 > 0 ? (nsamples - k) / 2 : 1;   /* (not to the end) */
+        uint32_t t0 = now_cs(), t_flush = 0, t_first = 0, last = t0;
+        vcdec_picture pic;
+        int r;
+        if (run) {
+            if ((r = vcdec_flush(d)) != VCDEC_OK) { say("Run %d: vcdec_flush: %s\n", run + 1, vcdec_error(d)); bad = 1; goto closing; }
+            t_flush = now_cs() - t0;
+        }
+        while (got < want && !eof) {
+            while (cur < nsamples) {
+                if (!ready) {
+                    if (to_annexb(f, &samples[cur])) { bad = 1; goto closing; }
+                    if (!au_len) { cur++; continue; }
+                    ready = 1;
+                }
+                r = vcdec_send(d, au, au_len, samples[cur].pts, samples[cur].dts, samples[cur].key ? VCDEC_KEYFRAME : 0);
+                if (r == VCDEC_AGAIN) break;
+                if (r != VCDEC_OK) { say("Run %d: vcdec_send: %s\n", run + 1, vcdec_error(d)); bad = 1; goto closing; }
+                ready = 0;
+                cur++;
+            }
+            if (cur == nsamples && !eos) {
+                if ((r = vcdec_send_eos(d)) == VCDEC_OK) eos = 1;
+                else if (r != VCDEC_AGAIN) { say("Run %d: vcdec_send_eos: %s\n", run + 1, vcdec_error(d)); bad = 1; goto closing; }
+            }
+            while (got < want && (r = vcdec_receive(d, &pic, planes, strides)) == VCDEC_OK) {
+                if (!got) t_first = now_cs() - t0;
+                if (pic.pts < samples[k].pts) { say("Run %d: a picture from before the keyframe (pts %lld)\n", run + 1,
+                                                    (long long)pic.pts); bad = 1; }
+                got++;
+                last = now_cs();
+            }
+            if (r == VCDEC_EOF) eof = 1;
+            else if (r < 0 && r != VCDEC_AGAIN) { say("Run %d: vcdec_receive: %s\n", run + 1, vcdec_error(d)); bad = 1; goto closing; }
+            if (now_cs() - last > 1000) { say("Run %d: no picture for 10 s (%d taken)\n", run + 1, got); bad = 1; goto closing; }
+        }
+        say("Run %d: from sample %d, %d pictures%s; the flush %u cs, the first picture %u cs after it\n", run + 1, k, got,
+            eof ? " (to the end)" : "", (unsigned)t_flush, (unsigned)t_first);
+        if (t_flush > worst_flush) worst_flush = t_flush;
+        if (t_first > worst_first) worst_first = t_first;
+    }
+    say("-L: slowest flush %u cs, slowest first picture %u cs\n", (unsigned)worst_flush, (unsigned)worst_first);
+closing:
+    {
+        uint32_t t0 = now_cs(), cs;
+        vcdec_close(d);
+        cs = now_cs() - t0;
+        say("vcdec_close: %u cs%s\n", (unsigned)cs, cs > 50 ? " - SLOW (the decoder didn't answer)" : "");
+        if (cs > 50) bad = 1;
+    }
+    return bad;
+}
+
 int probe_main(int argc, char **argv)
 {
     const char *stream_name = NULL, *crc_name = NULL, *sig_name = NULL, *x_out = NULL;
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
-    int verbose = 0, sync = 0, no_direct = 0, early_out = 0, wait_efch = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
+    int verbose = 0, sync = 0, no_direct = 0, early_out = 0, wait_efch = 0, reverse_n = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
     int multi_n = 0, exit_after = 0, out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
     vcdec_hold *holds[16];
     uint32_t read_sum = 0;
@@ -779,6 +851,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-D")) no_direct = 1;
         else if (!strcmp(argv[i], "-G")) early_out = 1;
         else if (!strcmp(argv[i], "-W")) wait_efch = 1;
+        else if (!strcmp(argv[i], "-L") && i + 1 < argc) reverse_n = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-g")) gpu_any = 1;
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-E")) seek_end = 1;
@@ -811,7 +884,7 @@ int probe_main(int argc, char **argv)
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16 ||
         multi_n < 0 || multi_n > 8) {
-        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-W] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
+        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-W] [-L n] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
                "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] [-M n] [-X n] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
@@ -894,6 +967,15 @@ int probe_main(int argc, char **argv)
             goto done;
         }
         say("vcdec_open: %u cs\n", (unsigned)(now_cs() - t0));
+    }
+    if (reverse_n > 0) {                   /* (0.3.10) -L */
+        int bad = reverse_runs(d, reverse_n, 20, stream, planes, strides);
+        d = NULL;                          /* (closed, or to be closed below) */
+        say("\nResult: %s\n", bad ? "not every run worked, or the close was slow (see above)" :
+                              "OK - every run gave its pictures, and the close was quick");
+        if (out2) fclose(out2);
+        free(stream);
+        return bad;
     }
 
     t_start = last_picture = now_cs();

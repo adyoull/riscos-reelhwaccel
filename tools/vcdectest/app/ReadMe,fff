@@ -16,6 +16,13 @@ after the end and two 1080p decoders too, the first picture 1-5 cs after
 the first access unit), so vcdec now always does. -W gives the old way,
 for comparison; -G does nothing now. Start runs -W, then the default.
 
+New in 0.3.10 (vcdec 0.4.10): Reverse (-L). Reel Edit plays backwards by decoding short
+runs from a keyframe, flushing after each, and after about a dozen of
+those the decoder stopped answering when it was closed (9 s). Reverse
+does 15 such runs and times the close. Please restart, run Reverse and
+send ResultR. vcdec 0.4.10 also gives up a close after the first step
+that gets no reply (3 s, not 9).
+
 New in 0.3.8 (vcdec 0.4.8): Start. Reel Edit waits about 2 s for the
 first picture at every clip it starts. vcdec gives the decoder its
 output buffers only after the decoder says the picture size (a "format
@@ -124,7 +131,9 @@ The clips (in clips, the same as before):
   flat   1920x1080, 100 pictures of one colour, H.264 High, no B
          frames (0.3.8)
 
-Running it (please restart first, then send back ResultS):
+Running it (please restart first, then send back ResultR):
+  Reverse  New: runs as Reel Edit plays backwards, then the close timed
+           (see above). Writes ResultR.
   Start    New: how long the first picture takes (see above). Writes
            ResultS.
   Direct   New: direct output, checked and timed (see above). Writes

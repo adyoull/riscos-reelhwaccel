@@ -578,6 +578,19 @@ void vcdec_close(vcdec *d)
 {
     if (!d) return;
     destroy_component(d, 1);
+    if (d->m.created && d->direct_port) {  /* (0.4.10) stuck: the buffers it holds are left to it */
+        int kept = 0;
+        for (int i = 0; i < d->nout; i++)
+            if (d->out_state[i] == OB_VC && d->out_buf[i]) {
+                if (d->out_pool[i]) d->m.pool_stuck = 1;   /* (so the pools' handler stays too) */
+                d->out_buf[i] = NULL;       /* (never freed: the decoder may still write a picture into it) */
+                d->out_vch[i] = 0;
+                d->out_state[i] = OB_FREE;
+                kept++;
+            }
+        if (kept) vcm_logf(&d->m, "%d picture buffers left to the decoder that stopped answering (it writes into them "
+                           "itself): their memory stays taken", kept);
+    }
     for (int i = 0; i < d->nout; i++) { vcm_smem_free(&d->m, d->out_vch[i]); d->out_vch[i] = 0; }   /* (held ones too: */
     vcm_smem_close(&d->m);                 /* the decoder is gone) */
     vcm_service_close(&d->m, "the callback is left in the RMA");

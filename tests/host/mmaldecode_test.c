@@ -105,6 +105,7 @@ static unsigned fake_gpu_mb = 76;          /* gpu_mem, as the firmware says it *
 static int inst_decoding_others(void);
 static uint32_t held[32]; static int nheld;
 static int big_efch, corrupt_at = -1, go_quiet, error_event, long_event, awaiting_reformat;
+static int go_quiet_at_close;
 static int mp4_mode, pts_fifo, no_pts_back, efch_after_flush, rx_late, recreated, big_efch_at, efch_ever;
 static uint32_t first_in_cs;
 /* vcdec: a disable that fails; a format change during a flush; ... */
@@ -423,6 +424,11 @@ static void firmware(const uint32_t *m, uint32_t len)
     const uint32_t *p = m + 6;
     CHECK(m[0] == MAGIC && len <= 512, "bad message");
     if (vc_stuck) return;                    /* (until the machine is restarted) */
+    /* go_quiet_at_close n: once n decoders have been created, an input
+       disable, a component disable and a destroy go unanswered (as Reel
+       Edit's close after a dozen re-creates, devkit 0.2.18) */
+    if (go_quiet_at_close && created >= go_quiet_at_close && (m[1] == 5 || m[1] == 7 || (m[1] == 10 && p[1] == 1 && p[2] == 2)))
+        return;
     if (m[1] == 10 && p[1] == 2 && p[2] == 2 && hijacked) { vc_stuck = 1; return; }
     if (in_slow && !slow_running && m[1] == 11 && p[2] == 1 && !need_rx) {   /* an input buffer: waits */
         CHECK(nslow < 32, "too many input buffers waiting");

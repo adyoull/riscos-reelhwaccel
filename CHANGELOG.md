@@ -1,5 +1,41 @@
 # Changes
 
+## vcdec 0.4.10, devkit 0.2.20, VCDecTest 0.3.10: Reel Edit's backwards play (2026-10-22)
+
+Reel Edit (ReelEdit/handoffs 2026-10-22-reelhwaccel-reverse-recreates-close-hang.md,
+devkit 0.2.18) plays backwards by decoding runs from a keyframe near the
+end of a clip: a seek, packets to the end with the end of the stream
+sent, some pictures, then the next seek. Every seek re-created the
+decoder, and each re-create waited 2 s for its format change (fixed by
+0.4.9: buffers are given at every create). After about a dozen, the
+close got no reply to its input disable, its component disable or its
+destroy: 3 × 300 cs, so the desktop froze for 9 s.
+
+- **vcmmal:**
+  - a reply that never comes sets `no_reply`;
+  - when closing, `vcm_destroy` then doesn't try the remaining steps
+    (each would wait 300 cs too), and logs that the component stopped
+    answering. Reel Edit's freeze becomes 3 s instead of 9.
+- **vcdec:**
+  - if the component is still there after the close, and has direct
+    output, the buffers it holds are left to it rather than freed,
+    since it could still write a picture into them;
+  - the pools' handler stays as well.
+- **devkit 0.2.20** (0.2.19 went to riscos-ffmpeg with vcdec 0.4.9).
+- **VCDecTest 0.3.10, `-L n`:**
+  - n runs as Reel Edit's: from a keyframe (the last, then each before
+    it) to the end, with the EOS sent, taking 20 pictures (or half the
+    run), then a flush;
+  - then the close, timed: over 50 cs is SLOW;
+  - a new Obey file, Reverse (ResultR): hd and small with 15 runs, then
+    hd the old way (`-W`).
+- **The fake:** `go_quiet_at_close n` leaves a disable or destroy
+  unanswered once n decoders have been created.
+- **Tests:**
+  - `-L 12`, `-W -L 3`, and a decoder that stops answering (one no
+    reply, the rest of the close not tried);
+  - 2 mutants caught.
+
 ## vcdec 0.4.9, devkit 0.2.19, VCDecTest 0.3.9: no 2 s wait at the start (2026-10-22)
 
 VCDecTest 0.3.8's Start on a Pi 4 (gpu_mem=128): with the output buffers
