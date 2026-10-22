@@ -10,6 +10,16 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.7 (vcdec 0.4.7): 0.3.6's Multi showed three 1080p decoders
+working at once (60 pictures a second together), and every decoder
+getting direct output. But with 3 and 4 small decoders, one ended a
+picture short. With direct output the VideoCore can hand back the end
+of the stream before the last picture, and vcdec took that as the end.
+Now a picture that comes after it is taken first, and vcdec waits a
+moment at the end while pictures are still owed. Multi now lists any
+missing pictures, and says when a picture came after the end. Please
+restart, run Multi and send ResultMulti.
+
 New in 0.3.6 (vcdec 0.4.6): one shared-memory service for the whole
 program. With 0.3.5, Multi showed that direct output lets two 1080p
 decoders work at once (before, the second waited for the first), but the

@@ -1,5 +1,36 @@
 # Changes
 
+## vcdec 0.4.7: a picture after the end of the stream (2026-10-22)
+
+VCDecTest 0.3.6's Multi on a Pi 4 (gpu_mem=128), with vcdec 0.4.6:
+
+- **Three 1080p decoders at once:** all three decoded all 150 pictures
+  right, 60 a second together, every one direct.
+- **The small clip with 2, 3 and 4 decoders:** every decoder had direct
+  output, so one shared SMEM service works.
+- **One picture short:** in the 3- and 4-decoder runs, one decoder reached
+  its end with 59 of 60 pictures, none wrong. That never happened with
+  bulk transfers, which come in order. With direct output, the empty EOS
+  buffer can come back before the last picture, and vcdec ended the
+  stream there.
+
+Changes in 0.4.7:
+
+- **vcdec (rule 10):**
+  - a picture that comes after the empty EOS is put before it, and
+    `stats.after_eos` counts these;
+  - with direct output, the end waits up to 20 cs while fewer pictures
+    have come back than access units were sent since the last flush or
+    create (a stream whose access units don't each make a picture only
+    waits that long at its end).
+- **The fake:** `zc_eos_early` sends the EOS before the last picture,
+  which follows on its own 15 cs later. It reproduced the Pi's 11-of-12.
+- **Tests:** the new case, and 4 mutants caught (no reordering, no wait,
+  access units not counted, too short a wait). One survives: the counts
+  not reset at a flush. That only makes the end wait 20 cs longer.
+- **VCDecTest 0.3.7:** Multi lists the missing pictures and says when
+  pictures came after the EOS.
+
 ## vcdec 0.4.6: one shared-memory service for the program (2026-10-22)
 
 VCDecTest 0.3.5 on a Pi 4 (gpu_mem=128), with vcdec 0.4.5:

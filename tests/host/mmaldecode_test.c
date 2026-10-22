@@ -92,6 +92,8 @@ static int multi_full_way, multi_room = 99;
 static int zc_out, zc_refuse, bb_zc;
 static int zc_bulk_every;                    /* (vcdec 0.4.5) every n'th picture by bulk all the same */
 static int zc_this;                          /* the picture being sent comes zero copy */
+static int zc_eos_early;                     /* (vcdec 0.4.7) zero copy: the empty EOS back before the last picture */
+static uint32_t zc_last_due;                 /* (the last picture then sent on its own, 15 cs later: this time) */
 static uint32_t out_data[64];              /* each output buffer's data field, by client_context */
 static void zc_write(uint32_t handle, const void *src, uint32_t n);
 static int in_pci(uint32_t a, uint32_t n);
@@ -338,6 +340,14 @@ static void produce(void)
         ev[1] = 3; ev[3] = 0x4F525245u;
         post(16, ev, sizeof ev, 0);
         error_event = 0;
+        return;
+    }
+    if (zc_eos_early && zc_out && mp4_mode && eos_in && !eos_out_sent && frames_made == n - 1 && nout >= 2) {
+        bb_zc = 1;                           /* (the last picture follows on the next turn) */
+        buffer_back(2, (uint32_t)out_bufs[--nout], 0, 1, last_out_pts);
+        bb_zc = 0;
+        eos_out_sent = 1;
+        zc_last_due = time_cs + 15;
         return;
     }
     if (frames_made < n) {
@@ -777,7 +787,7 @@ static void late_rx_finish(void)
     X(au_n) X(au_pieces) X(au_pts) X(pending_pts) X(au_pts_seen) X(pending_flags) X(in_au) X(need_idr) \
     X(aus_decoded) X(n_au_pts) X(dpb) X(ready) X(ndpb) X(nready) X(flushed) X(last_out_pts) X(eos_with_data) \
     X(eos_lost) X(max_ready_pts) X(disc_seen) X(comp_cycles) X(flush_while_off) X(eos_then_flush) X(fifo_pts) \
-    X(nfifo) X(outq_len) X(noutq) X(deferred_len) X(ndeferred) X(deferred_ever) X(zc_out) X(out_data)
+    X(nfifo) X(outq_len) X(noutq) X(deferred_len) X(ndeferred) X(deferred_ever) X(zc_out) X(out_data) X(zc_last_due)
 typedef struct {
 #define X(v) __typeof__(v) v;
     INST_VARS
@@ -1031,6 +1041,10 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
     }
     if (n == 0x42 || n == 0x59204) late_rx_finish();
     if (n == 0x59204) slow_tick();
+    if (n == 0x59204 && zc_last_due && (int32_t)(time_cs - zc_last_due) >= 0 && (R[0] & 0xFFFF) == 0x5E7) {
+        zc_last_due = 0;
+        produce();
+    }
     if (swi_hook && swi_hook(n, r, &he)) return he;
     switch (n) {
     case 0x42: R[0] = time_cs++; return NULL;
@@ -1317,7 +1331,7 @@ static void reset_fake(void)
 {
     inst_reset();
     multi = 0; multi_room = 99; multi_full_way = 0; vc_full = 0; fake_gpu_mb = 76;
-    zc_out = zc_refuse = bb_zc = zc_bulk_every = zc_this = 0; memset(out_data, 0, sizeof out_data);
+    zc_out = zc_refuse = bb_zc = zc_bulk_every = zc_this = zc_eos_early = zc_last_due = 0; memset(out_data, 0, sizeof out_data);
     smem_present = 1; smem_refuse_import = smem_chatty = smem_is_open = smem_imports = smem_frees = smem_dropped = 0;
     nsmem_imp = 0; smem_next_h = 0; memset(smem_slot, 0, sizeof smem_slot);
     smem_stub = 0; smem_stubs_claimed = smem_stubs_freed = 0;

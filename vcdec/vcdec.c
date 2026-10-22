@@ -32,7 +32,13 @@
  *      (is_zero_copy): no bulk transfer, and no copy of it in gpu_mem
  *      (SMEMProbe 0.1). A picture that comes without it is received as
  *      before; without the service, an import or the parameter, the
- *      pictures come by bulk transfer as before.
+ *      pictures come by bulk transfer as before;
+ *  10. (0.4.7) with direct output the empty EOS buffer can come back
+ *      before the last picture (VCDecTest 0.3.6's Multi on a Pi 4: 3 and 4
+ *      decoders at once, one picture short at the end): a picture after
+ *      it is put before it, and the end waits up to EOS_WAIT_CS while
+ *      fewer pictures have come than access units were sent since the
+ *      last flush.
  *
  * The MMAL connection itself (messages, bulk transfers, the component and
  * its ports, memory the VideoCore reaches) is vcmmal.c's, shared with
@@ -54,6 +60,7 @@
 #define MAX_OUT        16
 #define HOLD_SPARE     2                   /* buffers vcdec_receive_hold leaves to the decoder */
 #define EFCH_WAIT_CS   200
+#define EOS_WAIT_CS    20                  /* (rule 10) */
 #define MAX_W          1920
 #define MAX_H          1088
 #define COPY_SVC 4                         /* (vcdec_copy_rows's mode: in SVC mode) */
@@ -113,6 +120,9 @@ struct vcdec {
     uint32_t out_vch[MAX_OUT];             /* each buffer's VideoCore handle (imported), or 0 */
     int direct;                            /* wanted, and nothing has refused it yet */
     int direct_port;                       /* MMAL_PARAMETER_ZERO_COPY set on this component's output */
+    /* (0.4.7) rule 10: since the last flush (or create) */
+    unsigned seg_sent, seg_back;           /* access units sent, pictures back */
+    uint32_t eos_seen_cs;                  /* when the EOS buffer came */
 };
 
 static char open_err[200];
@@ -268,6 +278,18 @@ static void handle_msg(vcdec *d, uint32_t got)
             d->out_state[k] = OB_HELD;
             d->nheld++;
             d->heard_output = 1;
+            if (b->length) d->seg_back++;
+            if (d->eos_seen && b->length) {    /* (rule 10) after the empty EOS: before it */
+                int j = 0;
+                while (j < d->nheld - 1 && !((d->held[j].flags & FLAG_EOS) && !d->held[j].length)) j++;
+                if (j < d->nheld - 1) {
+                    held_t t = *p;
+                    memmove(&d->held[j + 1], &d->held[j], sizeof d->held[0] * (size_t)(d->nheld - 1 - j));
+                    d->held[j] = t;
+                    if (!d->stats.after_eos++) vcm_logf(&d->m, "A picture after the EOS: taken before it");
+                }
+            }
+            if ((b->flags & FLAG_EOS) && !d->eos_seen) d->eos_seen_cs = vcm_now_cs();
             if (b->flags & FLAG_EOS) d->eos_seen = 1;
             if (d->cfg.flags & VCDEC_SYNC_RECEIVE) vcm_wait_received(&d->m, p->seq);
         }
@@ -424,6 +446,7 @@ static int create_component(vcdec *d)
     d->out_on = 1;
     /* (the output's buffers: after the decoder's first format change) */
     d->outputs_given = d->sent_any = d->eos_sent = d->eos_back = d->eos_seen = d->heard_output = d->reformat = 0;
+    d->seg_sent = d->seg_back = 0;
     d->eos_vc = 0;
     return 0;
 }
@@ -681,6 +704,7 @@ int vcdec_send(vcdec *d, const void *data, size_t len, int64_t pts, int64_t dts,
         off += n;
     }
     d->stats.sent++;
+    d->seg_sent++;
     return VCDEC_OK;
 }
 
@@ -738,7 +762,9 @@ static int head_ready(vcdec *d)
         if ((r = vcm_received(&d->m, d->held[0].seq)) < 0) return vcm_fail(&d->m, VCDEC_ERROR, "A bulk receive was aborted");
         if (!r) return 0;
         if (!(d->held[0].flags & FLAG_EOS) || d->held[0].length) return 1;
-        release_head(d);                   /* an empty EOS: the end */
+        /* (rule 10) an empty EOS: the end, unless pictures may still come */
+        if (d->direct_port && d->seg_back < d->seg_sent && vcm_now_cs() - d->eos_seen_cs < EOS_WAIT_CS) return 0;
+        release_head(d);
     }
 }
 
@@ -922,6 +948,7 @@ int vcdec_flush(vcdec *d)
     for (int i = 0; i < d->nout; i++)     /* (the flush or the disables sent back the decoder's) */
         if (d->out_state[i] == OB_HELD || (d->eos_sent && d->out_state[i] != OB_USER)) d->out_state[i] = OB_FREE;
     d->eos_back = d->eos_seen = 0;
+    d->seg_sent = d->seg_back = 0;
     if (d->eos_sent) {
         d->stats.recreated++;
         vcm_logf(&d->m, "Flush after the EOS: the decoder created again");

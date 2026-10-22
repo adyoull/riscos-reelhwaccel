@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCDEC_VERSION "0.4.6"
+#define VCDEC_VERSION "0.4.7"
 
 /* results */
 #define VCDEC_OK           0
@@ -116,6 +116,8 @@ typedef struct {
        no bulk transfer and no copy in gpu_mem. direct_on: it's set up;
        direct: the pictures that came that way */
     unsigned direct_on, direct;
+    /* (0.4.7) pictures that came after the (empty) EOS buffer, taken before it */
+    unsigned after_eos;
 } vcdec_stats;
 
 void vcdec_config_init(vcdec_config *c);

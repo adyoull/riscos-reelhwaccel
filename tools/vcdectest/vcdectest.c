@@ -718,6 +718,13 @@ static int multi_run(int n, const vcdec_config *cfg0, const uint8_t *stream)
                 q->st.pool_buffers,
                 (unsigned)(q->st.pool_buffers * bufsz / 1048576), (unsigned)(q->st.pool_buffers * bufsz % 1048576 * 10 / 1048576),
                 q->copied, q->st.direct);
+        if (q->opened && missing) {        /* (0.3.7) which: FFmpeg's picture numbers, display order */
+            int shown = 0;
+            say("  Decoder %d missing:", k + 1);
+            for (int j = 0; j < nwant && shown < 8; j++) if (!q->seen[j]) { say(" %d", j); shown++; }
+            say("%s of 0..%d\n", missing > shown ? " ..." : "", nwant - 1);
+        }
+        if (q->st.after_eos) say("  Decoder %d: %u pictures came after the EOS (taken before it)\n", k + 1, q->st.after_eos);
     }
     if (t_end > t0)
         say("Together: %d pictures in %u.%02u s, %u a second (%u for each of the %d open)\n", total,
@@ -1030,8 +1037,8 @@ int probe_main(int argc, char **argv)
     say("Output buffers at the end: %u in pools, %u in PCI memory\n", stats.pool_buffers, stats.pci_buffers);
     if (no_direct) say("Direct output: off (-D): every picture by bulk transfer\n");
     else if (!stats.direct_on && !stats.direct) say("Direct output: not set up (the log says why): pictures by bulk transfer\n");
-    else say("Direct output: %u of the decoder's pictures written straight into vcdec's buffers (no bulk transfer)\n",
-             stats.direct);
+    else say("Direct output: %u of the decoder's pictures written straight into vcdec's buffers (no bulk transfer)%s\n",
+             stats.direct, stats.after_eos ? "; some came after the EOS (taken before it)" : "");
     if (bench && eof) {                    /* -K: one picture's copy, each way */
         static const struct { unsigned way; const char *name; } ways[3] = {
             { VCDEC_COPY_LDM4, "LDM 4 words" }, { VCDEC_COPY_LDM8, "LDM 8 words" }, { VCDEC_COPY_NEON, "NEON 64 bytes" } };

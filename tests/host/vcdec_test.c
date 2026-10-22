@@ -373,6 +373,9 @@ static void direct_tests(void)
     direct_case("zero copy refused", &zc_refuse, 1, 0, "No direct output (Zero copy on the output: ");
     /* every 3rd picture comes by bulk (and the EOS, empty, direct): received as before */
     direct_case("some by bulk", &zc_bulk_every, 3, 8, NULL);
+    /* (0.4.7) the empty EOS comes back before the last picture (as a Pi 4 seemed to with 3 and 4
+       decoders at once, VCDecTest 0.3.6): the picture waited for, and taken before the end */
+    direct_case("EOS before the last picture", &zc_eos_early, 1, 12, "A picture after the EOS");
     /* the service answers each FREE, and sends a message of its own: dropped */
     big_efch_at = 3;                         /* (bigger buffers part way: three freed, three imported) */
     direct_case("SMEM chatty", &smem_chatty, 1, 12, NULL);
