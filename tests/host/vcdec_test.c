@@ -285,7 +285,7 @@ static void hold_tests(void)
     r = feed_hold(d, 6, 12, 1);
     CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics && !hold_refused, "hold, seek before the end: %d, %d pictures (%d wrong), %d refused",
           r, ngot, wrong_pics, hold_refused);
-    CHECK(vcdec_flush(d) == VCDEC_OK && recreated == 1, "hold: flush after the end (%d held)", nhq);
+    CHECK(vcdec_flush(d) == VCDEC_OK && recreated == 2, "hold: flush after the end (%d held)", nhq);   /* (both flushes: direct) */
     ngot = 0;
     r = feed_hold(d, 6, 12, 1);
     vcdec_get_stats(d, &s);
@@ -404,6 +404,25 @@ static void direct_tests(void)
     /* (0.4.7) the empty EOS comes back before the last picture (as a Pi 4 seemed to with 3 and 4
        decoders at once, VCDecTest 0.3.6): the picture waited for, and taken before the end */
     direct_case("EOS before the last picture", &zc_eos_early, 1, 12, "A picture after the EOS");
+    /* (0.4.11) a seek before the end with direct output: a picture from before it comes after the
+       flush (the Pi, Reverse): a new decoder instead of a flush, so nothing old comes */
+    for (int k = 0; k < 2; k++) {
+        vcdec *d = open70(k ? VCDEC_NO_DIRECT : 0);
+        int r;
+        zc_stale_after_flush = 1;
+        setup_planes(0, 0);
+        ngot = wrong_pics = 0;
+        r = feed(d, 0, 6, 0);
+        for (int i = 0; i < 30 && ngot < 3; i++) take(d);
+        CHECK(r == VCDEC_OK && vcdec_flush(d) == VCDEC_OK && recreated == (k ? 0 : 1),
+              "seek before the end (%s): %d, %d recreated", k ? "bulk" : "direct", r, recreated);
+        ngot = wrong_pics = 0;
+        r = feed(d, 6, 12, 1);
+        CHECK(r == VCDEC_EOF && got_is(6, 6) && !wrong_pics, "seek before the end (%s): %d, %d pictures (%d wrong)",
+              k ? "bulk" : "direct", r, ngot, wrong_pics);
+        close70(d, k ? "seek before the end, bulk" : "seek before the end, direct");
+        zc_stale_after_flush = 0;
+    }
     /* the service answers each FREE, and sends a message of its own: dropped */
     big_efch_at = 3;                         /* (bigger buffers part way: three freed, three imported) */
     direct_case("SMEM chatty", &smem_chatty, 1, 12, NULL);
@@ -549,7 +568,11 @@ static void app_tests(void)
     o = run_app(&ret, "-S", NULL, NULL);
     CHECK(ret == 0 && strstr(o, "-S: each bulk") && strstr(o, "Result: OK"), "VCDecTest -S (%d):\n%s", ret, o);
     cleaned("app -S");
-    o = run_app(&ret, "-s", "3", NULL);
+    o = run_app(&ret, "-s", "3", NULL);           /* (0.4.11: direct output, so a new decoder, not FLUSH) */
+    CHECK(ret == 0 && !flushes && recreated == 1 && !eos_lost && strstr(o, "the EOS not") && strstr(o, "all of them") &&
+          strstr(o, "Result: OK"), "VCDecTest -s 3 (%d, %d recreated):\n%s", ret, recreated, o);
+    cleaned("app -s");
+    o = run_app(&ret, "-s", "3", "-D");           /* (bulk transfers: FLUSH, as before) */
     printf("%s", o);
     CHECK(ret == 0 && flushes == 2 && !recreated && !eos_lost && strstr(o, "the EOS not") && strstr(o, "sample 6, pts 240000") &&
           strstr(o, "from the keyframe on, 6 (") && strstr(o, "all of them") && strstr(o, "Result: OK"),
@@ -1064,9 +1087,9 @@ int main(int argc, char **argv)
     close70(d, "peek");
 
     /* ---- seeking ---- */
-    /* before the end: the first GOP, three pictures, FLUSH, the second GOP */
+    /* before the end: the first GOP, three pictures, FLUSH, the second GOP (bulk: FLUSH since 0.4.11) */
     for (int late = 0; late < 2; late++) {
-        d = open70(0);
+        d = open70(VCDEC_NO_DIRECT);
         rx_late = late;
         setup_planes(0, 0);
         ngot = wrong_pics = 0;
@@ -1266,8 +1289,8 @@ int main(int argc, char **argv)
         rx_late = 0;
     }
 
-    /* a format change during a flush: acted on, the decoder waiting for it */
-    d = open70(0);
+    /* a format change during a flush: acted on, the decoder waiting for it (bulk: FLUSH) */
+    d = open70(VCDEC_NO_DIRECT);
     setup_planes(0, 0);
     ngot = wrong_pics = 0;
     feed(d, 0, 6, 0);

@@ -16,6 +16,14 @@ after the end and two 1080p decoders too, the first picture 1-5 cs after
 the first access unit), so vcdec now always does. -W gives the old way,
 for comparison; -G does nothing now. Start runs -W, then the default.
 
+New in 0.3.11 (vcdec 0.4.11): 0.3.10's Reverse closed quickly every
+time (45 re-creates), but in the first hd run a picture from before a
+seek came after it: with direct output, a flush can't stop a picture
+the decoder had already started. vcdec now makes a new decoder at every
+seek when it has direct output (1-3 cs on the Pi, as after the end).
+Please restart, run Reverse again and send ResultR: every run should
+say OK.
+
 New in 0.3.10 (vcdec 0.4.10): Reverse (-L). Reel Edit plays backwards by decoding short
 runs from a keyframe, flushing after each, and after about a dozen of
 those the decoder stopped answering when it was closed (9 s). Reverse

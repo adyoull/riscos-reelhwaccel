@@ -21,9 +21,11 @@
  *      words. The pts comes back with its picture, in display order;
  *   5. EOS on an empty buffer of its own, sent only at the real end;
  *   6. a seek is FLUSH of the input, then the output: the pictures already
- *      decoded come back during it and are dropped. After an EOS a flush
- *      isn't enough (the next EOS loses the reorder-delay pictures), so the
- *      component is destroyed and created again;
+ *      decoded come back during it and are dropped (0.4.11: with direct
+ *      output, a new decoder instead: a picture could come after it).
+ *      After an EOS a flush isn't enough (the next EOS loses the
+ *      reorder-delay pictures), so the component is destroyed and created
+ *      again;
  *   7. gpu_mem must be 128 or more for 1080p;
  *   8. pictures are copied out of PCI memory by LDM/STM (vcdec_copy.S);
  *   9. (0.4.5) direct output: the output buffers imported through the
@@ -946,7 +948,7 @@ int vcdec_receive(vcdec *d, vcdec_picture *pic, uint8_t *const planes[3], const 
 
 int vcdec_flush(vcdec *d)
 {
-    int r;
+    int r, recreate;
     if ((r = vcdec_poll(d)) != VCDEC_OK) return r;
     d->stats.flushes++;
     if (d->parked) {                       /* (0.4.3) destroyed at the end: created again */
@@ -962,7 +964,12 @@ int vcdec_flush(vcdec *d)
         d->eos_sent = d->eos_back = 0;
         return VCDEC_OK;
     }
-    if (d->eos_sent) {
+    /* (0.4.11) with direct output a picture decoded before the flush can
+       still come after it (VCDecTest 0.3.10's Reverse on a Pi 4: pts
+       733333 after a seek to 3333333): a new decoder instead, as after an
+       EOS (1-3 cs on the Pi) */
+    recreate = d->eos_sent || (d->direct_port && d->sent_any);
+    if (recreate) {
         /* after an EOS a flush leaves the decoder losing its last pictures
            at the next EOS (0.14-0.17 on the Pi): a new one instead */
         destroy_component(d, 0);
@@ -979,12 +986,12 @@ int vcdec_flush(vcdec *d)
     d->stats.discarded += (unsigned)d->nheld;
     d->nheld = 0;
     for (int i = 0; i < d->nout; i++)     /* (the flush or the disables sent back the decoder's) */
-        if (d->out_state[i] == OB_HELD || (d->eos_sent && d->out_state[i] != OB_USER)) d->out_state[i] = OB_FREE;
+        if (d->out_state[i] == OB_HELD || (recreate && d->out_state[i] != OB_USER)) d->out_state[i] = OB_FREE;
     d->eos_back = d->eos_seen = 0;
     d->seg_sent = d->seg_back = 0;
-    if (d->eos_sent) {
+    if (recreate) {
         d->stats.recreated++;
-        vcm_logf(&d->m, "Flush after the EOS: the decoder created again");
+        vcm_logf(&d->m, "Flush %s: the decoder created again", d->eos_sent ? "after the EOS" : "with direct output");
         if (create_component(d)) return d->m.failed;
         return VCDEC_OK;
     }

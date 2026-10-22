@@ -96,7 +96,12 @@ static int multi_full_way, multi_room = 99;
 static int zc_out, zc_refuse, bb_zc;
 static int zc_bulk_every;                    /* (vcdec 0.4.5) every n'th picture by bulk all the same */
 static int zc_this;                          /* the picture being sent comes zero copy */
-static int zc_eos_early;                     /* (vcdec 0.4.7) zero copy: the empty EOS back before the last picture */
+static int zc_eos_early;
+/* (vcdec 0.4.11) zc_stale_after_flush: after an output flush with zero copy,
+   the first buffer given back is filled with the last picture made before
+   it, at its pts (VCDecTest 0.3.10's Reverse on a Pi 4) */
+static int zc_stale_after_flush, stale_due;
+static uint64_t stale_pts;                     /* (vcdec 0.4.7) zero copy: the empty EOS back before the last picture */
 static uint32_t zc_last_due;                 /* (the last picture then sent on its own, 15 cs later: this time) */
 static uint32_t out_data[64];              /* each output buffer's data field, by client_context */
 static void zc_write(uint32_t handle, const void *src, uint32_t n);
@@ -385,6 +390,7 @@ static void produce(void)
                 zc_this = zc_out && !(zc_bulk_every && frames_made % zc_bulk_every == zc_bulk_every - 1);
                 if (zc_this) zc_write(ctx < 64 ? out_data[ctx] : 0, cur_frame, size);   /* (straight into its memory) */
                 bb_zc = zc_this;
+                stale_pts = pts;
                 buffer_back(2, ctx, size, fl, pts);
                 bb_zc = 0;
             }
@@ -450,7 +456,7 @@ static void firmware(const uint32_t *m, uint32_t len)
             in_au = 0; au_n = 0; ndpb = nready = 0; need_idr = 1; eos_in = eos_out_sent = 0; nfifo = 0;
             eos_then_flush = 0; efch_sent = 0; aus_decoded = 0; last_out_pts = max_ready_pts = UNKNOWN;
             efch_ever = 0; first_in_cs = 0;
-            zc_out = 0;                      /* (zero copy is the old component's: set again, or none) */
+            zc_out = 0; stale_due = 0;                      /* (zero copy is the old component's: set again, or none) */
             recreated++;
         }
         created++;
@@ -502,7 +508,7 @@ static void firmware(const uint32_t *m, uint32_t len)
             r = 7;                           /* EIO, and the port stays on */
         } else {                               /* 2 disable, 3 flush: the port's buffers back before the reply */
             if (p[2] == 2) port_on[port] = 0;
-            else { flushes++; if (!port_on[port]) flush_while_off++; }
+            else { flushes++; if (!port_on[port]) flush_while_off++; if (port == 2 && zc_out && zc_stale_after_flush && frames_made) stale_due = 1; }
             if (port == 2) {
                 if (p[2] == 2) disables_out++;
                 while (nout) buffer_back(2, (uint32_t)out_bufs[--nout], 0, 0, UNKNOWN);
@@ -587,6 +593,15 @@ static void firmware(const uint32_t *m, uint32_t len)
             CHECK(zc_out || !mp4_mode || in_pci(p[8 + 3], 4), "output buffer %u's data &%X: not memory, without zero copy",
                   d->ctx, p[8 + 3]);
             if (nout > nout_max) nout_max = nout;
+            if (stale_due && zc_out && mp4_mode) {   /* (a picture from before the flush, after it) */
+                uint32_t size = ((out_w + 31) & ~31u) * ((out_h + 15) & ~15u) * 3 / 2;
+                stale_due = 0;
+                nout--;
+                zc_write(d->ctx < 64 ? out_data[d->ctx] : 0, cur_frame, size);
+                bb_zc = 1;
+                buffer_back(2, d->ctx, size, 4, stale_pts);
+                bb_zc = 0;
+            }
         }
         produce();
         break;
@@ -1342,7 +1357,8 @@ static void reset_fake(void)
 {
     inst_reset();
     multi = 0; multi_room = 99; multi_full_way = 0; vc_full = 0; fake_gpu_mb = 76;
-    zc_out = zc_refuse = bb_zc = zc_bulk_every = zc_this = zc_eos_early = zc_last_due = 0; memset(out_data, 0, sizeof out_data);
+    zc_out = zc_refuse = bb_zc = zc_bulk_every = zc_this = zc_eos_early = zc_last_due = 0;
+    zc_stale_after_flush = stale_due = 0; memset(out_data, 0, sizeof out_data);
     smem_present = 1; smem_refuse_import = smem_chatty = smem_is_open = smem_imports = smem_frees = smem_dropped = 0;
     nsmem_imp = 0; smem_next_h = 0; memset(smem_slot, 0, sizeof smem_slot);
     smem_stub = 0; smem_stubs_claimed = smem_stubs_freed = 0;

@@ -1,6 +1,39 @@
 # Changes
 
-## vcdec 0.4.10, devkit 0.2.20, VCDecTest 0.3.10: Reel Edit's backwards play (2026-10-22)
+## vcdec 0.4.11, devkit 0.2.21, VCDecTest 0.3.11: a new decoder at every seek with direct output (2026-10-22)
+
+VCDecTest 0.3.10's Reverse on a Pi 4 (gpu_mem=128):
+
+- **Quick closes:** 15 runs on hd, 15 on small and 15 on hd the old way
+  (`-W`) re-created the decoder 45 times, and every close took 0–2 cs.
+  Reel Edit's 9 s close didn't happen here.
+- **A picture from before a seek, after it:** in the first hd run, run
+  4 (a seek before the end, so a FLUSH, not a re-create) got a picture
+  from run 3 (pts 733333) after the flush. With direct output, a picture
+  the decoder had already started can come after the flush has
+  returned its buffers. That's the same kind of out-of-order return as
+  0.4.7's EOS.
+
+Changes:
+
+- **vcdec (rule 6):** with direct output, a flush after anything was sent
+  destroys the decoder and creates a new one, as after an EOS. The log
+  says "Flush with direct output: the decoder created again". On the Pi
+  this took 1–3 cs, with the first picture 3–7 cs later at 1080p. With
+  bulk transfers it still FLUSHes, as Pi-proven.
+- **The fake:** `zc_stale_after_flush` fills the first buffer given after
+  an output flush with the last picture from before it, and reproduced
+  the Pi's extra picture.
+- **Tests:**
+  - a seek before the end with direct output and with bulk;
+  - the FLUSH tests now run with `VCDEC_NO_DIRECT`;
+  - VCDecTest `-s 3`, with and without `-D`;
+  - h264_vchiq's seek test expects the new decoder;
+  - 2 mutants caught.
+- **devkit 0.2.21 and VCDecTest 0.3.11.** 0.2.20 and 0.3.10 were only in
+  r54.
+
+## vcdec 0.4.10, VCDecTest 0.3.10: Reel Edit's backwards play (2026-10-22)
 
 Reel Edit (ReelEdit/handoffs 2026-10-22-reelhwaccel-reverse-recreates-close-hang.md,
 devkit 0.2.18) plays backwards by decoding runs from a keyframe near the
@@ -21,7 +54,6 @@ destroy: 3 × 300 cs, so the desktop froze for 9 s.
     output, the buffers it holds are left to it rather than freed,
     since it could still write a picture into them;
   - the pools' handler stays as well.
-- **devkit 0.2.20** (0.2.19 went to riscos-ffmpeg with vcdec 0.4.9).
 - **VCDecTest 0.3.10, `-L n`:**
   - n runs as Reel Edit's: from a keyframe (the last, then each before
     it) to the end, with the EOS sent, taking 20 pictures (or half the

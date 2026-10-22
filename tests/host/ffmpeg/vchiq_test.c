@@ -234,8 +234,9 @@ int main(void)
             avcodec_flush_buffers(r.dec);
             ngot = 0;
             e = decode(&r, 0);
-            CHECK(e == AVERROR_EOF && got_is(6, 6) && !wrong && *fake_vc_var("flushes") == 2 &&
-                  !*fake_vc_var("recreated") && !*fake_vc_var("eos_lost"),
+            /* (vcdec 0.4.11: direct output, so the seek makes a new decoder rather than FLUSH) */
+            CHECK(e == AVERROR_EOF && got_is(6, 6) && !wrong && !*fake_vc_var("flushes") &&
+                  *fake_vc_var("recreated") == 1 && !*fake_vc_var("eos_lost"),
                   "seek before the end (late %d): %d, %d frames from %d, %d flushes", late, e, ngot, ngot ? got[0] : -1,
                   *fake_vc_var("flushes"));
         }
