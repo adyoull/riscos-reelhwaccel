@@ -1,5 +1,14 @@
 # Changes
 
+## Release 0.2.18 (2026-10-22)
+
+The GitHub release `v0.2.18`: devkit 0.2.18 (vcdec 0.4.7, vcenc 0.1.5,
+hevcdec 0.1.14) and VCDecTest 0.3.7. Everything since v0.2.17 is below:
+direct output (SMEMProbe 0.1, vcdec 0.4.5), one shared-memory service per
+program (0.4.6), and a picture after the end of the stream (0.4.7). The
+devkit README now says up to three 1080p decoders at once. The text is
+`release-notes/v0.2.18.md`.
+
 ## vcdec 0.4.7: a picture after the end of the stream (2026-10-22)
 
 VCDecTest 0.3.6's Multi on a Pi 4 (gpu_mem=128), with vcdec 0.4.6:

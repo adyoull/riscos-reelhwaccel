@@ -178,6 +178,9 @@ licence as Linux's drivers that ReelHWAccel was made against.
   treated as derived from it, and so has the driver's licence: GPL
   version 2. vcenc, its encoder, is the same, with Linux's
   bcm2835-codec driver as its reference for how the encoder is set up.
+  Its client for the firmware's shared-memory service (direct output,
+  vcdec 0.4.5) is likewise made with Linux's vc-sm-cma driver as its
+  reference.
 - hevcdec is the same for the HEVC block: its own code over RISC OS,
   with Linux's rpivid driver (GPL version 2) as its reference for the
   block's registers and for what `rpivid_h265.c` expects of the rest of
@@ -198,6 +201,7 @@ What it's built from, and how:
 | Raspberry Pi userland, MMAL client (`interface/mmal/vc/mmal_vc_msgs.h`, `mmal_vc_client.c`) | BSD-3-Clause (Broadcom) | MMAL message layouts and how the client handles them, checked against these: no code copied |
 | Linux `vchiq-mmal` (`mmal-msg*.h`, `mmal-vchiq.c`) | GPL-2.0 only | the reference for the MMAL message formats and how the client handles them: none of its code, but treated as derived from it (hence GPL version 2) |
 | Linux `bcm2835-codec` (`bcm2835-v4l2-codec.c`) and userland's `mmal_parameters_video.h` | GPL-2.0 only; BSD-3-Clause | vcenc's encoder setup (the parameters, and the order Linux sets them in) and their numbers: no code copied |
+| Linux `vc-sm-cma` (`vc_sm_defs.h`, `vc_sm_cma_vchi.c`, `vc_sm.c`) and `vchiq-mmal`'s zero copy (rpi-6.6.y) | GPL-2.0 only | vcmmal's client for the firmware's "SMEM" service (its messages: import, free) and MMAL zero copy (a buffer's data as the VideoCore's handle): none of their code, but treated as derived from them |
 | Linux `rpivid` (`rpivid_hw.h`, `rpivid.h`, `rpivid_hw.c`, `rpivid_video.c`) and device tree (`bcm2711*.dtsi`) | GPL-2.0 only | the reference for the HEVC block's registers, addresses, clock and interrupt, and what `rpivid_h265.c` expects of the rest of the driver: none of their code (hevcdec's `rpivid.h`, `rpivid_hw.h` and `rpivid_video.h` are our own), but treated as derived from them |
 | Linux `rpivid_h265.c` (rpi-6.6.y) | GPL-2.0-or-later | `hevcdec/rpivid_h265.c`, unchanged: the block's commands for each picture |
 | Linux `hevc-ctrls.h` (V4L2 stateless HEVC controls) | BSD-3-Clause or GPL-2.0 (uAPI) | `hevcdec/hevc_ctrls.h`, with plain types |
