@@ -10,6 +10,16 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.6 (vcdec 0.4.6): one shared-memory service for the whole
+program. With 0.3.5, Multi showed that direct output lets two 1080p
+decoders work at once (before, the second waited for the first), but the
+firmware refused a third program connection to its shared-memory
+service, so a program's third and fourth decoders fell back to bulk
+transfers. Now every decoder in a program shares one connection. Please
+restart, run Multi and send ResultMulti: the small clip's 3 and 4
+decoders should all say "60 direct". (A third 1080p decoder still has
+no room in gpu_mem=128.)
+
 New in 0.3.5 (vcdec 0.4.5): direct output. Until now the decoder made
 each picture in its own memory (gpu_mem) and then sent it over by bulk
 transfer, 3 MB a picture at 1080p. Now vcdec shares its buffers with the

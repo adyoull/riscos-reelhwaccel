@@ -1,5 +1,39 @@
 # Changes
 
+## vcdec 0.4.6: one shared-memory service for the program (2026-10-22)
+
+VCDecTest 0.3.5 on a Pi 4 (gpu_mem=128), with vcdec 0.4.5:
+
+- **Direct output works:** every picture of the three clips came direct and
+  was right, including holding pictures and seeking after the end.
+- **1080p speed, direct against bulk:** 82.4 against 79.7 pictures a
+  second copied out, 85.7 against 81.0 held and read. The pictures'
+  transfers no longer cost the ARM anything ("queued: 0").
+- **Two 1080p decoders now work at once:** 150 pictures each, 58 a second
+  together. Before, the second waited for the first to finish. The
+  firmware no longer keeps a copy of each decoder's output buffers in
+  gpu_mem, and that freed the room. A third still has no room.
+- **A third connection to the firmware's SMEM service was refused**
+  ("Error status returned by VCHIQ core"). Each decoder opened its own,
+  so a program's third and fourth decoders fell back to bulk transfers
+  (they still worked).
+
+Changes in 0.4.6:
+
+- **vcmmal:**
+  - the program now has one SMEM service, on a VCHIQ connection of its
+    own with a 76-byte RMA block for its callback;
+  - the first `vcm_smem_open` opens it and the last `vcm_smem_close`
+    closes it; imports are the VideoCore's, not a connection's;
+  - `vcm` keeps only `smem_open` (its reference) and `smem_handle`.
+- **The fake:**
+  - it tells the service's RMA block apart from a decoder's by its size;
+  - it refuses a second SMEM service in one program;
+  - cleaned() checks that the block is freed.
+- **Tests:** 3 mutants caught (the service closed at the first close, a
+  service for each decoder, the block not freed).
+- **VCDecTest 0.3.6:** the ReadMe asks for Multi again.
+
 ## vcdec 0.4.5: direct output (2026-10-22)
 
 SMEMProbe 0.1 worked on a Pi 4: through the VideoCore's shared memory

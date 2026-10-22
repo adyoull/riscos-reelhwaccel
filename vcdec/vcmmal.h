@@ -151,10 +151,11 @@ typedef struct vcm {
     int pmp_svc;                           /* a pool not readable in USR mode (OS_Memory 24) */
     int pool_stuck;                        /* a pool couldn't be removed: the RMA block (its handler) is kept */
     unsigned app_page_moves;               /* claims that moved the program's page at &8000 (contig.h) */
-    /* (0.4.5) the VideoCore's shared memory service (vcm_smem_...) */
-    uint32_t smem_handle, smem_trans, smem_ids;
+    /* (0.4.5) the VideoCore's shared memory service (vcm_smem_...): this
+       connection holds one of the program's references to it (0.4.6:
+       one service for the whole program), whose handle is smem_handle */
     int smem_open;
-    uint32_t smem_msg[16];
+    uint32_t smem_handle;
 } vcm;
 
 /* SWIs (the host tests' fake under VCDEC_HOST) */
@@ -223,8 +224,12 @@ int vcm_param_set(vcm *m, const port_info_t *pi, uint32_t id, uint32_t value, co
    PCI memory) imported, a VideoCore handle back. An MMAL port with
    P_ZERO_COPY set takes that handle in a buffer's data field, and the
    VideoCore reads or writes the memory itself: no bulk transfer.
-   Pi-checked by SMEMProbe 0.1. Open after vcm_connect; none of these
-   fail the connection (m->why says why). */
+   Pi-checked by SMEMProbe 0.1. None of these fail the connection
+   (m->why says why).
+   (0.4.6) The program has one SMEM service, on a VCHIQ connection of its
+   own, opened by the first vcm_smem_open and closed by the last
+   vcm_smem_close: on a Pi 4 the firmware refused a third (VCDecTest
+   0.3.5's Multi), and imports are the VideoCore's, not a connection's. */
 int vcm_smem_open(vcm *m);                 /* 0, or -1 */
 uint32_t vcm_smem_import(vcm *m, const void *p, uint32_t size, const char *name);   /* the handle, or 0 */
 void vcm_smem_free(vcm *m, uint32_t handle);   /* (no reply waited for, as Linux) */

@@ -578,11 +578,19 @@ int vcm_param_set(vcm *m, const port_info_t *pi, uint32_t id, uint32_t value, co
 #define SM_NON_CACHED  1                   /* (the VideoCore's uncached alias: as Linux imports dma-bufs) */
 #define SM_ALLOCATOR   0x524F4D53u         /* (ours to choose: it comes back in the VideoCore's messages) */
 
-static uint32_t smem_dequeue(vcm *m)
+/* the program's one service: its own VCHIQ instance, and its own RMA block
+   for VCHIQ's callback (76 bytes: no pools' handler, as vcm_claim_stub's
+   has: the fake tells them apart by that) */
+static struct {
+    int users;
+    uint32_t instance, handle, stub, trans, ids;
+    uint32_t msg[16];
+} sm;
+
+static uint32_t smem_dequeue(void)
 {
     uint32_t got = 0;
-    if (vcm_swi4(VCHIQ_MsgDequeue, m->smem_handle, (uint32_t)(uintptr_t)m->smem_msg, sizeof m->smem_msg, 0, NULL, &got))
-        return 0;
+    if (vcm_swi4(VCHIQ_MsgDequeue, sm.handle, (uint32_t)(uintptr_t)sm.msg, sizeof sm.msg, 0, NULL, &got)) return 0;
     return got;
 }
 
@@ -590,31 +598,65 @@ static int smem_send(vcm *m, uint32_t type, const uint32_t *body, uint32_t len)
 {
     uint32_t b[2 + 13];
     _kernel_oserror *e;
-    while (smem_dequeue(m)) {}             /* (anything left: dropped) */
+    while (smem_dequeue()) {}              /* (anything left: dropped) */
     b[0] = type;
-    b[1] = m->smem_trans = (m->smem_trans + 1) & 0x7FFFFFFFu;
+    b[1] = sm.trans = (sm.trans + 1) & 0x7FFFFFFFu;
     memcpy(&b[2], body, len);
-    vcm_swi4(VCHIQ_ServiceUse, m->smem_handle, 0, 0, 0, NULL, NULL);
-    e = vcm_swi4(VCHIQ_MsgQueue, m->smem_handle, (uint32_t)(uintptr_t)b, 8 + len, 0, NULL, NULL);
-    vcm_swi4(VCHIQ_ServiceRelease, m->smem_handle, 0, 0, 0, NULL, NULL);
+    vcm_swi4(VCHIQ_ServiceUse, sm.handle, 0, 0, 0, NULL, NULL);
+    e = vcm_swi4(VCHIQ_MsgQueue, sm.handle, (uint32_t)(uintptr_t)b, 8 + len, 0, NULL, NULL);
+    vcm_swi4(VCHIQ_ServiceRelease, sm.handle, 0, 0, 0, NULL, NULL);
     if (e) { vcm_why(m, "SMEM: VCHIQ_MsgQueue: %s", e->errmess); return -1; }
     if (m->log_messages) vcm_logf(m, "SMEM tx: type %u, transaction %u", (unsigned)type, (unsigned)b[1]);
     return 0;
 }
 
+/* the service's connection taken down, as far as it got */
+static void smem_down(int connected)
+{
+    if (connected) vcm_swi4(VCHIQ_Disconnect, sm.instance, 0, 0, 0, NULL, NULL);
+    if (sm.stub) vcm_swi4(OS_Module, 7, 0, sm.stub, 0, NULL, NULL);
+    sm.stub = 0;
+}
+
 int vcm_smem_open(vcm *m)
 {
-    uint32_t setup[11];
+    static const uint32_t code[9] = { 0xe3510004u, 0x05903000u, 0x02833001u, 0x05803000u, 0xe3510012u,
+                                      0x05903004u, 0x02833001u, 0x05803004u, 0xe1a0f00eu };   /* (vcm_claim_stub's) */
+    uint32_t setup[11], img[18];
+    _kernel_swi_regs rr;
     _kernel_oserror *e;
-    memset(setup, 0, sizeof setup);
-    setup[0] = 1; setup[1] = 0; setup[2] = SMEM_SERVICE;   /* (vc-sm-cma's version 1, at least 0) */
-    setup[6] = m->stub; setup[7] = m->stub + 64;
-    if ((e = vcm_swi4(VCHIQ_ServiceOpen, m->instance, (uint32_t)(uintptr_t)setup, 0, 0, &m->smem_handle, NULL)) != NULL) {
-        vcm_why(m, "VCHIQ_ServiceOpen \"SMEM\": %s", e->errmess);
-        return -1;
+    if (m->smem_open) return 0;
+    if (!sm.users) {
+        if ((e = vcm_swi4(OS_Module, 6, 0, 0, 76, NULL, &sm.stub)) != NULL) {
+            sm.stub = 0;
+            vcm_why(m, "SMEM: no RMA: %s", e->errmess);
+            return -1;
+        }
+        memset(img, 0, sizeof img);
+        memcpy(img, code, sizeof code);
+        vcdec_svc_copy((void *)(uintptr_t)sm.stub, img, sizeof img);
+        memset(&rr, 0, sizeof rr);
+        rr.r[0] = 1; rr.r[1] = (int)sm.stub; rr.r[2] = (int)(sm.stub + 68);
+        vcm_swi(OS_SynchroniseCodeAreas, &rr);
+        if ((e = vcm_swi4(VCHIQ_Initialise, 0, 0, 0, 0, &sm.instance, NULL)) != NULL ||
+            (e = vcm_swi4(VCHIQ_Connect, 0, 0, sm.instance, 0, NULL, NULL)) != NULL) {
+            vcm_why(m, "SMEM: VCHIQ: %s", e->errmess);
+            smem_down(0);
+            return -1;
+        }
+        memset(setup, 0, sizeof setup);
+        setup[0] = 1; setup[1] = 0; setup[2] = SMEM_SERVICE;   /* (vc-sm-cma's version 1, at least 0) */
+        setup[6] = sm.stub; setup[7] = sm.stub + 64;
+        if ((e = vcm_swi4(VCHIQ_ServiceOpen, sm.instance, (uint32_t)(uintptr_t)setup, 0, 0, &sm.handle, NULL)) != NULL) {
+            vcm_why(m, "VCHIQ_ServiceOpen \"SMEM\": %s", e->errmess);
+            smem_down(1);
+            return -1;
+        }
+        vcm_swi4(VCHIQ_ServiceRelease, sm.handle, 0, 0, 0, NULL, NULL);   /* (opening leaves it in use) */
     }
-    vcm_swi4(VCHIQ_ServiceRelease, m->smem_handle, 0, 0, 0, NULL, NULL);   /* (opening leaves it in use) */
+    sm.users++;
     m->smem_open = 1;
+    m->smem_handle = sm.handle;
     return 0;
 }
 
@@ -629,19 +671,19 @@ uint32_t vcm_smem_import(vcm *m, const void *p, uint32_t size, const char *name)
         return 0;
     }
     memset(b, 0, sizeof b);
-    b[0] = SM_NON_CACHED; b[1] = blk[2] | 0xC0000000u; b[2] = size; b[3] = ++m->smem_ids; b[4] = SM_ALLOCATOR;
+    b[0] = SM_NON_CACHED; b[1] = blk[2] | 0xC0000000u; b[2] = size; b[3] = ++sm.ids; b[4] = SM_ALLOCATOR;
     snprintf((char *)&b[5], 32, "%s", name);
     if (smem_send(m, SM_IMPORT, b, sizeof b)) return 0;
     for (t0 = vcm_now_cs(); vcm_now_cs() - t0 < REPLY_CS;) {
-        if (!(got = smem_dequeue(m))) continue;
-        if (m->smem_msg[0] != m->smem_trans) continue;   /* (not this reply: dropped) */
-        if (got < 8 || !m->smem_msg[1]) {
+        if (!(got = smem_dequeue())) continue;
+        if (sm.msg[0] != sm.trans) continue;   /* (not this reply: dropped) */
+        if (got < 8 || !sm.msg[1]) {
             vcm_why(m, "SMEM: the import of %u bytes at &%08X was refused", (unsigned)size, (unsigned)blk[2]);
             return 0;
         }
         if (m->log_messages) vcm_logf(m, "SMEM: %u bytes at &%08X imported: handle &%08X", (unsigned)size,
-                                      (unsigned)blk[2], (unsigned)m->smem_msg[1]);
-        return m->smem_msg[1];
+                                      (unsigned)blk[2], (unsigned)sm.msg[1]);
+        return sm.msg[1];
     }
     vcm_why(m, "SMEM: no reply to an import in %d cs", REPLY_CS);
     return 0;
@@ -659,8 +701,12 @@ void vcm_smem_close(vcm *m)
 {
     _kernel_oserror *e;
     if (!m->smem_open) return;
-    while (smem_dequeue(m)) {}
-    if ((e = vcm_swi4(VCHIQ_ServiceClose, m->smem_handle, 0, 0, 0, NULL, NULL)) != NULL)
-        vcm_logf(m, "SMEM: VCHIQ_ServiceClose: %s", e->errmess);
     m->smem_open = 0;
+    if (--sm.users) return;
+    while (smem_dequeue()) {}
+    if ((e = vcm_swi4(VCHIQ_ServiceClose, sm.handle, 0, 0, 0, NULL, NULL)) != NULL) {
+        vcm_logf(m, "SMEM: VCHIQ_ServiceClose: %s (its RMA block is left)", e->errmess);
+        sm.stub = 0;                       /* (VCHIQ may still call it) */
+    }
+    smem_down(1);
 }

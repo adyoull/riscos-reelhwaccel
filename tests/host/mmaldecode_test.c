@@ -884,6 +884,12 @@ static struct { int open, uses, nq; uint32_t q[8][8], qlen[8]; } smem_slot[SMEM_
 static struct { uint32_t bus, size, h; int live; } smem_imp[64];
 static int nsmem_imp;
 static uint32_t smem_next_h;
+/* (vcdec 0.4.6) the program's one SMEM service has its own VCHIQ
+   connection and a 76-byte RMA block for its callback (a decoder's is 80,
+   MMALDecode's 72:
+   that's how this tells them apart) */
+static uint32_t smem_stub;
+static int smem_stubs_claimed, smem_stubs_freed;
 
 /* the program's memory at a bus address (as OS_Memory 0 gave it out), or 0 */
 static uint32_t bus_to_logical(uint32_t bus, uint32_t n)
@@ -990,6 +996,20 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
     _kernel_oserror *he = NULL;
     if ((n == 0x59204 || n == 0x59205 || n == 0x59209 || n == 0x5920D || n == 0x5920E) && (R[0] & 0xFFFF) == SMEM_HANDLE)
         return smem_swi(n, R);
+    if (n == 0x1E && R[0] == 6 && R[3] == 76) {   /* the SMEM service's RMA block */
+        void *p = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        CHECK(!smem_stub, "a second SMEM RMA block while one is live");
+        smem_stub = R[2] = (uint32_t)(uintptr_t)p;
+        smem_stubs_claimed++;
+        return NULL;
+    }
+    if (n == 0x1E && R[0] == 7 && smem_stub && R[2] == smem_stub) {
+        CHECK(!smem_is_open, "the SMEM RMA block freed with the service open");
+        smem_stub = 0;
+        smem_stubs_freed++;
+        return NULL;
+    }
+    if (n == 0x6E && smem_stub && R[1] == smem_stub) return NULL;
     if (multi) {                             /* the decoder this SWI is about */
         if (n == 0x59203 || n == 0x59204 || n == 0x59205 || n == 0x59209 || n == 0x5920D || n == 0x5920E || n == 0x5920F) {
             int k = (int)(R[0] >> 16);
@@ -1147,7 +1167,8 @@ _kernel_oserror *probe_swi(int n, _kernel_swi_regs *r)
         if (s[2] == 0x534D454Du) {           /* "SMEM" */
             int k;
             if (!smem_present) return &err;
-            CHECK(s[0] == 1 && s[1] == 0 && s[6] == stub && s[7] == stub + 64, "SMEM open params");
+            CHECK(s[0] == 1 && s[1] == 0 && smem_stub && s[6] == smem_stub && s[7] == smem_stub + 64, "SMEM open params");
+            CHECK(!smem_is_open, "a second SMEM service in one program");
             for (k = 0; k < SMEM_SLOTS && smem_slot[k].open; k++) {}
             CHECK(k < SMEM_SLOTS, "SMEM: more than %d open", SMEM_SLOTS);
             if (k >= SMEM_SLOTS) return &err;
@@ -1299,6 +1320,7 @@ static void reset_fake(void)
     zc_out = zc_refuse = bb_zc = zc_bulk_every = zc_this = 0; memset(out_data, 0, sizeof out_data);
     smem_present = 1; smem_refuse_import = smem_chatty = smem_is_open = smem_imports = smem_frees = smem_dropped = 0;
     nsmem_imp = 0; smem_next_h = 0; memset(smem_slot, 0, sizeof smem_slot);
+    smem_stub = 0; smem_stubs_claimed = smem_stubs_freed = 0;
     uses = releases = opens = closes = connects = disconnects = freed = created = destroyed = comp_enabled = 0;
     memset(port_on, 0, sizeof port_on);
     shorts = bulks_tx = bulks_rx = efch_sent = disables_out = flushes = aus = au_pieces_max = idr_dropped = 0;
@@ -1470,7 +1492,9 @@ static void cleaned(const char *what)
           what, opens, closes, connects, disconnects, freed);
     CHECK(pci_live == 0, "%s: %d PCI blocks not freed", what, pci_live);
     CHECK(pmp_live == 0, "%s: %d memory pools not removed", what, pmp_live);
-    CHECK(!smem_is_open && !smem_live(), "%s: SMEM left open %d, %d imports live", what, smem_is_open, smem_live());
+    CHECK(!smem_is_open && !smem_live() && !smem_stub && smem_stubs_claimed == smem_stubs_freed,
+          "%s: SMEM left open %d, %d imports live, RMA block %d/%d", what, smem_is_open, smem_live(), smem_stubs_claimed,
+          smem_stubs_freed);
     npci_blocks = 0;
     memset(pmp_block, 0, sizeof pmp_block);
     CHECK(!comp_enabled && !port_on[1] && !port_on[2] && created == destroyed, "%s: left enabled (%d %d %d), %d/%d",
