@@ -98,7 +98,8 @@ How it got here, version by version, is in `CHANGELOG.md`. Some of what
 it took:
 
 - **H.264:** physically contiguous buffers numbered from 1, output
-  buffers only after the decoder's format change, every receive queued
+  buffers given at once (until vcdec 0.4.9 only after the decoder's
+  format change, which cost Reel Edit 2 s a clip), every receive queued
   as its message arrives, and `gpu_mem=128` for 1080p. Pictures arrive
   in a cacheable Physical Memory Pool and are handed out without a copy.
   Since vcdec 0.4.5 the decoder writes them there itself, through the

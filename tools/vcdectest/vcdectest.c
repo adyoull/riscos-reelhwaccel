@@ -10,7 +10,7 @@
  * by pts. The VideoCore's chroma can be 1 lower than FFmpeg's here and
  * there: block means within 1 count as "close" (with the .sig file).
  *
- *   vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
+ *   vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-W] [-g] [-s N | -E] [-t] [-B n] [-c way] [-m memory] [-K] [-Z [-H n] [-R]]
  *             stream.mp4 expected.crc [expected.sig]
  *      -o file   also add the report to file
  *      -v        every MMAL message, and what vcdec does
@@ -18,7 +18,9 @@
  *      -S        wait for each picture's bulk transfer as it arrives (as
  *                MMALDecode did), not later
  *      -G        (0.3.8) the output buffers to the decoder at once
- *                (VCDEC_OUT_EARLY), not after its first format change
+ *                (VCDEC_OUT_EARLY: vcdec's default since 0.4.9)
+ *      -W        (0.3.9) the old start (VCDEC_OUT_AFTER_EFCH): the output
+ *                buffers only after the decoder's first format change
  *      -D        (0.3.5) no direct output (VCDEC_NO_DIRECT): every picture by
  *                bulk transfer, as before vcdec 0.4.5
  *      -g        open even if gpu_mem looks too small
@@ -750,7 +752,7 @@ int probe_main(int argc, char **argv)
     const char *stream_name = NULL, *crc_name = NULL, *sig_name = NULL, *x_out = NULL;
     uint8_t *stream = NULL;
     uint32_t file_len = 0, t_start, t_end = 0, recv_cs = 0, send_cs = 0, last_picture, ticks = 0, again_in = 0;
-    int verbose = 0, sync = 0, no_direct = 0, early_out = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
+    int verbose = 0, sync = 0, no_direct = 0, early_out = 0, wait_efch = 0, gpu_any = 0, seek_after = 0, seek_end = 0, seek_s = -1, seeked = 0;
     int multi_n = 0, exit_after = 0, out_buffers = 0, bench = 0, zero = 0, hold_n = 1, read_all = 0, nholds = 0, unholdable = 0;
     vcdec_hold *holds[16];
     uint32_t read_sum = 0;
@@ -776,6 +778,7 @@ int probe_main(int argc, char **argv)
         else if (!strcmp(argv[i], "-S")) sync = 1;
         else if (!strcmp(argv[i], "-D")) no_direct = 1;
         else if (!strcmp(argv[i], "-G")) early_out = 1;
+        else if (!strcmp(argv[i], "-W")) wait_efch = 1;
         else if (!strcmp(argv[i], "-g")) gpu_any = 1;
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) seek_after = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-E")) seek_end = 1;
@@ -808,7 +811,7 @@ int probe_main(int argc, char **argv)
     if (x_out && stream_name && !crc_name) return export_annexb(stream_name, x_out);
     if (!stream_name || !crc_name || seek_after < 0 || (seek_after && seek_end) || hold_n < 1 || hold_n > 16 ||
         multi_n < 0 || multi_n > 8) {
-        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
+        printf("Usage: vcdectest [-o file] [-v] [-n] [-S] [-D] [-G] [-W] [-g] [-s N | -E] [-t] [-B n] [-c ldm8|ldm4|neon] "
                "[-m auto|pci|pmp|pmpu] [-K] [-Z [-H n] [-R]] [-M n] [-X n] stream.mp4 expected.crc [expected.sig]\n");
         return 1;
     }
@@ -853,7 +856,8 @@ int probe_main(int argc, char **argv)
     cfg.width = (int)mp4_w;
     cfg.height = (int)mp4_h;
     cfg.flags = (sync ? VCDEC_SYNC_RECEIVE : 0) | (gpu_any ? VCDEC_NO_GPU_MEM_CHECK : 0) | (verbose ? VCDEC_LOG_MESSAGES : 0) |
-                (no_direct ? VCDEC_NO_DIRECT : 0) | (early_out ? VCDEC_OUT_EARLY : 0) | way | memory;
+                (no_direct ? VCDEC_NO_DIRECT : 0) | (early_out ? VCDEC_OUT_EARLY : 0) |
+                (wait_efch ? VCDEC_OUT_AFTER_EFCH : 0) | way | memory;
     cfg.out_buffers = out_buffers;
     if (zero) say("Zero-copy: pictures held in vcdec's buffers (up to %d at a time)%s\n", hold_n,
                   read_all ? ", each read once" : "");
@@ -1042,6 +1046,7 @@ int probe_main(int argc, char **argv)
     }
     say("Output buffers at the end: %u in pools, %u in PCI memory\n", stats.pool_buffers, stats.pci_buffers);
     say("Start: the first picture %d cs after the first access unit%s%s\n", stats.first_cs,
+        wait_efch ? " (the old start, -W: buffers after the format change)" :
         early_out ? " (the output buffers given at once, -G)" : "",
         stats.efch_waits ? ", once the 200 cs wait for a format change ran out" : "");
     if (stats.efch_cs >= 0)

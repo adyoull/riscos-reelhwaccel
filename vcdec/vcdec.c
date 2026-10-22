@@ -6,9 +6,10 @@
  *
  *   1. buffers are numbered from 1 for the VideoCore (client_context; 0 is
  *      "no buffer" to it);
- *   2. the output's buffers are handed over only after the decoder's first
- *      format change (EFCH), or 200 cs after the first input anyway; a
- *      cmd 0 "event" carries no data;
+ *   2. (0.4.9) the output's buffers are handed over as soon as the decoder
+ *      is created (before 0.4.9: only after its first format change, EFCH,
+ *      or 200 cs after the first input, which VCDEC_OUT_AFTER_EFCH keeps);
+ *      a cmd 0 "event" carries no data;
  *   3. every bulk receive is queued the moment its message arrives: the
  *      VideoCore answers nothing more until the data it's sending has a
  *      receive (it needn't have finished: the receives run on, counted by
@@ -33,10 +34,13 @@
  *      (SMEMProbe 0.1). A picture that comes without it is received as
  *      before; without the service, an import or the parameter, the
  *      pictures come by bulk transfer as before;
- *  (0.4.8) Rule 2's wait came from MMALDecode 0.5-0.9, whose lost first
- *      picture was later found to be buffer 0 (rule 1), not buffers given
- *      early. VCDEC_OUT_EARLY gives them at once, to find out on the Pi
- *      whether the wait can go (Reel Edit's 2 s at every clip start).
+ *  (0.4.9) Rule 2's old wait came from MMALDecode 0.5-0.9, whose lost
+ *      first picture was later found to be buffer 0 (rule 1), not buffers
+ *      given early. VCDecTest 0.3.8's Start on a Pi 4: with the buffers
+ *      given at once every clip was right (a seek after the end and two
+ *      1080p decoders too), the first picture 1-5 cs after the first
+ *      access unit. Reel Edit's clips waited the whole 200 cs the old way
+ *      (2 s at every clip start).
  *  10. (0.4.7) with direct output the empty EOS buffer can come back
  *      before the last picture (VCDecTest 0.3.6's Multi on a Pi 4: 3 and 4
  *      decoders at once, one picture short at the end): a picture after
@@ -460,7 +464,7 @@ static int create_component(vcdec *d)
     d->outputs_given = d->sent_any = d->eos_sent = d->eos_back = d->eos_seen = d->heard_output = d->reformat = 0;
     d->seg_sent = d->seg_back = 0;
     d->eos_vc = 0;
-    if (d->cfg.flags & VCDEC_OUT_EARLY) d->outputs_given = 1;   /* (0.4.8: at once, not after the format change) */
+    if (!(d->cfg.flags & VCDEC_OUT_AFTER_EFCH)) d->outputs_given = 1;   /* (rule 2: at once) */
     return 0;
 }
 

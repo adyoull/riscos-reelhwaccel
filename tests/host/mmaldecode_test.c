@@ -77,9 +77,9 @@ static _kernel_oserror err = { 1, "fake error" }, empty = { 2, "none" };
 
 /* scenario */
 static int hijacked, vc_stuck, efch_late, swap_frames, hold_inputs;
-/* (vcdec 0.4.8) early_out_ok: output buffers before the first format change
-   accepted (MMALDecode's lost picture was buffer 0, not that: to be
-   confirmed on the Pi); without it the fake holds to rule 2 */
+/* early_out_ok: output buffers before the first format change accepted (as
+   VCDecTest 0.3.8's Start found on a Pi 4; MMALDecode's lost picture was
+   buffer 0). The default since vcdec 0.4.9; 0 holds to the old rule 2 */
 static int early_out_ok;
 /* multi: this decoder doesn't fit in the VideoCore's memory: as one 1080p
    decoder with gpu_mem=64 on the Pi (MMALDecode 0.12): it keeps every
@@ -1347,7 +1347,7 @@ static void reset_fake(void)
     noutq = 0; ndeferred = deferred_ever = 0; ntxq = pending_tx_now = 0;
     in_au = 0; au_n = 0; need_idr = 0; aus_decoded = 0; n_au_pts = 0; ndpb = nready = 0; nfifo = 0; last_out_pts = UNKNOWN;
     flushed = 0; eos_lost = 0; eos_then_flush = 0; max_ready_pts = UNKNOWN; disc_seen = comp_cycles = flush_while_off = 0;
-    early_out_ok = 0;
+    early_out_ok = 1;                         /* (vcdec 0.4.9: buffers before the format change are fine on the Pi) */
     recreated = 0; nlate = late_ticks = 0; efch_ever = 0; first_in_cs = 0; disable_refused = 0;
     pmp_invalidates = 0; nout_max = 0; rx_abort = 0; pmp_privileged = 0; recommended = 0; pmp_top = 0; no_armop = 0; pmp_made = 0;
     app_pn = 0x100; app_moves = 0; old_os_12 = 0; rec_calls = 0; move_on_claim = 0;

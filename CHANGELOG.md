@@ -1,5 +1,35 @@
 # Changes
 
+## vcdec 0.4.9, devkit 0.2.19, VCDecTest 0.3.9: no 2 s wait at the start (2026-10-22)
+
+VCDecTest 0.3.8's Start on a Pi 4 (gpu_mem=128): with the output buffers
+given at once (`-G`), every picture of flat, small, odd and hd was right.
+So were hd to the end with a seek after it, and two hd decoders at once.
+The first picture came 1-5 cs after the first access unit (12 cs for
+the second of two decoders), and decoding was a little faster (hd 58.8
+against 56.1 pictures a second, flat 76.9 against 71.9).
+
+Our clips didn't wait even the old way: their format change came 0-2 cs
+after the first access unit, with 30-85 sent by then. So it's Reel
+Edit's streams (made by h264_encvchiq) whose format change waits for
+output buffers, which the fake's `efch_late` models.
+
+- **vcdec (rule 2):**
+  - the output buffers go to the decoder as soon as it's created, and
+    after every re-create;
+  - `VCDEC_OUT_AFTER_EFCH` keeps the old way (after the first format
+    change, or 200 cs);
+  - `VCDEC_OUT_EARLY` is kept, and does nothing.
+- **The fake:** `early_out_ok` is on by default. The old-way tests turn it
+  off, so the fake holds them to rule 2.
+- **Tests:**
+  - the start cases (the old way's wait, at once, at once with bulk);
+  - VCDecTest `-W`, the default, `-G` and `-G -M 2`;
+  - 2 mutants caught.
+- **VCDecTest 0.3.9:** `-W` (the old way). Start runs `-W`, then the
+  default.
+- **The devkit README** describes the start; its default is now 0.2.19.
+
 ## vcdec 0.4.8, VCDecTest 0.3.8: the 2 s start, measured (2026-10-22)
 
 Reel Edit waits about 2 s for the first picture each time it starts a

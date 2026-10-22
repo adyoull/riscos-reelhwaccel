@@ -7,7 +7,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
 . "$TOP/common/toolchain.sh"
-V=${1:-0.2.18}
+V=${1:-0.2.19}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V
 mkdir -p "$D/include" "$D/lib" "$D/ffmpeg"

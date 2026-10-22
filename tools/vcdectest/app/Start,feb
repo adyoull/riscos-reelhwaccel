@@ -1,8 +1,8 @@
-| Start: (0.3.8, vcdec 0.4.8) how long a decoder takes to give its first
-| picture. Each clip with vcdec's way (output buffers only after the
-| decoder's format change, or 200 cs), then with them given at once (-G);
-| then hd with -G to the end and a seek after it, and two hd decoders
-| at once with -G. Every picture checked. Reports to ResultS.
+| Start: (0.3.8; 0.3.9 for vcdec 0.4.9) how long a decoder takes to give
+| its first picture. Each clip the old way (-W: output buffers only after
+| the decoder's format change, or 200 cs), then vcdec's way since 0.4.9
+| (given at once); then hd to the end and a seek after it, and two hd
+| decoders at once. Every picture checked. Reports to ResultS.
 | (a GCCSDK program: needs SharedUnixLibrary and ARMEABISupport loaded)
 RMEnsure SharedUnixLibrary 1.16 IfThere System:Modules.SharedULib Then RMLoad System:Modules.SharedULib
 RMEnsure SharedUnixLibrary 1.16 Error This needs SharedUnixLibrary 1.16 or later. Install it with PackMan.
@@ -10,13 +10,13 @@ RMEnsure ARMEABISupport 0 IfThere System:Modules.ARMEABISupport Then RMLoad Syst
 RMEnsure ARMEABISupport 0 Error This needs the ARMEABISupport module. Install it with PackMan.
 WimpSlot -min 16384K -max 16384K
 Remove <Obey$Dir>.ResultS
+Run <Obey$Dir>.vcdectest -W -o <Obey$Dir>.ResultS <Obey$Dir>.clips.flat.mp4 <Obey$Dir>.clips.flat.crc <Obey$Dir>.clips.flat.sig
 Run <Obey$Dir>.vcdectest -o <Obey$Dir>.ResultS <Obey$Dir>.clips.flat.mp4 <Obey$Dir>.clips.flat.crc <Obey$Dir>.clips.flat.sig
-Run <Obey$Dir>.vcdectest -G -o <Obey$Dir>.ResultS <Obey$Dir>.clips.flat.mp4 <Obey$Dir>.clips.flat.crc <Obey$Dir>.clips.flat.sig
+Run <Obey$Dir>.vcdectest -W -o <Obey$Dir>.ResultS <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
 Run <Obey$Dir>.vcdectest -o <Obey$Dir>.ResultS <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
-Run <Obey$Dir>.vcdectest -G -o <Obey$Dir>.ResultS <Obey$Dir>.clips.small.mp4 <Obey$Dir>.clips.small.crc <Obey$Dir>.clips.small.sig
+Run <Obey$Dir>.vcdectest -W -o <Obey$Dir>.ResultS <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
 Run <Obey$Dir>.vcdectest -o <Obey$Dir>.ResultS <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
-Run <Obey$Dir>.vcdectest -G -o <Obey$Dir>.ResultS <Obey$Dir>.clips.odd.mp4 <Obey$Dir>.clips.odd.crc <Obey$Dir>.clips.odd.sig
+Run <Obey$Dir>.vcdectest -W -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
 Run <Obey$Dir>.vcdectest -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -G -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -G -E -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
-Run <Obey$Dir>.vcdectest -G -M 2 -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -E -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig
+Run <Obey$Dir>.vcdectest -M 2 -o <Obey$Dir>.ResultS <Obey$Dir>.clips.hd.mp4 <Obey$Dir>.clips.hd.crc <Obey$Dir>.clips.hd.sig

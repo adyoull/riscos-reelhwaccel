@@ -10,6 +10,12 @@ same picture, matched by its time (pts). The VideoCore's pictures can differ
 from FFmpeg's by 1 in a few values (rounding), so each is also compared by
 block averages: "within rounding" is fine, anything more is a fault.
 
+New in 0.3.9 (vcdec 0.4.9): 0.3.8's Start showed that giving the
+decoder its output buffers at once is safe (every picture right, a seek
+after the end and two 1080p decoders too, the first picture 1-5 cs after
+the first access unit), so vcdec now always does. -W gives the old way,
+for comparison; -G does nothing now. Start runs -W, then the default.
+
 New in 0.3.8 (vcdec 0.4.8): Start. Reel Edit waits about 2 s for the
 first picture at every clip it starts. vcdec gives the decoder its
 output buffers only after the decoder says the picture size (a "format

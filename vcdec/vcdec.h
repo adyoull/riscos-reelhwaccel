@@ -32,7 +32,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define VCDEC_VERSION "0.4.8"
+#define VCDEC_VERSION "0.4.9"
 
 /* results */
 #define VCDEC_OK           0
@@ -63,8 +63,9 @@
 #define VCDEC_OUT_UNCACHED    64u   /* the pool not cacheable (bufferable) */
 #define VCDEC_OUT_PCI        128u   /* PCI_RAMAlloc memory (uncachable, privileged: copied in
                                        SVC mode), the default before 0.4 */
-#define VCDEC_OUT_EARLY     1024u   /* (0.4.8, a trial) the output buffers to the decoder at once,
-                                       not after its first format change (or 200 cs) */
+#define VCDEC_OUT_EARLY     1024u   /* (0.4.8's trial; since 0.4.9 the default, so this does nothing) */
+#define VCDEC_OUT_AFTER_EFCH 2048u  /* (0.4.9) the old start: the output buffers to the decoder only after
+                                       its first format change, or 200 cs (Reel Edit's 2 s wait) */
 #define VCDEC_NO_DIRECT      512u   /* (0.4.5) no direct output: every picture by bulk transfer,
                                        as before 0.4.5 */
 
