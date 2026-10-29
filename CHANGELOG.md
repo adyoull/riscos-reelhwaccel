@@ -1,5 +1,17 @@
 # Changes
 
+## Release 0.2.21 (2026-10-29)
+
+The GitHub release `v0.2.21`: devkit 0.2.21 (vcdec 0.4.11, vcenc 0.1.5,
+hevcdec 0.1.14) and VCDecTest 0.3.11, the same files as in dist/r55,
+which riscos-ffmpeg has built with. Everything since v0.2.18 is below:
+- no wait at the start (0.4.8, 0.4.9);
+- the shorter close when the decoder stops answering (0.4.10);
+- a new decoder at every seek with direct output (0.4.11).
+
+The text is `release-notes/v0.2.21.md`. Devkit 0.2.19 and 0.2.20 were
+test builds only.
+
 ## vcdec 0.4.11, devkit 0.2.21, VCDecTest 0.3.11: a new decoder at every seek with direct output (2026-10-22)
 
 VCDecTest 0.3.10's Reverse on a Pi 4 (gpu_mem=128):
