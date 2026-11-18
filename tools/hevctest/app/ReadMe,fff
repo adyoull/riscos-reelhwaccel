@@ -28,8 +28,18 @@ The clips (in clips; each has its MP4 file, mp4, and its trace):
   and 4K (new in 0.1.8): uhd and uhd10, 3840x2160, 30 pictures, 8-bit and
   10-bit
 
-Running it (for 0.1.14, please send back ResultG):
-  GiveBack New: frames given back as soon as they may be, pipelined, every
+New in 0.1.15: RISC OS on Linux. There the block belongs to Linux, which
+drives it with its own rpivid driver (in ROL's kernel from 6.6.78-17),
+so hevcdec does too: the same pictures go to Linux's driver instead,
+which runs the same rpivid_h265.c. That also works on a Pi 5 and CM5,
+which native RISC OS doesn't run on. The Obey files are the same; the
+Result files say which way was used ("decoding with Linux's rpivid
+driver" or "the HEVC block, driven directly"). On native RISC OS nothing
+has changed.
+
+Running it (for 0.1.15 on RISC OS on Linux, please send back Result,
+ResultT, ResultP and ResultK; on native RISC OS, as 0.1.14):
+  GiveBack frames given back as soon as they may be, pipelined, every
            picture checked (1080p and 4K). Writes ResultG.
 
 And as before (Result, ResultT, ResultP, ResultK and ResultC):
@@ -91,6 +101,12 @@ error and address first ("hevctest: signal ...").
 That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
+
+0.1.15 (hevcdec 0.1.15): RISC OS on Linux, through Linux's rpivid
+driver (above). The Result files say which way was used. Linux's frames
+aren't cacheable (write-combined), so converting them is slower than on
+native RISC OS: Speed and Test's "converting them" times show by how
+much.
 
 0.1.14 (hevcdec 0.1.13): GiveBack (-G, to ResultG). Users were running
 short of logical address space, and a 4K 10-bit frame is 16.6 MB of it.

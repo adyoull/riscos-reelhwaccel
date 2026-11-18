@@ -8,7 +8,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/../.." && pwd)
 . "$TOP/common/toolchain.sh"
-V=${1:-0.1.13}
+V=${1:-0.1.15}
 FFMPEG=${FFMPEG:-ffmpeg}
 : "${FFMPEG_TARBALL:?FFMPEG_TARBALL (ffmpeg-5.1.10.tar.xz) is needed for the traces}"
 TRACER=$("$TOP/tools/hevctrace/build.sh" "$FFMPEG_TARBALL" "$TOP/out/hevctrace" | tail -1 | sed 's/ (up to date)//')

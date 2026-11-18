@@ -1,5 +1,49 @@
 # Changes
 
+## hevcdec 0.1.15, devkit 0.2.22, HEVCTest 0.1.15: HEVC on RISC OS on Linux (2026-11-18)
+
+ROL's handoff (handoffs/2026-11-18-rol-hevcdec-linux-backend-rpivid.md):
+under RISC OS on Linux the HEVC block, its clock and its interrupt are
+Linux's, so hevcdec can't map it. ROL's kernel 6.6.78-17 builds in
+Linux's own driver for it, Raspberry Pi's rpivid (a V4L2 stateless
+decoder), which runs the same `rpivid_h265.c` as hevcdec does.
+
+- **hevcdec 0.1.15:** a second back end, `hevcdec_linux.c`, behind the
+  same API. `hevcdec_open` uses it when RISC OS runs on Linux
+  (IXSupport_LinuxSyscall works and NativeSupport is loaded) and a
+  `/dev/video*` answers with driver "rpivid"; otherwise the block
+  directly, as before. Linux's calls go through `hevcdec_lsys.c`.
+  - Each slice is its own request and OUTPUT buffer, every one but a
+    picture's last with `V4L2_BUF_FLAG_M2M_HOLD_CAPTURE_BUF`, as hevcdec
+    gives `rpivid_h265.c` the slices.
+  - Each frame is one of the driver's CAPTURE buffers (CREATE_BUFS, then
+    mapped), NV12 or 10-bit in 128-byte columns: the conversions are the
+    same. A frame given back keeps its buffer for the next frame made.
+  - A picture's number is its timestamp in µs; the DPB's references are
+    multiplied by 1000 (the driver's are in ns).
+  - Pipelined means pictures queued ahead: the driver overlaps its phases.
+  - The flat scaling lists and `bad_picture`'s checks are kept.
+  - A frame's buffer is queued only once its first slice is ready, as
+    the CAPTURE queue takes buffers in order. A slice refused after
+    that, or nothing back for 2 s, stops the decoder; a refused first
+    slice fails only its picture.
+  - `hevcdec_frame_export`: a frame as a Linux dmabuf, with its DRM
+    format and SAND128 modifier, for rol-fb's overlay. Native:
+    HEVCDEC_UNSUPPORTED.
+  - `hevcdec_stats.backend` (bigger struct: rebuild).
+- **Tests:** `tests/host/fake_rpivid.c` fakes the driver at the
+  `hevcdec_lsys` seam, with rpivid's formats, the m2m core's choice of
+  frames (held, in queued order), requests, references found by
+  timestamp in any buffer (as `vb2_find_buffer`), and pictures written
+  as the block does. Off by default, so every native test runs as
+  before. hevcdec_test runs every trace on it too: plain, pipelined
+  with the driver slow, `-P 5 -G`, `-p -w`, a failed picture, a hung
+  driver, slices too big, refused slices; open, export, fallback, and
+  exit with it open. `hevc_hwdec` in FFmpeg runs five clips on it
+  (`HEVC_FAKE_ROL`).
+- **HEVCTest 0.1.15** says which way it decoded. Untested on ROL
+  hardware: ROL's kernel isn't out yet.
+
 ## Release 0.2.21 (2026-10-29)
 
 The GitHub release `v0.2.21`: devkit 0.2.21 (vcdec 0.4.11, vcenc 0.1.5,

@@ -29,15 +29,16 @@ bad=0
 # the host libhevcdec (hevcdec, rpivid_h265.c), and beside it the fake block and its pictures
 # from the environment, linked into every program as objects
 CC="arm-linux-gnueabihf-gcc -O1 -marm -mfpu=neon -mno-unaligned-access -I$TOP/hevcdec -I$TOP/hevcdec/shim -I$TOP/tests/host -Wall -Wno-unused-function"
-$CC -c "$TOP/hevcdec/hevcdec.c" -o "$O/lib/hevcdec.o" && $CC -c "$TOP/hevcdec/hevcdec_conv.c" -o "$O/lib/hevcdec_conv.o" &&
+$CC -c "$TOP/hevcdec/hevcdec.c" -o "$O/lib/hevcdec.o" && $CC -c "$TOP/hevcdec/hevcdec_linux.c" -o "$O/lib/hevcdec_linux.o" &&
+  $CC -c "$TOP/hevcdec/hevcdec_conv.c" -o "$O/lib/hevcdec_conv.o" &&
   $CC -Wno-pointer-sign -Wno-sign-compare -Wno-unused-parameter -Wno-unused-variable -c "$TOP/hevcdec/rpivid_h265.c" \
-    -o "$O/lib/rpivid_h265.o" && $CC -c "$TOP/tests/host/fake_hevc.c" -o "$O/fake_hevc.o" &&
+    -o "$O/lib/rpivid_h265.o" && $CC -c "$TOP/tests/host/fake_hevc.c" -o "$O/fake_hevc.o" && $CC -c "$TOP/tests/host/fake_rpivid.c" -o "$O/fake_rpivid.o" &&
   $CC -c "$HERE/hevc_fake_env.c" -o "$O/hevc_fake_env.o" || exit 1
 rm -f "$O/lib/libhevcdec.a"
 arm-linux-gnueabihf-ar rcs "$O/lib/libhevcdec.a" "$O/lib/"*.o
 cp "$TOP/hevcdec/hwhevcdec.h" "$TOP/hevcdec/hevc_ctrls.h" "$O/lib/"
 # FFmpeg, patched (again only if a patch has changed)
-stamp=$(cat "$P1" "$P2" | sha256sum | cut -c1-16)
+stamp=$(cat "$P1" "$P2" "$0" | sha256sum | cut -c1-16)
 if [ "$(cat "$O/stamp" 2>/dev/null)" != "$stamp" ]; then
   rm -rf "$O/src" "$O/build"
   mkdir -p "$O/src" "$O/build"
@@ -49,7 +50,7 @@ if [ "$(cat "$O/stamp" 2>/dev/null)" != "$stamp" ]; then
       --enable-protocol=file,pipe --enable-muxer=framecrc,rawvideo,null --enable-encoder=rawvideo,wrapped_avframe \
       --enable-filter=null,format,scale,buffer,buffersink --disable-ffplay --disable-ffprobe \
       --extra-cflags="-mno-unaligned-access -mfpu=neon -I$O/lib" --extra-ldflags="-L$O/lib -no-pie" \
-      --extra-libs="$O/hevc_fake_env.o $O/fake_hevc.o" > configure.log 2>&1 ) ||
+      --extra-libs="$O/hevc_fake_env.o $O/fake_hevc.o $O/fake_rpivid.o" > configure.log 2>&1 ) ||
     { echo "FAIL: FFmpeg's configure (see $O/build/configure.log)"; exit 1; }
   grep -q "CONFIG_HEVC_HWDEC_DECODER 1" "$O/build/config_components.h" &&
     grep -q "CONFIG_HEVC_HWDEC_HWACCEL 1" "$O/build/config_components.h" ||
@@ -187,7 +188,7 @@ done
 B=$O/build
 arm-linux-gnueabihf-gcc -O1 -marm -mno-unaligned-access -I"$B" -I"$O/src/ffmpeg-5.1.10" -I"$O/lib" -no-pie \
   -o "$O/hevc_hw_test" "$HERE/hevc_hw_test.c" "$B/libavformat/libavformat.a" "$B/libavcodec/libavcodec.a" \
-  "$B/libswresample/libswresample.a" "$B/libavutil/libavutil.a" -L"$O/lib" -lhevcdec "$O/hevc_fake_env.o" "$O/fake_hevc.o" \
+  "$B/libswresample/libswresample.a" "$B/libavutil/libavutil.a" -L"$O/lib" -lhevcdec "$O/hevc_fake_env.o" "$O/fake_hevc.o" "$O/fake_rpivid.o" \
   -lm -lpthread -latomic || { echo "FAIL: building hevc_hw_test"; bad=1; }
 for t in small:small.mp4:352x288:8:small.yuv small10:small10.mp4:352x288:10:small10.yuv crop10:crop10.mp4:304x276:10:crop10.ref.yuv; do
   IFS=: read -r n mp sz bits ref <<< "$t"
@@ -294,6 +295,41 @@ if HEVC_FAKE_NOBLOCK=1 "$Q" "$FF" -nostdin -loglevel error -c:v hevc_hwdec -i "$
 fi
 grep -q "The HEVC block can't be used: The HEVC block can't be mapped" "$O/noblock.err" ||
   { echo "FAIL: no HEVC block, refused without saying why:"; cat "$O/noblock.err"; bad=1; }
+
+# (0.2.22, hevcdec 0.1.15) RISC OS on Linux: the same decoder on Linux's rpivid (the fake), the block
+# untouched: every picture FFmpeg's, pipelined (the driver slow) and not, frames given back, -ss
+rol_clean() {   # the fakes' reports in file $1: the block never used, nothing wrong, everything closed
+  # ($2 set: references not found allowed, the ones FFmpeg makes up after a seek, never decoded)
+  local refs=0
+  [ -z "${2:-}" ] || refs='[0-9]*'
+  grep -q "fake_hevc: 0 complaints, 0 phase 1s, 0 phase 2s, .* 0 buffers not freed" "$1" &&
+    grep -q "fake_rpivid: 0 complaints, [1-9][0-9]* pictures, [0-9]* slices, $refs references wrong, 0 pictures unknown, 0 left open" "$1"
+}
+for clip in small:352x288 slices:416x240 small10:352x288 odd10:426x240 uhd10:3840x2160; do
+  n=${clip%%:*} sz=${clip#*:}
+  pf=yuv420p; case $n in *10) pf=yuv420p10le ;; esac
+  export HEVC_FAKE_TRACE=$C/$n.trace HEVC_FAKE_YUV=$C/$n.yuv HEVC_FAKE_SIZE=$sz
+  for run in "1:" "30:" "1:-pipelined 0" "30:-spare_frames 0"; do
+    ticks=${run%%:*} opts=${run#*:}
+    case $n in uhd*) [ "$run" = "30:" ] || continue ;; esac
+    tag="$n (Linux, $ticks)${opts:+ $opts}"
+    HEVC_FAKE_ROL=$ticks "$Q" "$FF" -nostdin -loglevel error -c:v hevc_hwdec $opts -i "$C/$n.mp4" -f rawvideo -pix_fmt $pf \
+      -y "$O/$n.rol.yuv" 2> "$O/$n.rol.err" || { echo "FAIL: ffmpeg -c:v hevc_hwdec $tag:"; cat "$O/$n.rol.err"; bad=1; }
+    cmp -s "$O/$n.rol.yuv" "$C/$n.yuv" || { echo "FAIL: ffmpeg -c:v hevc_hwdec $tag: not FFmpeg's pictures"; bad=1; }
+    rol_clean "$O/$n.rol.err" || { echo "FAIL: the fakes after ffmpeg -c:v hevc_hwdec $tag:"; cat "$O/$n.rol.err"; bad=1; }
+    if [ "$ticks" = 30 ] && [ -z "$opts" ]; then
+      grep -q "fake_rpivid: .* [2-9] ahead" "$O/$n.rol.err" || { echo "FAIL: $tag: no pictures queued ahead"; bad=1; }
+    fi
+  done
+  case $n in uhd*) continue ;; esac
+  HEVC_FAKE_ROL=1 "$Q" "$FF" -nostdin -loglevel error -ss 0.2 -c:v hevc_hwdec -i "$C/$n.mp4" -f framecrc - > "$O/$n.rol.crc" \
+    2> "$O/$n.rol.ss.err" || { echo "FAIL: ffmpeg -ss 0.2 -c:v hevc_hwdec $n (Linux)"; cat "$O/$n.rol.ss.err"; bad=1; }
+  a=$(awk -F', ' '!/^#/{print $6}' "$O/$n.hevc.crc" 2>/dev/null | tr '\n' ' ')
+  b=$(awk -F', ' '!/^#/{print $6}' "$O/$n.rol.crc" | tr '\n' ' ')
+  [ -n "$b" ] && { [ -z "$a" ] || [ "$a" = "$b" ]; } || { echo "FAIL: -ss 0.2 $n (Linux): hevc $a, hevc_hwdec $b"; bad=1; }
+  rol_clean "$O/$n.rol.ss.err" seek || { echo "FAIL: the fakes after -ss $n (Linux):"; cat "$O/$n.rol.ss.err"; bad=1; }
+done
+unset HEVC_FAKE_TRACE HEVC_FAKE_YUV HEVC_FAKE_SIZE
 
 [ $bad = 0 ] && echo "hevc_hwdec tests: all passed" || echo "hevc_hwdec tests: FAILED"
 exit $bad

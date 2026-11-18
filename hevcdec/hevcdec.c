@@ -10,76 +10,18 @@
  * the interrupt control register (polled), and the callbacks rpivid_h265.c
  * left run then: phase 1's starts phase 2, phase 2's marks the frame done.
  *
+ * (0.1.15) On RISC OS on Linux, hevcdec_linux.c drives Linux's own rpivid
+ * driver instead (chosen at hevcdec_open): the checks, the frames' shape
+ * and the conversions here are the same for both.
+ *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "hwhevcdec.h"
-#include "rpivid.h"
-#include "rpivid_hw.h"
+#include "hevcdec_int.h"
 #include "hevcdec_conv.h"
-
-#define MAX_FRAMES  VB2_MAX_FRAME
-#define WAIT_CS     100                    /* a phase not done in this: an error */
-#define GUARD       16384                  /* bytes of pattern after each buffer the block uses */
-#define GUARD_BYTE  0xA5
-#define MAX_GUARDED 120
-
-struct hevcdec_frame {
-    struct vb2_v4l2_buffer vb;           /* (first: rpivid_h265.c sees this) */
-    int used;
-    int cached;                          /* cacheable: invalidated before it's read */
-    int submitted;                       /* given to the block: decoded when vb.state is set */
-    int clean;                           /* (0.1.11) cleaned and invalidated since the block wrote it */
-    int free_pending;                    /* (0.1.13) hevcdec_frame_free'd: goes once the block is past it */
-    unsigned free_after;                 /* (0.1.13) ... once pics_done reaches this */
-    char err[160];                       /* why the block failed it */
-    hevcdec *d;                          /* (its decoder) */
-};
-
-struct hevcdec {
-    hevcdec_config cfg;
-    hevcdec_hw *hw;
-    struct rpivid_dev dev;
-    struct rpivid_ctx ctx;
-    struct v4l2_m2m_ctx m2m;
-    struct vb2_queue vq;
-    int started;
-    int dead;                            /* a phase never finished: the block may still be at work */
-    /* For a stream without scaling lists. The block keeps its scaling
-       factors from one picture (and one decoder) to the next, and uses
-       them: SPS1's scaling bit is set anyway when FFmpeg's PCM fields
-       (255, 253 without PCM) overflow into it, and rpivid_h265.c loads the
-       factors only when the SPS enables scaling lists. So such pictures
-       came out with whatever factors were left (HEVCTest 0.1 on a Pi 4);
-       given flat lists (all 16, what "no scaling lists" means) with the
-       SPS copied to enable them, every picture was right (0.1.1). */
-    struct { void *p; size_t size; const char *what; int reported, cached; } guarded[MAX_GUARDED];
-    int cached_frames;                   /* frames cacheable (config, and the machine can) */
-    unsigned overruns, overrun_max;     /* buffers the block wrote past, and by how much at most */
-    const char *overrun_what;
-    struct v4l2_ctrl_hevc_sps sps_flat;
-    struct v4l2_ctrl_hevc_scaling_matrix flat;
-    char err[256];
-    hevcdec_frame *frames[MAX_FRAMES];
-    unsigned pics_given, pics_done;      /* (0.1.13) pictures given to the block, and finished by it */
-    int frees_pending;
-    /* the slices sent, contiguous copies: a picture's last slice is read by
-       phase 1 from here, so a ring (as rpivid's bitstream copies), one a
-       picture, each free again once that picture's phase 1 is done */
-    struct vb2_v4l2_buffer srcs[RPIVID_P1BUF_COUNT];
-    size_t src_caps[RPIVID_P1BUF_COUNT];
-    unsigned src_next;
-    unsigned pic_w, pic_h;               /* (0.1.10) the last picture's size (a change restarts rpivid) */
-    struct vb2_v4l2_buffer *cur_src, *cur_dst;
-    int job_state;                       /* trigger's verdict on the last slice sent */
-    /* phase 1's command lists, each picture's copied for the block and kept
-       until rpivid unmaps it (its decode environment gone: phase 1 done) */
-    struct { void *p; uint64_t bus; size_t cap; int mapped; } cmds[RPIVID_DEC_ENV_COUNT];
-    hevcdec_stats stats;
-};
 
 static char open_err[256];
 static void reap(hevcdec *d);
@@ -87,15 +29,28 @@ static hevcdec *cur;                     /* (one block, one decoder: for kshim's
 
 /* ---- log ---- */
 
-static void logf_(hevcdec *d, const char *fmt, ...)
+static void vlogf_(hevcdec *d, const char *fmt, va_list ap)
 {
     char b[256];
-    va_list ap;
     if (!d || !d->cfg.log) return;
-    va_start(ap, fmt);
     vsnprintf(b, sizeof b, fmt, ap);
-    va_end(ap);
     d->cfg.log(d->cfg.log_handle, b);
+}
+
+static void logf_(hevcdec *d, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vlogf_(d, fmt, ap);
+    va_end(ap);
+}
+
+void hevcdec_logf(hevcdec *d, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vlogf_(d, fmt, ap);
+    va_end(ap);
 }
 
 void hevcdec_klog(int level, const char *fmt, ...)
@@ -112,14 +67,31 @@ void hevcdec_klog(int level, const char *fmt, ...)
     if (cur) logf_(cur, "%s%s", level == 0 ? "rpivid error: " : level == 1 ? "rpivid: " : "rpivid: ", b);
 }
 
+static int vfail(hevcdec *d, const char *fmt, va_list ap)
+{
+    vsnprintf(d->err, sizeof d->err, fmt, ap);
+    logf_(d, "%s", d->err);
+    return HEVCDEC_ERROR;
+}
+
 static int fail(hevcdec *d, const char *fmt, ...)
 {
     va_list ap;
+    int r;
     va_start(ap, fmt);
-    vsnprintf(d->err, sizeof d->err, fmt, ap);
+    r = vfail(d, fmt, ap);
     va_end(ap);
-    logf_(d, "%s", d->err);
-    return HEVCDEC_ERROR;
+    return r;
+}
+
+int hevcdec_fail(hevcdec *d, const char *fmt, ...)
+{
+    va_list ap;
+    int r;
+    va_start(ap, fmt);
+    r = vfail(d, fmt, ap);
+    va_end(ap);
+    return r;
 }
 
 /* ---- kshim's DMA memory ---- */
@@ -260,7 +232,8 @@ void hevcdec_get_stats(const hevcdec *d, hevcdec_stats *s)
     s->overruns = d->overruns;
     s->overrun_max = d->overrun_max;
     s->overrun_what = d->overrun_what;
-    s->app_page_moves = hevcdec_hw_app_page_moves(d->hw);
+    s->app_page_moves = d->hw ? hevcdec_hw_app_page_moves(d->hw) : 0;
+    s->backend = d->lx ? HEVCDEC_BACKEND_LINUX : HEVCDEC_BACKEND_BLOCK;
     s->frames = 0;
     s->frames_bytes = 0;
     for (int i = 0; i < MAX_FRAMES; i++)
@@ -289,6 +262,21 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
     if (!(d = calloc(1, sizeof *d))) { snprintf(open_err, sizeof open_err, "Out of memory"); return HEVCDEC_ERROR; }
     memset(&d->flat, 16, sizeof d->flat);
     d->cfg = *c;
+    {   /* (0.1.15) on RISC OS on Linux, Linux's rpivid (the block is Linux's there) */
+        int r = hevcdec_lx_open(d, open_err, sizeof open_err);
+        if (r < 0) { free(d); return HEVCDEC_ERROR; }
+        if (r == 0) {
+            cur = d;
+            d->cached_frames = 0;            /* (the driver's frames: write-combined) */
+            logf_(d, "hevcdec %s: Linux's rpivid (RISC OS on Linux): frames %ux%u (%s, 128-byte columns of %u lines), "
+                  "%u bytes each", HEVCDEC_VERSION, d->ctx.dst_fmt.width, d->ctx.dst_fmt.height,
+                  c->bit_depth == 10 ? "10-bit NV12, 3 samples a word" : "NV12", d->ctx.dst_fmt.plane_fmt[0].bytesperline,
+                  d->ctx.dst_fmt.plane_fmt[0].sizeimage);
+            *out = d;
+            return HEVCDEC_OK;
+        }
+        open_err[0] = 0;
+    }
     if (hevcdec_hw_open(&d->hw, open_err, sizeof open_err)) { free(d); return HEVCDEC_ERROR; }
     cur = d;
     d->dev.hw = d->hw;
@@ -344,6 +332,12 @@ hevcdec_frame *hevcdec_frame_new(hevcdec *d)
     fr->vb.vb2_buf.num_planes = 1;
     fr->vb.planes[0].length = d->ctx.dst_fmt.plane_fmt[0].sizeimage;
     fr->cached = d->cached_frames;
+    fr->cap = -1;
+    if (d->lx) {                             /* (0.1.15) one of the driver's CAPTURE buffers */
+        if (hevcdec_lx_frame_new(d, fr)) { free(fr); return NULL; }
+        d->frames[i] = fr;
+        return fr;
+    }
     if (!(fr->vb.vaddr = dma_get(d, fr->vb.planes[0].length, &fr->vb.addr, "an output frame", fr->cached))) {
         free(fr);
         fail(d, "No contiguous memory for a %u byte frame", (unsigned)d->ctx.dst_fmt.plane_fmt[0].sizeimage);
@@ -365,7 +359,8 @@ static void reap(hevcdec *d)
     for (int i = 0; i < MAX_FRAMES; i++) {
         hevcdec_frame *f = d->frames[i];
         if (!f || !f->free_pending || ((int)(d->pics_done - f->free_after) < 0 && !idle(d))) continue;
-        dma_put(d, f->vb.vaddr);
+        if (d->lx) hevcdec_lx_frame_gone(d, f);   /* (0.1.15: its buffer kept for the next frame_new) */
+        else dma_put(d, f->vb.vaddr);
         free(f);
         d->frames[i] = NULL;
         d->frees_pending--;
@@ -462,8 +457,15 @@ static int poll_phases(hevcdec *d)
     return 0;
 }
 
+/* (0.1.15) what's finished, seen: the block's phases, or the driver's buffers back */
+static int poll_any(hevcdec *d)
+{
+    return d->lx ? hevcdec_lx_poll(d) : poll_phases(d);
+}
+
 static int idle(const hevcdec *d)
 {
+    if (d->lx) return hevcdec_lx_idle(d);
     return !d->dev.busy1 && !d->dev.busy2 && !d->dev.q1 && !d->dev.q2;
 }
 
@@ -487,7 +489,7 @@ static int all_done(hevcdec *d, void *a) { (void)a; return idle(d); }
 
 int hevcdec_frame_wait(hevcdec *d, hevcdec_frame *f)
 {
-    if (wait_for(d, frame_finished, f) != HEVCDEC_OK) return HEVCDEC_ERROR;
+    if ((d->lx ? hevcdec_lx_wait(d, f) : wait_for(d, frame_finished, f)) != HEVCDEC_OK) return HEVCDEC_ERROR;
     if (!f->submitted) return HEVCDEC_OK;
     if (f->vb.state != VB2_BUF_STATE_DONE) return fail(d, "%s", f->err[0] ? f->err : "The block failed the picture");
     return HEVCDEC_OK;
@@ -495,7 +497,7 @@ int hevcdec_frame_wait(hevcdec *d, hevcdec_frame *f)
 
 int hevcdec_finish(hevcdec *d)
 {
-    int r = wait_for(d, all_done, NULL);
+    int r = d->lx ? hevcdec_lx_wait(d, NULL) : wait_for(d, all_done, NULL);
     reap(d);
     return r;
 }
@@ -544,7 +546,9 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
     size_t *cap_p;
     const struct v4l2_ctrl_hevc_sps *sps = pic->sps;
     const struct v4l2_ctrl_hevc_scaling_matrix *scaling = pic->scaling;
-    if (d->dead) return fail(d, "The block didn't finish a picture: restart the machine before decoding again");
+    if (d->dead)
+        return fail(d, d->lx ? "Linux's rpivid stopped: close the decoder and open another"
+                             : "The block didn't finish a picture: restart the machine before decoding again");
     d->err[0] = 0;
     reap(d);
     if (sps->chroma_format_idc != 1 || sps->bit_depth_luma_minus8 != sps->bit_depth_chroma_minus8 ||
@@ -568,6 +572,7 @@ int hevcdec_decode(hevcdec *d, const hevcdec_picture *pic, hevcdec_frame *f, uin
         sps = &d->sps_flat;
         scaling = &d->flat;
     }
+    if (d->lx) return hevcdec_lx_decode(d, pic, sps, scaling, f, number);   /* (0.1.15) */
     /* the frame finished with (if it was being decoded), and room for one
        more picture (as Linux's driver: each of rpivid's bitstream copies,
        and so each of our slice buffers, free again) */
@@ -680,7 +685,7 @@ static const uint8_t *frame_ready(hevcdec *d, const hevcdec_frame *f)
 
 int hevcdec_frame_done(hevcdec *d, const hevcdec_frame *f)
 {
-    if (!d->dead) { poll_phases(d); reap(d); }
+    if (!d->dead) { poll_any(d); reap(d); }
     return !f->submitted || f->vb.state != 0 || d->dead;
 }
 
@@ -689,7 +694,7 @@ int hevcdec_frame_done(hevcdec *d, const hevcdec_frame *f)
 static void conv_tick(void *arg)
 {
     hevcdec *d = arg;
-    if (!d->dead) poll_phases(d);
+    if (!d->dead) poll_any(d);
 }
 
 /* (0.1.10) the window inside the frame: x, y even (halved: x a multiple of
@@ -714,7 +719,7 @@ static int convert(hevcdec *d, const hevcdec_frame *f, void *const planes[3], co
     o.way = way;
     o.tick = conv_tick;
     o.arg = d;
-    if (!d->dead) poll_phases(d);
+    if (!d->dead) poll_any(d);
     hevcdec_conv(b, col, c_off, d->cfg.bit_depth == 10, planes, strides, bits, x0, y0, w, h, &o);
     return HEVCDEC_OK;
 }
@@ -736,6 +741,13 @@ int hevcdec_frame_to_i420_16(hevcdec *d, const hevcdec_frame *f, uint16_t *const
 
 hevcdec *hevcdec_frame_decoder(const hevcdec_frame *f) { return f ? f->d : NULL; }
 
+int hevcdec_frame_export(hevcdec *d, const hevcdec_frame *f, hevcdec_export *e)
+{
+    if (!d->lx) return fail(d, "Frames are Linux dmabufs only with Linux's rpivid (RISC OS on Linux)"), HEVCDEC_UNSUPPORTED;
+    if (hevcdec_frame_wait(d, (hevcdec_frame *)f) != HEVCDEC_OK) return HEVCDEC_ERROR;
+    return hevcdec_lx_export(d, f, e);
+}
+
 static int half(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], const int strides[3], int x0, int y0, int w,
                 int h, int way);
 
@@ -756,7 +768,7 @@ static int half(hevcdec *d, const hevcdec_frame *f, uint8_t *const planes[3], co
     o.way = way;
     o.tick = conv_tick;
     o.arg = d;
-    if (!d->dead) poll_phases(d);
+    if (!d->dead) poll_any(d);
     hevcdec_conv_half(b, col, c_off, d->cfg.bit_depth == 10, planes, strides, x0, y0, w, h, &o);
     return HEVCDEC_OK;
 }
@@ -793,6 +805,13 @@ void hevcdec_close_all(void)
 void hevcdec_close(hevcdec *d)
 {
     if (!d) return;
+    if (d->lx) {                             /* (0.1.15) Linux's driver: its buffers go with its files */
+        hevcdec_lx_close(d);
+        for (int i = 0; i < MAX_FRAMES; i++) free(d->frames[i]);
+        if (cur == d) cur = NULL;
+        free(d);
+        return;
+    }
     if (!d->dead && !idle(d)) hevcdec_finish(d);   /* (pictures still being decoded: finished first) */
     if (d->dead) {                           /* (the block may still write to its buffers: they stay) */
         logf_(d, "Closed after a phase didn't finish: the block's memory is left (restart the machine)");

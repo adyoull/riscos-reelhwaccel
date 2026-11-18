@@ -37,6 +37,7 @@ typedef int (*fake_hevc_picture_fn)(uint32_t hash, const void **y, const void **
 
 void fake_hevc_reset(void);
 void fake_hevc_set_pictures(fake_hevc_picture_fn fn);
+fake_hevc_picture_fn fake_hevc_get_pictures(void);   /* (0.1.15: fake_rpivid.c's too) */
 int fake_hevc_live(void);             /* allocations not freed */
 uint32_t fake_hevc_hash(const uint8_t *p, size_t n);
 #endif

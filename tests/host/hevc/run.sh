@@ -14,7 +14,7 @@ bad=0
 H=$TOP/tests/host
 arm-linux-gnueabihf-gcc -O1 -marm -mfpu=neon -mno-unaligned-access -DPROBE_TEST -Wall -Wno-unused-function \
   -I"$TOP/hevcdec" -I"$TOP/hevcdec/shim" -I"$H" -no-pie -o "$O/hevcdec_test" "$H/hevcdec_test.c" "$H/fake_hevc.c" \
-  "$TOP/hevcdec/hevcdec.c" "$TOP/hevcdec/hevcdec_conv.c" "$TOP/tools/hevctest/hevctest.c" \
+  "$H/fake_rpivid.c" "$TOP/hevcdec/hevcdec_linux.c" "$TOP/hevcdec/hevcdec.c" "$TOP/hevcdec/hevcdec_conv.c" "$TOP/tools/hevctest/hevctest.c" \
   -Wno-pointer-sign -Wno-sign-compare -Wno-unused-parameter -Wno-unused-variable "$TOP/hevcdec/rpivid_h265.c" || exit 1
 args=()
 if [ -n "${FFMPEG_TARBALL:-}" ] && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx265; then
@@ -55,11 +55,15 @@ else
   echo "hevc tests: traces skipped (set FFMPEG_TARBALL; needs the host's ffmpeg with libx265)"
 fi
 echo "== hevcdec_test (hevcdec and hevctest on traces, the fake HEVC block writing FFmpeg's pictures: bitstreams,"
-echo "   references, frames, 128-byte columns; PU buffer grown; phases that never finish; refusals)"
+echo "   references, frames, 128-byte columns; PU buffer grown; phases that never finish; refusals; and (0.1.15)"
+echo "   on RISC OS on Linux, the fake rpivid driver: requests, held frames, timestamps, dmabufs, failures)"
 "$TOP/tests/qemu/aligntrap.sh" "$O/hevcdec_test" "${args[@]}" > "$O/hevcdec_test.out" 2>&1 || bad=1
 grep "^FAIL\|hevcdec_test:\|matched" "$O/hevcdec_test.out"
 grep -q "hevcdec_test: all passed" "$O/hevcdec_test.out" || bad=1
 "$TOP/tests/qemu/aligntrap.sh" "$O/hevcdec_test" --exit > "$O/hevcdec_exit.out" 2>&1 || bad=1
 grep "FAIL\|hevcdec_test --exit:" "$O/hevcdec_exit.out"
 grep -q "hevcdec_test --exit: all passed" "$O/hevcdec_exit.out" || bad=1
+"$TOP/tests/qemu/aligntrap.sh" "$O/hevcdec_test" --exit-linux > "$O/hevcdec_exit_linux.out" 2>&1 || bad=1
+grep "FAIL\|hevcdec_test --exit:" "$O/hevcdec_exit_linux.out"
+grep -q "hevcdec_test --exit: all passed" "$O/hevcdec_exit_linux.out" || bad=1
 exit $bad

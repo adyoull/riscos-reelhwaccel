@@ -13,9 +13,14 @@
  *   HEVC_FAKE_NOBLOCK  set: no HEVC block (not a Pi 4)
  *   HEVC_FAKE_FAIL   n: the nth phase 1 fails (so its picture does)
  *   HEVC_FAKE_QUIET  set: the fake's complaints counted, not printed
+ *   HEVC_FAKE_ROL    (0.1.15) set: RISC OS on Linux, with the fake rpivid
+ *                    driver (fake_rpivid.c) instead of the block; n > 1:
+ *                    its jobs take n calls
  * At exit, to stderr: "fake_hevc: <complaints> complaints, <n> phase 1s,
  * <n> phase 2s, <n> references wrong, <n> pictures unknown, <n> stale
- * factors, <n> evictions, <n> buffers not freed, <n> overlaps".
+ * factors, <n> evictions, <n> buffers not freed, <n> overlaps"; and with
+ * HEVC_FAKE_ROL, "fake_rpivid: <complaints> complaints, <n> pictures, <n>
+ * slices, <n> references wrong, <n> pictures unknown, <n> left open".
  *
  * Part of riscos-reelhwaccel. GPL version 2 (see COPYING).
  */
@@ -23,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "fake_hevc.h"
+#include "fake_rpivid.h"
 
 static uint32_t rd32(const uint8_t *p) { return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24; }
 
@@ -66,6 +72,10 @@ static void report(void)
             fake_hevc.fails, fake_hevc.phase1s, fake_hevc.phase2s, fake_hevc.ref_errors, fake_hevc.unknown_pictures,
             fake_hevc.factors_wrong, fake_hevc.evictions, fake_hevc_live(), fake_hevc.overlaps, fake_hevc.allocs,
             fake_hevc.peak_bytes >> 10);
+    if (fake_rpivid.present)
+        fprintf(stderr, "fake_rpivid: %d complaints, %d pictures, %d slices, %d references wrong, %d pictures unknown, "
+                "%d left open, %d ahead\n", fake_rpivid.fails, fake_rpivid.pictures, fake_rpivid.slices, fake_rpivid.ref_errors,
+                fake_rpivid.unknown_pictures, fake_rpivid_live(), fake_rpivid.max_ahead);
 }
 
 /* a clip's pictures (its trace's slice hashes, FFmpeg's decode) added to the map */
@@ -111,6 +121,12 @@ __attribute__((constructor)) static void load(void)
     if (getenv("HEVC_FAKE_NOBLOCK")) fake_hevc.no_block = 1;   /* (not a Pi 4) */
     if (getenv("HEVC_FAKE_FAIL")) fake_hevc.p1_fail = atoi(getenv("HEVC_FAKE_FAIL"));
     if (getenv("HEVC_FAKE_QUIET")) fake_hevc.quiet = 1;
+    if (getenv("HEVC_FAKE_ROL")) {
+        fake_rpivid.present = 1;
+        fake_rpivid_reset();
+        if (atoi(getenv("HEVC_FAKE_ROL")) > 1) fake_rpivid.ticks = atoi(getenv("HEVC_FAKE_ROL"));
+        if (getenv("HEVC_FAKE_QUIET")) fake_rpivid.quiet = 1;
+    }
     atexit(report);
     load_one(getenv("HEVC_FAKE_TRACE"), getenv("HEVC_FAKE_YUV"), getenv("HEVC_FAKE_SIZE"));
     load_one(getenv("HEVC_FAKE_TRACE2"), getenv("HEVC_FAKE_YUV2"), getenv("HEVC_FAKE_SIZE2"));

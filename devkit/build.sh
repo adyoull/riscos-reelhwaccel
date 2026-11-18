@@ -7,7 +7,7 @@ set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 TOP=$(cd "$HERE/.." && pwd)
 . "$TOP/common/toolchain.sh"
-V=${1:-0.2.21}
+V=${1:-0.2.22}
 TMP=$(mktemp -d)
 D=$TMP/riscos-reelhwaccel-devkit-$V
 mkdir -p "$D/include" "$D/lib" "$D/ffmpeg"
@@ -26,8 +26,8 @@ cp "$HERE/README.md" "$TOP/COPYING" "$D/"
 printf '#include "vcdec.h"\n#include "vcenc.h"\nint main(void)\n{\n    vcdec *d;\n    vcdec_config c;\n    vcenc *e;\n    vcenc_config ec;\n    vcdec_config_init(&c);\n    vcenc_config_init(&ec);\n    return vcdec_open(&d, &c) == VCDEC_OK && vcdec_gpu_mem() > 0 && vcenc_open(&e, &ec) == VCENC_OK;\n}\n' > "$TMP/t.c"
 ${CROSS}gcc -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -I"$D/include" "$TMP/t.c" -L"$D/lib" -lvcdec -o "$TMP/t" ||
   { echo "devkit: a program doesn't link with the packaged libvcdec.a"; exit 1; }
-[ "$(${CROSS}ar t "$D/lib/libhevcdec.a" | sort | tr '\n' ' ')" = "hevcdec.o hevcdec_conv.o hevcdec_hw.o hevcdec_svc.o rpivid_h265.o " ] ||
-  { echo "devkit: libhevcdec.a doesn't hold its five objects"; exit 1; }
+[ "$(${CROSS}ar t "$D/lib/libhevcdec.a" | sort | tr '\n' ' ')" = "hevcdec.o hevcdec_conv.o hevcdec_hw.o hevcdec_linux.o hevcdec_lsys.o hevcdec_svc.o rpivid_h265.o " ] ||
+  { echo "devkit: libhevcdec.a doesn't hold its seven objects"; exit 1; }
 printf '#include "hwhevcdec.h"\nint main(void)\n{\n    hevcdec *d;\n    hevcdec_config c;\n    hevcdec_config_init(&c);\n    c.width = 1920; c.height = 1080;\n    if (hevcdec_open(&d, &c) != HEVCDEC_OK) return 1;\n    hevcdec_frame_wait(d, hevcdec_frame_new(d));\n    hevcdec_close(d);\n    return 0;\n}\n' > "$TMP/h.c"
 ${CROSS}gcc -march=armv7-a -mfpu=vfpv3 -mfloat-abi=hard -I"$D/include" "$TMP/h.c" -L"$D/lib" -lhevcdec -o "$TMP/h" ||
   { echo "devkit: a program doesn't link with the packaged libhevcdec.a"; exit 1; }

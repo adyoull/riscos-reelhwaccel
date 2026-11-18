@@ -19,6 +19,7 @@
 #include <unistd.h>
 #include "hwhevcdec.h"
 #include "fake_hevc.h"
+#include "fake_rpivid.h"
 
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL: " __VA_ARGS__); printf("\n"); } } while (0)
@@ -147,6 +148,113 @@ static void cleaned(const char *what)
     CHECK(fake_hevc.opens == fake_hevc.closes && !fake_hevc.left, "%s: block opened %d, closed %d%s", what,
           fake_hevc.opens, fake_hevc.closes, fake_hevc.left ? ", memory left" : "");
     CHECK(fake_hevc.fails == 0, "%s: %d complaints from the fake block", what, fake_hevc.fails);
+    CHECK(fake_rpivid_live() == 0, "%s: %d of Linux's files or mappings left", what, fake_rpivid_live());
+    CHECK(fake_rpivid.fails == 0, "%s: %d complaints from the fake rpivid", what, fake_rpivid.fails);
+}
+
+/* (0.1.15) RISC OS on Linux: the fake rpivid there (the block never touched) */
+static void lx_reset(void)
+{
+    fake_hevc_reset();
+    fake_rpivid.present = 1;
+    fake_rpivid_reset();
+}
+
+static void lx_cleaned(const char *what)
+{
+    CHECK(fake_hevc.opens == 0, "%s: the block opened on Linux", what);
+    cleaned(what);
+    fake_rpivid.present = 0;
+    fake_rpivid_reset();
+}
+
+/* hevcdec on Linux's rpivid (the fake), on a trace: as on the block, every
+   picture exactly FFmpeg's, references found by timestamp, each picture's
+   slices one request each (all but the last holding the frame); pipelined
+   (pictures queued ahead), frames given back, pictures failed, a driver
+   that stops, slices too big or refused */
+static void linux_tests(const char *trace, int w)
+{
+    int ret, nsl;
+    char *o;
+    lx_reset();
+    o = run_app(&ret, trace, w >= 3840 ? "-f 6" : NULL);
+    nsl = fake_rpivid.slices;
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && strstr(o, "decoding with Linux's rpivid driver") &&
+          strstr(o, "not cacheable (Linux's, write-combined)") && !strstr(o, "phase 1 ran") &&
+          fake_rpivid.pictures == nmap && !fake_rpivid.ref_errors && !fake_rpivid.unknown_pictures &&
+          fake_rpivid.held == nsl - nmap && fake_rpivid.max_ahead == 1 && fake_rpivid.scaling_sent == nsl &&
+          (strstr(trace, "nowpp") || !fake_rpivid.scaling_not_flat) && fake_rpivid.streamons == 2,
+          "Linux: hevctest %s (%d): %d pictures, %d slices (%d held), %d references wrong, %d unknown, %d ahead, %d scaling "
+          "(%d not flat):\n%s", trace, ret, fake_rpivid.pictures, nsl, fake_rpivid.held, fake_rpivid.ref_errors,
+          fake_rpivid.unknown_pictures, fake_rpivid.max_ahead, fake_rpivid.scaling_sent, fake_rpivid.scaling_not_flat, o);
+    lx_cleaned("Linux");
+    lx_reset();                                 /* pipelined, the driver slow: pictures queued ahead */
+    fake_rpivid.ticks = 40;
+    o = run_app(&ret, trace, w >= 3840 ? "-p -f 6" : "-p");
+    CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && fake_rpivid.pictures == nmap &&
+          !fake_rpivid.ref_errors && !fake_rpivid.unknown_pictures && fake_rpivid.max_ahead >= 2,
+          "Linux: hevctest -p %s (%d): %d pictures, %d references wrong, %d ahead:\n%s", trace, ret, fake_rpivid.pictures,
+          fake_rpivid.ref_errors, fake_rpivid.max_ahead, o);
+    lx_cleaned("Linux -p");
+    if (w >= 3840) return;
+    {
+        static const char *const opts[] = { "-P 5 -G", "-p -w", "-p -G -f 6", "-u -c 4" };
+        for (int k = 0; k < 4; k++) {
+            unsigned back = 0;
+            const char *at;
+            lx_reset();
+            fake_rpivid.ticks = 9;
+            o = run_app(&ret, trace, opts[k]);
+            for (at = strstr(o, "hevcdec: "); at && !sscanf(at, "hevcdec: %u frames given back", &back); at = strstr(at + 1, "hevcdec: ")) {}
+            CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_rpivid.ref_errors &&
+                  !fake_rpivid.unknown_pictures && (k != 2 || back > 0) &&
+                  fake_rpivid.creates <= (k == 2 ? 6 : 17),
+                  "Linux: hevctest %s %s (%d): %d references wrong, %d unknown, %u given back, %d frames made:\n%s",
+                  opts[k], trace, ret, fake_rpivid.ref_errors, fake_rpivid.unknown_pictures, back, fake_rpivid.creates, o);
+            lx_cleaned(opts[k]);
+        }
+    }
+    lx_reset();                                 /* the driver fails picture 3: said, and the rest decoded (-n) */
+    fake_rpivid.fail_pic = 3;
+    o = run_app(&ret, trace, "-n");
+    CHECK(ret == 1 && strstr(o, "Linux's rpivid failed the picture") && fake_rpivid.errors_given == 1 &&
+          strstr(o, "checked against FFmpeg: 1 wrong"), "Linux: picture 3 failed (%d):\n%s", ret, o);
+    lx_cleaned("Linux, a picture failed");
+    lx_reset();                                 /* the driver never finishes: said, not hung, all closed */
+    fake_rpivid.hang = 1;
+    o = run_app(&ret, trace, "-p -c 4");
+    CHECK(ret == 1 && strstr(o, "Linux's rpivid gave nothing back in"), "Linux: the driver hangs (%d):\n%s", ret, o);
+    lx_cleaned("Linux, the driver hangs");
+    lx_reset();                                 /* slices bigger than its buffers: refused before anything's given */
+    fake_rpivid.out_size = 256;
+    o = run_app(&ret, trace, "-c 2");
+    CHECK(ret == 1 && strstr(o, "more than Linux's rpivid takes (256)") && fake_rpivid.slices == 0,
+          "Linux: slices too big (%d):\n%s", ret, o);
+    lx_cleaned("Linux, slices too big");
+    if (strstr(trace, "slices")) {
+        lx_reset();                             /* a picture's first slice refused: that picture fails, the rest go on */
+        fake_rpivid.refuse_slice = 5;           /* (picture 2's first: 4 slices a picture) */
+        fake_rpivid.quiet = 1;                  /* (later pictures refer to it: those fail too, as the driver's would) */
+        o = run_app(&ret, trace, "-n");
+        CHECK(ret == 1 && strstr(o, "Slice 0: Linux's rpivid refused it") && !strstr(o, "decoder stopped") &&
+              strstr(o, "11 checked against FFmpeg") && fake_rpivid.pictures == 11,
+              "Linux: a first slice refused (%d):\n%s", ret, o);
+        lx_cleaned("Linux, a first slice refused");
+        lx_reset();                             /* a later slice refused: the frame is the driver's, so the decoder stops */
+        fake_rpivid.refuse_slice = 6;
+        o = run_app(&ret, trace, "-n");
+        CHECK(ret == 1 && strstr(o, "Slice 1: Linux's rpivid refused it") && strstr(o, "decoder stopped") &&
+              strstr(o, "Linux's rpivid stopped: close the decoder and open another"),
+              "Linux: a second slice refused (%d):\n%s", ret, o);
+        lx_cleaned("Linux, a second slice refused");
+        lx_reset();                             /* a slice the driver's setup refuses: its picture fails */
+        fake_rpivid.ticks = 4;
+        o = run_app(&ret, trace, "-p -n -x 2");
+        CHECK(ret == 1 && fake_rpivid.slices_refused == 1 && strstr(o, "Linux's rpivid failed the picture") &&
+              strstr(o, "11 checked against FFmpeg: 1 wrong"), "Linux: -x 2 (%d):\n%s", ret, o);
+        lx_cleaned("Linux -x 2");
+    }
 }
 
 static void trace_tests(const char *trace, const char *rawname, const char *size)
@@ -157,6 +265,7 @@ static void trace_tests(const char *trace, const char *rawname, const char *size
     if (load(trace, rawname, w, h)) { CHECK(0, "%s: the pictures don't match %s", trace, rawname); return; }
     fake_hevc_set_pictures(picture);
 
+    linux_tests(trace, w);                      /* (0.1.15) */
     if (w >= 3840) {                            /* 4K: frames of 12-17 MB, so a few of them, and the main runs only */
         static const char *const opts[] = { "-f 6", "-p -f 6" };
         for (int k = 0; k < 2; k++) {
@@ -496,20 +605,29 @@ static void exit_check(void)
 {
     CHECK(fake_hevc.closes == fake_hevc.opens && fake_hevc_live() == 0 && !fake_hevc.fails,
           "at exit: opens %d closes %d, %d buffers not freed", fake_hevc.opens, fake_hevc.closes, fake_hevc_live());
+    CHECK(fake_rpivid_live() == 0 && !fake_rpivid.fails, "at exit: %d of Linux's files or mappings left", fake_rpivid_live());
     printf("hevcdec_test --exit: %s\n", fails ? "FAILED" : "all passed");
     if (fails) _exit(1);
 }
 
-static int exit_test(void)
+static int exit_test(int linux_)
 {
     hevcdec *d = NULL;
     hevcdec_config c;
     fake_hevc_reset();
+    if (linux_) lx_reset();                     /* (0.1.15) on Linux: its files and mappings closed */
     atexit(exit_check);
     hevcdec_config_init(&c);
     c.width = 352; c.height = 288; c.bit_depth = 8;
-    CHECK(hevcdec_open(&d, &c) == HEVCDEC_OK && fake_hevc_live() > 0, "--exit: open: %s", hevcdec_open_error());
-    printf("hevcdec_test --exit: exiting with the decoder open (%d buffers)\n", fake_hevc_live());
+    CHECK(hevcdec_open(&d, &c) == HEVCDEC_OK && (linux_ ? fake_rpivid_live() : fake_hevc_live()) > 0, "--exit: open: %s",
+          hevcdec_open_error());
+    if (linux_) {
+        hevcdec_export e;
+        hevcdec_frame *f = hevcdec_frame_new(d);
+        CHECK(f && hevcdec_frame_export(d, f, &e) == HEVCDEC_OK, "--exit-linux: a frame exported");
+    }
+    printf("hevcdec_test --exit: exiting with the decoder open (%d %s)\n", linux_ ? fake_rpivid_live() : fake_hevc_live(),
+           linux_ ? "of Linux's files and mappings" : "buffers");
     exit(0);
 }
 
@@ -519,7 +637,8 @@ int main(int argc, char **argv)
     hevcdec_config c;
     int r, ret;
 
-    if (argc > 1 && !strcmp(argv[1], "--exit")) return exit_test();
+    if (argc > 1 && !strcmp(argv[1], "--exit")) return exit_test(0);
+    if (argc > 1 && !strcmp(argv[1], "--exit-linux")) return exit_test(1);
     /* refusals: not a Pi 4, sizes, depth, no memory */
     fake_hevc_reset();
     fake_hevc.no_block = 1;
@@ -620,6 +739,100 @@ int main(int argc, char **argv)
     }
     hevcdec_close(d);
     cleaned("open/close");
+    {   /* (0.1.15) RISC OS on Linux: Linux's rpivid found and used; its frames' shape, a dmabuf of
+           one; no rpivid: the block tried (as not on Linux); a media device missing: said */
+        hevcdec_stats st;
+        hevcdec_export e;
+        hevcdec_frame *f = NULL;
+        lx_reset();
+        c.bit_depth = 10;
+        c.log = log_to; logged[0] = 0;
+        r = hevcdec_open(&d, &c);
+        c.log = NULL;
+        CHECK(r == HEVCDEC_OK && strstr(logged, "Linux's rpivid (RISC OS on Linux): frames 384x288 (10-bit NV12, 3 samples a "
+              "word, 128-byte columns of 432 lines), 221184 bytes"), "Linux, 10-bit: %s %s", hevcdec_open_error(), logged);
+        if (r == HEVCDEC_OK) {
+            hevcdec *d2;
+            CHECK(hevcdec_open(&d2, &c) == HEVCDEC_ERROR && strstr(hevcdec_open_error(), "in use"), "Linux: opened twice");
+            hevcdec_get_stats(d, &st);
+            CHECK(st.backend == HEVCDEC_BACKEND_LINUX && !st.cached_frames, "Linux: stats %d %d", st.backend, st.cached_frames);
+            f = hevcdec_frame_new(d);
+            memset(&e, 0, sizeof e);
+            CHECK(f && hevcdec_frame_export(d, f, &e) == HEVCDEC_OK && e.fd > 2 && e.drm_format == 0x30333050u &&
+                  e.modifier == (7ull << 56 | 432ull << 8 | 4) && e.col_height == 432 && e.width == 384 && e.height == 288 &&
+                  e.size == 221184 && fake_rpivid.exports == 1, "Linux: a frame exported: fd %d, &%08X, &%llx, %ux%u, %u, %u",
+                  e.fd, (unsigned)e.drm_format, (unsigned long long)e.modifier, e.width, e.height, e.col_height, e.size);
+            CHECK(f && hevcdec_frame_export(d, f, &e) == HEVCDEC_OK && fake_rpivid.exports == 1, "Linux: exported again");
+            CHECK(hevcdec_frame_free(d, f) == HEVCDEC_OK && hevcdec_frame_new(d) && fake_rpivid.creates == 1,
+                  "Linux: a frame's buffer used again (%d made)", fake_rpivid.creates);
+            for (int i = 0; i < 40 && (f = hevcdec_frame_new(d)); i++) {}
+            CHECK(!f && strstr(hevcdec_error(d), "More than") && fake_rpivid.creates == 32, "Linux: frames without end (%d): %s",
+                  fake_rpivid.creates, hevcdec_error(d));
+            hevcdec_close(d);
+        }
+        lx_cleaned("Linux open/close");
+        lx_reset();                             /* pipelined: a frame decoded into again while the driver still */
+        fake_rpivid.ticks = 50;                 /* has it waits for it; finishing waits for everything given */
+        c.pipelined = 1;
+        c.bit_depth = 8;
+        r = hevcdec_open(&d, &c);
+        c.pipelined = 0;
+        if (r == HEVCDEC_OK) {
+            static struct v4l2_ctrl_hevc_sps sps;
+            static struct v4l2_ctrl_hevc_pps pps;
+            static struct v4l2_ctrl_hevc_decode_params dec;
+            static struct v4l2_ctrl_hevc_slice_params sp;
+            static uint8_t data[64];
+            hevcdec_slice sl = { &sp, data, sizeof data };
+            hevcdec_picture pic = { &sps, &pps, &dec, NULL, 1, &sl };
+            memset(data, 0x5A, sizeof data);
+            sps.chroma_format_idc = 1;
+            sps.pic_width_in_luma_samples = 352;
+            sps.pic_height_in_luma_samples = 288;
+            sp.bit_size = 8 * 64;
+            sp.slice_type = V4L2_HEVC_SLICE_TYPE_I;
+            f = hevcdec_frame_new(d);
+            CHECK(f && hevcdec_decode(d, &pic, f, 1) == HEVCDEC_OK && !hevcdec_frame_done(d, f), "Linux: pipelined, given: %s",
+                  hevcdec_error(d));
+            CHECK(f && hevcdec_decode(d, &pic, f, 2) == HEVCDEC_OK, "Linux: the same frame again: %s", hevcdec_error(d));
+            CHECK(f && hevcdec_finish(d) == HEVCDEC_OK && hevcdec_frame_done(d, f) && fake_rpivid.pictures == 2,
+                  "Linux: finished (%d pictures): %s", fake_rpivid.pictures, hevcdec_error(d));
+            CHECK(f && hevcdec_decode(d, &pic, f, 0x7FFFFFFFull * 1000000ull + 1) == HEVCDEC_ERROR &&
+                  strstr(hevcdec_error(d), "too big for Linux's timestamps"), "Linux: a number too big: %s", hevcdec_error(d));
+            hevcdec_get_stats(d, &st);
+            CHECK(st.pictures == 2 && st.frames == 1, "Linux: stats %u pictures, %u frames", st.pictures, st.frames);
+            hevcdec_close(d);
+        }
+        fake_rpivid.unknown_pictures = 0;
+        lx_cleaned("Linux, a frame again");
+        c.bit_depth = 8;
+        lx_reset();
+        fake_rpivid.no_device = 1;
+        fake_hevc.no_block = 1;
+        c.log = log_to; logged[0] = 0;
+        CHECK(hevcdec_open(&d, &c) == HEVCDEC_ERROR && strstr(hevcdec_open_error(), "can't be mapped") &&
+              strstr(logged, "Linux has no rpivid device"), "Linux, no rpivid: %s / %s", hevcdec_open_error(), logged);
+        c.log = NULL;
+        CHECK(fake_hevc.opens == 0, "Linux, no rpivid: the block opened");  /* (no_block: refused at the map) */
+        fake_hevc.no_block = 0;
+        fake_rpivid.present = 0;
+        cleaned("Linux, no rpivid");
+        lx_reset();
+        fake_rpivid.no_media = 1;
+        CHECK(hevcdec_open(&d, &c) == HEVCDEC_ERROR && strstr(hevcdec_open_error(), "media device"), "Linux, no media: %s",
+              hevcdec_open_error());
+        lx_cleaned("Linux, no media device");
+        fake_hevc_reset();                      /* the block's frames aren't dmabufs */
+        r = hevcdec_open(&d, &c);
+        if (r == HEVCDEC_OK) {
+            f = hevcdec_frame_new(d);
+            CHECK(f && hevcdec_frame_export(d, f, &e) == HEVCDEC_UNSUPPORTED, "the block: a frame exported");
+            hevcdec_get_stats(d, &st);
+            CHECK(st.backend == HEVCDEC_BACKEND_BLOCK, "the block: backend %d", st.backend);
+            hevcdec_close(d);
+        }
+        cleaned("block export");
+    }
     {
         char *o = run_app(&ret, "/nonexistent", NULL);
         CHECK(ret == 1 && strstr(o, "Can't open"), "hevctest, no trace");

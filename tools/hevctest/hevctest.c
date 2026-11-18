@@ -609,6 +609,9 @@ int probe_main(int argc, char **argv)
         goto out;
     }
     say("hevcdec_open: %u cs\n", (unsigned)(now_cs() - t0));
+    hevcdec_get_stats(d, &st);                 /* (0.1.15) which way: the block, or Linux's driver for it */
+    say("hevcdec: decoding with %s\n", st.backend == HEVCDEC_BACKEND_LINUX ? "Linux's rpivid driver (RISC OS on Linux)"
+                                                                          : "the HEVC block, driven directly");
     for (i = 0; i < nframes; i++) {
         if (!(frames[i] = hevcdec_frame_new(d))) {
             say("Frame %d: %s\n", i, hevcdec_error(d));
@@ -743,10 +746,12 @@ int probe_main(int argc, char **argv)
         t_dec ? (unsigned)(done * 1000 / t_dec % 10) : 0, (unsigned)t_conv);
     say("In all %u.%02u s%s; the program waited for the block %u cs (%u times)\n", (unsigned)(t_all / 100),
         (unsigned)(t_all % 100), pipelined ? " (pipelined: -p)" : "", st.cs_wait, st.waits);
-    say("hevcdec: phase 1 ran %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
-        st.cs_phase2, st.phase1_retries);
+    if (st.backend == HEVCDEC_BACKEND_BLOCK)
+        say("hevcdec: phase 1 ran %u cs, phase 2 %u cs; phase 1 run again (buffers grown) %u times\n", st.cs_phase1,
+            st.cs_phase2, st.phase1_retries);
     say("hevcdec: output frames %s%s", st.cached_frames ? "cacheable" : "not cacheable",
-        st.cached_frames ? "" : uncached ? " (-u)\n" : " (no cache maintenance)\n");
+        st.cached_frames ? "" : uncached ? " (-u)\n" : st.backend == HEVCDEC_BACKEND_LINUX ? " (Linux's, write-combined)\n"
+                                                                                       : " (no cache maintenance)\n");
     if (st.cached_frames)
         say(" (cleaning and invalidating them before converting: %u cs of that, %u times)\n", st.cs_cache, st.cache_cleans);
     if (st.convert_waits) say("hevcdec: conversions waited for their picture %u times, %u cs\n", st.convert_waits,

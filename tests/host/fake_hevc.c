@@ -95,6 +95,7 @@ void fake_hevc_reset(void)
 }
 
 void fake_hevc_set_pictures(fake_hevc_picture_fn fn) { picture_fn = fn; }
+fake_hevc_picture_fn fake_hevc_get_pictures(void) { return picture_fn; }
 
 int fake_hevc_live(void)
 {
