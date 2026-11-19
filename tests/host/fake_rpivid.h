@@ -17,6 +17,7 @@ typedef struct {
     int refuse_slice;                 /* this slice (counting from 1, all pictures) refused by S_EXT_CTRLS */
     unsigned out_size;                /* (0: as the driver sizes it) the OUTPUT buffers' bytes */
     int quiet;                        /* failures expected: counted, not printed */
+    int cache_hints;                  /* (0.1.16) the driver allows V4L2_MEMORY_FLAG_NON_COHERENT on CAPTURE (6.6.78-18) */
     /* findings */
     int fails;                        /* the fake's own CHECK failures */
     int opens, closes, live_fds, maps, unmaps;
@@ -24,6 +25,7 @@ typedef struct {
     int creates, reinits, exports, streamons, streamoffs;
     int max_ahead;                    /* the most pictures queued at once (pipelining) */
     int scaling_sent, scaling_not_flat;
+    int cacheable_frames, invalidates, cleans_skipped;   /* (0.1.16) */
     int dpb_ns_wrong;                 /* a reference's timestamp not one of the frames' (ns) */
 } fake_rpivid_state;
 extern fake_rpivid_state fake_rpivid;

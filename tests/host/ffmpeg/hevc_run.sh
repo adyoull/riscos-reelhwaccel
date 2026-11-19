@@ -309,14 +309,17 @@ for clip in small:352x288 slices:416x240 small10:352x288 odd10:426x240 uhd10:384
   n=${clip%%:*} sz=${clip#*:}
   pf=yuv420p; case $n in *10) pf=yuv420p10le ;; esac
   export HEVC_FAKE_TRACE=$C/$n.trace HEVC_FAKE_YUV=$C/$n.yuv HEVC_FAKE_SIZE=$sz
-  for run in "1:" "30:" "1:-pipelined 0" "30:-spare_frames 0"; do
+  for run in "1:" "30:" "1:-pipelined 0" "30:-spare_frames 0" "c30:" "c1:-output_hw 0"; do
     ticks=${run%%:*} opts=${run#*:}
+    cache=; case $ticks in c*) cache=1 ticks=${ticks#c} ;; esac   # (hevcdec 0.1.16: cacheable frames)
     case $n in uhd*) [ "$run" = "30:" ] || continue ;; esac
-    tag="$n (Linux, $ticks)${opts:+ $opts}"
-    HEVC_FAKE_ROL=$ticks "$Q" "$FF" -nostdin -loglevel error -c:v hevc_hwdec $opts -i "$C/$n.mp4" -f rawvideo -pix_fmt $pf \
+    tag="$n (Linux, $ticks${cache:+, cacheable})${opts:+ $opts}"
+    HEVC_FAKE_ROL=$ticks HEVC_FAKE_ROL_CACHE=$cache "$Q" "$FF" -nostdin -loglevel error -c:v hevc_hwdec $opts -i "$C/$n.mp4" -f rawvideo -pix_fmt $pf \
       -y "$O/$n.rol.yuv" 2> "$O/$n.rol.err" || { echo "FAIL: ffmpeg -c:v hevc_hwdec $tag:"; cat "$O/$n.rol.err"; bad=1; }
     cmp -s "$O/$n.rol.yuv" "$C/$n.yuv" || { echo "FAIL: ffmpeg -c:v hevc_hwdec $tag: not FFmpeg's pictures"; bad=1; }
     rol_clean "$O/$n.rol.err" || { echo "FAIL: the fakes after ffmpeg -c:v hevc_hwdec $tag:"; cat "$O/$n.rol.err"; bad=1; }
+    if [ -n "$cache" ]; then grep -q "fake_rpivid: .* [1-9][0-9]* cacheable" "$O/$n.rol.err"; else grep -q " 0 cacheable" "$O/$n.rol.err"; fi ||
+      { echo "FAIL: $tag: frames cacheable or not, wrongly"; grep fake_rpivid "$O/$n.rol.err"; bad=1; }
     if [ "$ticks" = 30 ] && [ -z "$opts" ]; then
       grep -q "fake_rpivid: .* [2-9] ahead" "$O/$n.rol.err" || { echo "FAIL: $tag: no pictures queued ahead"; bad=1; }
     fi

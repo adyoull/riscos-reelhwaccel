@@ -1,5 +1,34 @@
 # Changes
 
+## hevcdec 0.1.16, devkit 0.2.23, HEVCTest 0.1.16: cacheable frames on RISC OS on Linux (2026-11-19)
+
+HEVCTest 0.1.15 on a Pi 4 under ROL (kernel 6.6.78-17): every picture of
+every clip was exactly FFmpeg's, and decoding ran at 85-90% of native
+(1080p 194 a second waiting, 286-300 pipelined; 4K 10-bit 50 and 67).
+But converting from Linux's write-combined frames was 3-4 times slower
+than native: 10 ms a 1080p picture against 2.3, and 124 ms against 31
+at 4K 10-bit. At our request, ROL's kernel 6.6.78-18 lets rpivid's
+CAPTURE queue take cache hints (handoffs 2026-11-19).
+
+- **hevcdec 0.1.16:**
+  - When the CAPTURE queue reports `V4L2_BUF_CAP_SUPPORTS_MMAP_CACHE_HINTS`
+    (asked with an empty REQBUFS), every frame is made with
+    `V4L2_MEMORY_FLAG_NON_COHERENT`. vb2 fixes that for the whole queue
+    at its first buffers. The kernel invalidates each frame at DQBUF.
+  - QBUF sets `V4L2_BUF_FLAG_NO_CACHE_CLEAN`: the CPU only reads frames.
+  - `stats.cached_frames` is 1 then. `cached_frames = 0` in the config
+    (HEVCTest -u) still gives write-combined frames.
+  - An older kernel goes on as 0.1.15.
+- **The fake:** `cache_hints`. Its cacheable frames keep the CPU's view
+  apart from memory: the picture reaches the CPU only through DQBUF's
+  invalidate, and a QBUF without NO_CACHE_CLEAN writes back what the
+  CPU changed. A differing CREATE_BUFS is refused, as vb2 does.
+  hevcdec_test runs each trace with it (plain, pipelined, -u), and
+  FFmpeg's hevc_hwdec runs with it (`HEVC_FAKE_ROL_CACHE`). 5 mutants
+  caught.
+- **HEVCTest 0.1.16** says when the frames are cacheable through cache
+  hints.
+
 ## hevcdec 0.1.15, devkit 0.2.22, HEVCTest 0.1.15: HEVC on RISC OS on Linux (2026-11-18)
 
 ROL's handoff (handoffs/2026-11-18-rol-hevcdec-linux-backend-rpivid.md):

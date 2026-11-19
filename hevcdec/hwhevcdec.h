@@ -15,6 +15,9 @@
  *     hevcdec_frame_to_i420(d, f, planes, strides)
  *   hevcdec_close(d);
  *
+ * 0.1.16: on RISC OS on Linux, cacheable frames when Linux's rpivid allows
+ * cache hints (ROL's kernel 6.6.78-18 on): converting them is as quick as
+ * on native RISC OS. stats.cached_frames says so.
  * 0.1.15: on RISC OS on Linux (ROL), with Linux's rpivid driver (the
  * kernel's own copy of the same block's driver, through V4L2's stateless
  * decoder interface) when there's no block to drive directly: chosen at
@@ -55,7 +58,7 @@
 #include <stdint.h>
 #include "hevc_ctrls.h"
 
-#define HEVCDEC_VERSION "0.1.15"
+#define HEVCDEC_VERSION "0.1.16"
 
 #define HEVCDEC_OK           0
 #define HEVCDEC_ERROR       -1   /* hevcdec_error says why */

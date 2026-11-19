@@ -18,7 +18,12 @@
  *    are multiplied by 1000), which the driver copies to the CAPTURE
  *    buffer and finds references by;
  *  - the driver overlaps its phases itself: pipelined is buffers queued
- *    ahead.
+ *    ahead;
+ *  - (0.1.16) with a driver that allows cache hints (ROL's 6.6.78-18 on),
+ *    the frames are cacheable (V4L2_MEMORY_FLAG_NON_COHERENT): the kernel
+ *    invalidates each as DQBUF gives it back, and since the CPU only reads
+ *    them, QBUF skips the clean (V4L2_BUF_FLAG_NO_CACHE_CLEAN). Otherwise
+ *    they're write-combined, three to four times slower to convert.
  *
  * The CAPTURE queue takes buffers in the order they're queued, so a
  * frame's buffer is queued only once its first slice is ready to go; and
@@ -105,6 +110,9 @@ LX_SIZE_OK(lx_media_info, 256);
 #define CAP_M2M_MPLANE 0x00004000u
 #define FLAG_ERROR     0x00000040u
 #define FLAG_REQUEST_FD 0x00800000u
+#define FLAG_NO_CACHE_CLEAN 0x00001000u
+#define CAP_MMAP_CACHE_HINTS 0x00000040u     /* V4L2_BUF_CAP_SUPPORTS_MMAP_CACHE_HINTS */
+#define MEMORY_FLAG_NON_COHERENT 1u
 #define WHICH_CUR_VAL     0
 #define WHICH_REQUEST_VAL 0x0f010000u
 #define PIX_FMT_HEVC_SLICE 0x35363253u       /* ('S','2','6','5') */
@@ -138,6 +146,7 @@ struct hevcdec_lx {
     struct { void *p; uint32_t len; int expfd; hevcdec_frame *f; } cap[VB2_MAX_FRAME];
     int ncap;
     unsigned queued;                         /* CAPTURE buffers with the driver */
+    int noncoherent;                         /* (0.1.16) frames cacheable: the kernel invalidates each at DQBUF */
     struct v4l2_ctrl_hevc_decode_params dec; /* (a picture's, its references' timestamps in ns) */
 };
 
@@ -292,6 +301,19 @@ int hevcdec_lx_open(hevcdec *d, char *err, size_t errlen)
         return -1;
     }
     lx->cap_fmt = f;
+    /* (0.1.16) cacheable frames, if the driver allows cache hints (ROL's 6.6.78-18): the CAPTURE
+       queue asked, with no buffers yet, whether it keeps V4L2_MEMORY_FLAG_NON_COHERENT. vb2 fixes
+       the choice for the whole queue at its first buffers, so every CREATE_BUFS then carries it */
+    if (d->cfg.cached_frames) {
+        memset(&rb, 0, sizeof rb);
+        rb.type = TYPE_CAPTURE;
+        rb.memory = MEMORY_MMAP;
+        rb.flags = MEMORY_FLAG_NON_COHERENT;
+        if (lsys_ioctl(vfd, VIDIOC_REQBUFS, &rb) == 0 && (rb.capabilities & CAP_MMAP_CACHE_HINTS) &&
+            (rb.flags & MEMORY_FLAG_NON_COHERENT))
+            lx->noncoherent = 1;
+    }
+    d->cached_frames = lx->noncoherent;
     df->width = f.fmt.pix_mp.width;
     df->height = f.fmt.pix_mp.height;
     df->pixelformat = f.fmt.pix_mp.pixelformat;
@@ -347,7 +369,10 @@ int hevcdec_lx_frame_new(hevcdec *d, hevcdec_frame *f)
         cb.count = 1;
         cb.memory = MEMORY_MMAP;
         cb.format = lx->cap_fmt;
+        cb.flags = lx->noncoherent ? MEMORY_FLAG_NON_COHERENT : 0;
         if ((r = lsys_ioctl(lx->vfd, VIDIOC_CREATE_BUFS, &cb)) < 0) return lx_fail(d, "making a frame", r);
+        if ((cb.flags & MEMORY_FLAG_NON_COHERENT) != (lx->noncoherent ? MEMORY_FLAG_NON_COHERENT : 0))
+            return hevcdec_fail(d, "Linux's rpivid: a frame made %scacheable, not as asked", lx->noncoherent ? "not " : "");
         if (cb.count != 1 || cb.index >= VB2_MAX_FRAME || cb.index != (uint32_t)lx->ncap)
             return hevcdec_fail(d, "Linux's rpivid: making a frame gave %u buffers from %u", (unsigned)cb.count,
                                 (unsigned)cb.index);
@@ -368,6 +393,7 @@ int hevcdec_lx_frame_new(hevcdec *d, hevcdec_frame *f)
         lx->cap[i].len = pl.length;
     }
     lx->cap[i].f = f;
+    f->cached = 0;                                   /* (0.1.16: cacheable or not, nothing for hevcdec to clean) */
     f->cap = i;
     f->lx_queued = 0;
     f->vb.vaddr = lx->cap[i].p;
@@ -587,6 +613,7 @@ int hevcdec_lx_decode(hevcdec *d, const hevcdec_picture *pic, const struct v4l2_
             b.memory = MEMORY_MMAP;
             b.length = 1;
             b.m = (uint32_t)(uintptr_t)&pl;
+            if (lx->noncoherent) b.flags = FLAG_NO_CACHE_CLEAN;   /* (0.1.16: the CPU only reads frames) */
             if ((r = lsys_ioctl(lx->vfd, VIDIOC_QBUF, &b)) < 0) return lx_fail(d, "giving it the frame", r);
             f->lx_queued = 1;
             f->submitted = 1;                        /* (from here the driver has it: it comes back, done or failed) */

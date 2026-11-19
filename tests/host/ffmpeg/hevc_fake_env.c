@@ -16,6 +16,7 @@
  *   HEVC_FAKE_ROL    (0.1.15) set: RISC OS on Linux, with the fake rpivid
  *                    driver (fake_rpivid.c) instead of the block; n > 1:
  *                    its jobs take n calls
+ *   HEVC_FAKE_ROL_CACHE  (0.1.16) set: that driver allows cache hints
  * At exit, to stderr: "fake_hevc: <complaints> complaints, <n> phase 1s,
  * <n> phase 2s, <n> references wrong, <n> pictures unknown, <n> stale
  * factors, <n> evictions, <n> buffers not freed, <n> overlaps"; and with
@@ -74,8 +75,9 @@ static void report(void)
             fake_hevc.peak_bytes >> 10);
     if (fake_rpivid.present)
         fprintf(stderr, "fake_rpivid: %d complaints, %d pictures, %d slices, %d references wrong, %d pictures unknown, "
-                "%d left open, %d ahead\n", fake_rpivid.fails, fake_rpivid.pictures, fake_rpivid.slices, fake_rpivid.ref_errors,
-                fake_rpivid.unknown_pictures, fake_rpivid_live(), fake_rpivid.max_ahead);
+                "%d left open, %d ahead, %d cacheable\n", fake_rpivid.fails, fake_rpivid.pictures, fake_rpivid.slices, fake_rpivid.ref_errors,
+                fake_rpivid.unknown_pictures, fake_rpivid_live(), fake_rpivid.max_ahead,
+                fake_rpivid.cacheable_frames);
 }
 
 /* a clip's pictures (its trace's slice hashes, FFmpeg's decode) added to the map */
@@ -126,6 +128,7 @@ __attribute__((constructor)) static void load(void)
         fake_rpivid_reset();
         if (atoi(getenv("HEVC_FAKE_ROL")) > 1) fake_rpivid.ticks = atoi(getenv("HEVC_FAKE_ROL"));
         if (getenv("HEVC_FAKE_QUIET")) fake_rpivid.quiet = 1;
+        if (getenv("HEVC_FAKE_ROL_CACHE") && *getenv("HEVC_FAKE_ROL_CACHE")) fake_rpivid.cache_hints = 1;   /* (0.1.16: ROL's 6.6.78-18) */
     }
     atexit(report);
     load_one(getenv("HEVC_FAKE_TRACE"), getenv("HEVC_FAKE_YUV"), getenv("HEVC_FAKE_SIZE"));

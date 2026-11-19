@@ -189,6 +189,27 @@ static void linux_tests(const char *trace, int w)
           "(%d not flat):\n%s", trace, ret, fake_rpivid.pictures, nsl, fake_rpivid.held, fake_rpivid.ref_errors,
           fake_rpivid.unknown_pictures, fake_rpivid.max_ahead, fake_rpivid.scaling_sent, fake_rpivid.scaling_not_flat, o);
     lx_cleaned("Linux");
+    {   /* (0.1.16) a driver allowing cache hints: frames cacheable, each invalidated as it comes back
+           (the fake's CPU sees only what DQBUF brought back), never cleaned; -u: not asked for */
+        static const char *const copts[3] = { "", "-p", "-u" };
+        for (int k = 0; k < (w >= 3840 ? 2 : 3); k++) {
+            char opt[24];
+            snprintf(opt, sizeof opt, "%s%s", copts[k], w >= 3840 ? " -f 6" : "");
+            lx_reset();
+            fake_rpivid.cache_hints = 1;
+            fake_rpivid.ticks = k == 1 ? 20 : 1;
+            o = run_app(&ret, trace, opt[0] ? opt : NULL);
+            CHECK(ret == 0 && strstr(o, "Result: OK - every picture exactly") && !fake_rpivid.ref_errors &&
+                  !fake_rpivid.unknown_pictures && (k == 2 ? strstr(o, "not cacheable (-u)") && !fake_rpivid.cacheable_frames &&
+                  !fake_rpivid.invalidates : strstr(o, "cacheable (Linux's, with cache hints") &&
+                  fake_rpivid.cacheable_frames == fake_rpivid.creates && fake_rpivid.invalidates == fake_rpivid.pictures &&
+                  fake_rpivid.cleans_skipped == fake_rpivid.pictures),
+                  "Linux, cache hints, hevctest %s %s (%d): %d cacheable of %d, %d invalidated, %d cleans skipped, %d pictures:\n%s",
+                  opt, trace, ret, fake_rpivid.cacheable_frames, fake_rpivid.creates, fake_rpivid.invalidates,
+                  fake_rpivid.cleans_skipped, fake_rpivid.pictures, o);
+            lx_cleaned("Linux, cache hints");
+        }
+    }
     lx_reset();                                 /* pipelined, the driver slow: pictures queued ahead */
     fake_rpivid.ticks = 40;
     o = run_app(&ret, trace, w >= 3840 ? "-p -f 6" : "-p");

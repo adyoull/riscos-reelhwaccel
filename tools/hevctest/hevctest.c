@@ -752,7 +752,9 @@ int probe_main(int argc, char **argv)
     say("hevcdec: output frames %s%s", st.cached_frames ? "cacheable" : "not cacheable",
         st.cached_frames ? "" : uncached ? " (-u)\n" : st.backend == HEVCDEC_BACKEND_LINUX ? " (Linux's, write-combined)\n"
                                                                                        : " (no cache maintenance)\n");
-    if (st.cached_frames)
+    if (st.cached_frames && st.backend == HEVCDEC_BACKEND_LINUX)   /* (0.1.16) */
+        say(" (Linux's, with cache hints: the kernel invalidates each as it comes back)\n");
+    else if (st.cached_frames)
         say(" (cleaning and invalidating them before converting: %u cs of that, %u times)\n", st.cs_cache, st.cache_cleans);
     if (st.convert_waits) say("hevcdec: conversions waited for their picture %u times, %u cs\n", st.convert_waits,
                               st.cs_convert_wait);

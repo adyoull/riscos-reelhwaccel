@@ -267,11 +267,10 @@ int hevcdec_open(hevcdec **out, const hevcdec_config *c)
         if (r < 0) { free(d); return HEVCDEC_ERROR; }
         if (r == 0) {
             cur = d;
-            d->cached_frames = 0;            /* (the driver's frames: write-combined) */
             logf_(d, "hevcdec %s: Linux's rpivid (RISC OS on Linux): frames %ux%u (%s, 128-byte columns of %u lines), "
-                  "%u bytes each", HEVCDEC_VERSION, d->ctx.dst_fmt.width, d->ctx.dst_fmt.height,
+                  "%u bytes each, %s", HEVCDEC_VERSION, d->ctx.dst_fmt.width, d->ctx.dst_fmt.height,
                   c->bit_depth == 10 ? "10-bit NV12, 3 samples a word" : "NV12", d->ctx.dst_fmt.plane_fmt[0].bytesperline,
-                  d->ctx.dst_fmt.plane_fmt[0].sizeimage);
+                  d->ctx.dst_fmt.plane_fmt[0].sizeimage, d->cached_frames ? "cacheable (cache hints)" : "write-combined");
             *out = d;
             return HEVCDEC_OK;
         }

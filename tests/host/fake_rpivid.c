@@ -107,13 +107,14 @@ static struct {
     int dst_set, src_on, dst_on;
     struct { uint8_t *p; uint32_t len; int mapped, state, req; uint64_t ts; uint32_t bytesused, flags; } out[OUT_BUFS];
     int nout;
-    struct { uint8_t *p; uint32_t len; int mapped, state, err, bad; uint64_t ts; int32_t poc; int has_pic; uint32_t hash; int nslices; } cap[CAP_BUFS];
+    struct { uint8_t *p, *ram; uint32_t len; int mapped, state, err, bad; uint64_t ts; int32_t poc; int has_pic; uint32_t hash; int nslices; } cap[CAP_BUFS];
     int ncap;
     int out_ready[OUT_BUFS], nout_ready, out_done[OUT_BUFS], nout_done;
     int cap_ready[CAP_BUFS], ncap_ready, cap_done[CAP_BUFS], ncap_done;
     int held;                                   /* the CAPTURE buffer held for more slices, or -1 */
     int busy, left, job_out, job_cap;           /* a job running: its buffers, calls left */
     int decode_mode, start_code;
+    int noncoherent;                            /* (0.1.16) the CAPTURE queue's buffers cacheable (fixed by the first) */
 } v;
 
 enum { B_DEQUEUED, B_QUEUED, B_DONE };
@@ -123,7 +124,7 @@ void fake_rpivid_reset(void)
 {
     int present = fake_rpivid.present;
     for (int i = 0; i < OUT_BUFS; i++) free(v.out[i].p);
-    for (int i = 0; i < CAP_BUFS; i++) free(v.cap[i].p);
+    for (int i = 0; i < CAP_BUFS; i++) { free(v.cap[i].p); free(v.cap[i].ram); }
     memset(&v, 0, sizeof v);
     v.held = -1;
     memset(files, 0, sizeof files);
@@ -157,7 +158,7 @@ static int new_fd(int kind)
 static void free_video(void)
 {
     for (int i = 0; i < OUT_BUFS; i++) { free(v.out[i].p); v.out[i].p = NULL; }
-    for (int i = 0; i < CAP_BUFS; i++) { free(v.cap[i].p); v.cap[i].p = NULL; }
+    for (int i = 0; i < CAP_BUFS; i++) { free(v.cap[i].p); free(v.cap[i].ram); v.cap[i].p = v.cap[i].ram = NULL; }
     memset(&v, 0, sizeof v);
     v.held = -1;
 }
@@ -197,7 +198,7 @@ static void write_picture(int c)
     fake_hevc_picture_fn fn = fake_hevc_get_pictures();
     const void *py = NULL, *pu = NULL, *pv = NULL;
     int pw = 0, ph = 0, bytes = 0, ten = v.dst_fmt.pixelformat == NC30;
-    uint8_t *out = v.cap[c].p;
+    uint8_t *out = v.cap[c].ram ? v.cap[c].ram : v.cap[c].p;   /* (cacheable: the device writes memory, not the CPU's view) */
     size_t col = (size_t)v.dst_fmt.plane_fmt[0].bytesperline * 128, coff = (size_t)v.dst_fmt.height * 128;
     memset(out, 0x80, v.cap[c].len);
     if (v.cap[c].nslices && fn && fn(v.cap[c].hash, &py, &pu, &pv, &pw, &ph, &bytes) == 0 && bytes == (ten ? 2 : 1)) {
@@ -460,6 +461,13 @@ static int vid_ioctl(uint32_t req, void *arg)
     }
     case IOC(3, 'V', 8, 20): {
         struct requestbuffers *rb = arg;
+        if (rb->type == 9 && rb->memory == 1) {      /* (0.1.16) the frames' queue asked: what it allows (no buffers) */
+            CHECK(rb->count == 0, "REQBUFS of %u frames", (unsigned)rb->count);
+            rb->capabilities = 0x1 | 0x4 | 0x10 | (fake_rpivid.cache_hints ? 0x40 : 0);
+            if (!fake_rpivid.cache_hints) rb->flags &= ~1u;   /* (vb2_set_flags_and_caps) */
+            rb->count = 0;
+            return 0;
+        }
         if (rb->type != 10 || rb->memory != 1) { CHECK(0, "REQBUFS type %u memory %u", (unsigned)rb->type, (unsigned)rb->memory); return -EINVAL; }
         if (v.nout) return -EBUSY;
         if (rb->count > OUT_BUFS) rb->count = OUT_BUFS;
@@ -476,9 +484,17 @@ static int vid_ioctl(uint32_t req, void *arg)
         if (!v.dst_set) { CHECK(0, "CREATE_BUFS before the frames' format"); return -EINVAL; }
         if (cb->format.fmt.pix_mp.plane_fmt[0].sizeimage < v.dst_fmt.plane_fmt[0].sizeimage) return -EINVAL;
         if (v.ncap >= CAP_BUFS) { cb->count = 0; return -ENOMEM; }
+        cb->capabilities = 0x1 | 0x4 | 0x10 | (fake_rpivid.cache_hints ? 0x40 : 0);
+        if (!fake_rpivid.cache_hints) cb->flags &= ~1u;
+        if (v.ncap && (int)(cb->flags & 1) != v.noncoherent) {   /* (vb2: the queue's memory model is fixed) */
+            CHECK(0, "CREATE_BUFS %scoherent after %scoherent buffers", cb->flags & 1 ? "non-" : "", v.noncoherent ? "non-" : "");
+            return -EINVAL;
+        }
+        v.noncoherent = (int)(cb->flags & 1);
         cb->index = (uint32_t)v.ncap;
         v.cap[v.ncap].len = cb->format.fmt.pix_mp.plane_fmt[0].sizeimage;
         v.cap[v.ncap].p = calloc(1, v.cap[v.ncap].len);
+        if (v.noncoherent) { v.cap[v.ncap].ram = calloc(1, v.cap[v.ncap].len); fake_rpivid.cacheable_frames++; }
         v.cap[v.ncap].poc = -999;
         v.ncap++;
         fake_rpivid.creates++;
@@ -505,6 +521,10 @@ static int vid_ioctl(uint32_t req, void *arg)
                 i = v.cap_done[0];
                 memmove(v.cap_done, v.cap_done + 1, sizeof v.cap_done[0] * (size_t)--v.ncap_done);
                 v.cap[i].state = B_DEQUEUED;
+                if (v.cap[i].ram && !(b->flags & 0x800)) {   /* (cacheable: invalidated at DQBUF, the CPU sees memory) */
+                    memcpy(v.cap[i].p, v.cap[i].ram, v.cap[i].len);
+                    fake_rpivid.invalidates++;
+                }
                 b->flags = v.cap[i].err ? ERR_FLAG : 0;
                 b->tv_sec = (int32_t)(v.cap[i].ts / 1000000000u);
                 b->tv_usec = (int32_t)(v.cap[i].ts % 1000000000u / 1000);
@@ -538,6 +558,11 @@ static int vid_ioctl(uint32_t req, void *arg)
             return 0;
         }
         if (v.cap[b->index].state != B_DEQUEUED) return -EINVAL;   /* QBUF: a frame */
+        if (v.cap[b->index].ram) {                    /* (cacheable: cleaned at QBUF unless told not to) */
+            if (b->flags & 0x1000) fake_rpivid.cleans_skipped++;
+            else if (memcmp(v.cap[b->index].p, v.cap[b->index].ram, v.cap[b->index].len))
+                memcpy(v.cap[b->index].ram, v.cap[b->index].p, v.cap[b->index].len);   /* (lines the CPU changed) */
+        }
         v.cap[b->index].state = B_QUEUED;          /* (its timestamp and picture kept until a job takes it: */
         v.cap_ready[v.ncap_ready++] = (int)b->index; /* a picture before may still read it, as rpivid's phase 2 does) */
         {

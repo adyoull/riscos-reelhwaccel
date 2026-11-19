@@ -29,6 +29,6 @@ if has_encoder libx264; then "$HERE/tools/smemprobe/build.sh" "${SMEMPROBE:-0.1.
 else echo "SMEMProbe: skipped (its clips need $FFMPEG with libx264)"; fi
 "$HERE/tools/hevcprobe/build.sh" "${HEVCPROBE:-0.1}"
 "$HERE/hevchw/build.sh" "${HEVCHW:-0.1}"
-if [ -n "${FFMPEG_TARBALL:-}" ] && has_encoder libx265; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.15}"
+if [ -n "${FFMPEG_TARBALL:-}" ] && has_encoder libx265; then "$HERE/tools/hevctest/build.sh" "${HEVCTEST:-0.1.16}"
 else echo "HEVCTest: skipped (its traces need FFMPEG_TARBALL and $FFMPEG with libx265)"; fi
-"$HERE/devkit/build.sh" "${DEVKIT:-0.2.22}"
+"$HERE/devkit/build.sh" "${DEVKIT:-0.2.23}"

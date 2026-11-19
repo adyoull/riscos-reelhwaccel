@@ -37,8 +37,8 @@ Result files say which way was used ("decoding with Linux's rpivid
 driver" or "the HEVC block, driven directly"). On native RISC OS nothing
 has changed.
 
-Running it (for 0.1.15 on RISC OS on Linux, please send back Result,
-ResultT, ResultP and ResultK; on native RISC OS, as 0.1.14):
+Running it (for 0.1.16 on RISC OS on Linux with kernel 6.6.78-18,
+please send back Result and ResultT; on native RISC OS, as 0.1.14):
   GiveBack frames given back as soon as they may be, pipelined, every
            picture checked (1080p and 4K). Writes ResultG.
 
@@ -101,6 +101,13 @@ error and address first ("hevctest: signal ...").
 That turned out to be UnixLib's and ARMEABISupport's (NoHW, which never
 touches the HEVC block, does it too), so it's reported to them. Until
 it's fixed, wait a moment before starting the next Obey file.
+
+0.1.16 (hevcdec 0.1.16): on RISC OS on Linux with kernel 6.6.78-18 or
+later, Linux's frames are cacheable (rpivid allows cache hints now), so
+converting them should be as quick as on native RISC OS. The Result
+files say "cacheable (Linux's, with cache hints ...)". 0.1.15 on a Pi 4
+under ROL: every picture of every clip right, decoding at 85-90% of
+native, converting 3-4 times slower (10 ms a 1080p picture, against 2.3).
 
 0.1.15 (hevcdec 0.1.15): RISC OS on Linux, through Linux's rpivid
 driver (above). The Result files say which way was used. Linux's frames
