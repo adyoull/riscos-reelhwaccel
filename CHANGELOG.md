@@ -13,9 +13,10 @@ boundary aborted before `main`.
   library. Every program as built at hevcdec 0.1.16 had those symbols
   word aligned, by luck of the link. The zips that have run on the
   Pi all started, so none we know of was hit.
-- **Now:** `.riscos-deps` is riscos-crossdev **v1.14**. Its toolchain's
-  UnixLib (5.0.3.11 with crossdev's alignment fix) has the same code as
-  5.0.3.12. Its `check-all.sh` now checks every program's data
+- **Now:** `.riscos-deps` is riscos-crossdev **v1.14**. Its toolchain,
+  as published on GitHub, is built with UnixLib **5.0.3.12** (a test
+  build of it before publishing had 5.0.3.11 with crossdev's own fix,
+  the same code; both were checked). Its `check-all.sh` now checks every program's data
   alignment, and `ci/build.sh` also checks `libvcdec.a` and
   `libhevcdec.a` with `check-data-align.py`. Every program and both
   libraries pass, and so do all the host tests.
