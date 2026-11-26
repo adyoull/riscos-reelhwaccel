@@ -1,5 +1,27 @@
 # Changes
 
+## Built with riscos-crossdev 1.14: UnixLib's data word aligned (2026-11-26)
+
+UnixLib 5.0.3.12 (UnixLib/handoffs/2026-11-26-all-ports-unixlib-5.0.3.12-data-align.md)
+fixes `.data` sections that were byte aligned in UnixLib's own assembler
+objects (`_exist.o`, `_riscosify.o`, `_profile.o`, `_signal.o`). On a Pi
+with alignment exceptions on, a program whose link put them off a word
+boundary aborted before `main`.
+
+- **Were we hit?** Our programs link UnixLib from riscos-crossdev's
+  toolchain: 1.8.2 here, and 1.11.2 on GitHub. Both have the old
+  library. Every program as built at hevcdec 0.1.16 had those symbols
+  word aligned, by luck of the link. The zips that have run on the
+  Pi all started, so none we know of was hit.
+- **Now:** `.riscos-deps` is riscos-crossdev **v1.14**. Its toolchain's
+  UnixLib (5.0.3.11 with crossdev's alignment fix) has the same code as
+  5.0.3.12. Its `check-all.sh` now checks every program's data
+  alignment, and `ci/build.sh` also checks `libvcdec.a` and
+  `libhevcdec.a` with `check-data-align.py`. Every program and both
+  libraries pass, and so do all the host tests.
+- No library or program changed, so no new versions. Test zips built
+  from now on carry the fixed UnixLib.
+
 ## hevcdec 0.1.16, devkit 0.2.23, HEVCTest 0.1.16: cacheable frames on RISC OS on Linux (2026-11-19)
 
 HEVCTest 0.1.15 on a Pi 4 under ROL (kernel 6.6.78-17): every picture of

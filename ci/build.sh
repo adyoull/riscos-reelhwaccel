@@ -5,7 +5,10 @@
 #   check-all.sh     static linking, stack probes, no VFPv4-only
 #                    instructions in the programs or libvcdec/libhevcdec
 #                    (hevcdec_conv.c is built for NEON but must stay VFPv3
-#                    otherwise), UnixLib consistency
+#                    otherwise), UnixLib consistency, and (crossdev 1.13 on)
+#                    every program's data word aligned (UnixLib's .data was
+#                    byte aligned before 5.0.3.12 / crossdev 1.13: a program
+#                    could abort before main on a Pi)
 #   check-unaligned  casts that could make unaligned loads, in our sources.
 #                    ci/unaligned-safe lists the ones checked by hand: MMAL
 #                    messages are uint32_t arrays (LDRD needs only word
@@ -31,6 +34,10 @@ for e in out/elf/*.elf; do
   echo "== $(basename "$e")"
   "$RCD_DIR/checks/check-all.sh" "$e" out/lib/vcdec/libvcdec.a out/lib/hevcdec/libhevcdec.a || rc=1
 done
+if [ -f "$RCD_DIR/checks/check-data-align.py" ]; then
+  echo "== data alignment of libvcdec.a and libhevcdec.a"
+  python3 "$RCD_DIR/checks/check-data-align.py" out/lib/vcdec/libvcdec.a out/lib/hevcdec/libhevcdec.a || rc=1
+fi
 echo "== unaligned accesses"
 "$RCD_DIR/checks/check-unaligned.sh" -s ci/unaligned-safe -Ivcdec -Ihevcdec -Ihevcdec/shim \
   vcdec/vcdec.c vcdec/vcenc.c vcdec/vcmmal.c hevcdec/hevcdec.c hevcdec/hevcdec_hw.c hevcdec/hevcdec_conv.c \
